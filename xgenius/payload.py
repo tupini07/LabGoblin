@@ -20,13 +20,55 @@ def write(path, value):
     os.replace(temp, path)
 
 
-def identity():
+def identity(pid=None):
+    pid = os.getpid() if pid is None else pid
     if os.name == "nt":
         import psutil
-        return {"pid": os.getpid(), "created": psutil.Process().create_time()}
-    stat = Path(f"/proc/{os.getpid()}/stat").read_text()
-    return {"pid": os.getpid(), "start_ticks": stat.rsplit(")", 1)[1].split()[19],
+        return {"pid": pid, "created": psutil.Process(pid).create_time()}
+    stat = Path(f"/proc/{pid}/stat").read_text()
+    return {"pid": pid, "start_ticks": stat.rsplit(")", 1)[1].split()[19],
             "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+
+
+def inspect_linux(root, token, proc_root=Path("/proc")):
+    """A dead supervisor is not proof that its separate process session is dead."""
+    boot_id = (proc_root / "sys/kernel/random/boot_id").read_text().strip()
+    for filename in ("payload-handle.json", "process-handle.json"):
+        path = root / filename
+        if not path.exists():
+            return "unknown"
+        handle = json.loads(path.read_text(encoding="utf-8"))
+        if handle.get("token") != token:
+            raise ValueError("Payload process ownership mismatch")
+        if "boot_id" not in handle:
+            return "unknown"
+        if handle["boot_id"] != boot_id:
+            return "dead"
+        try:
+            parts = (proc_root / str(handle["pid"]) / "stat").read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            parts = None
+        if parts and parts[19] == handle["start_ticks"] and parts[0] != "Z":
+            return "alive"
+        if filename == "process-handle.json":
+            if parts and parts[19] != handle["start_ticks"]:
+                return "unknown"
+            for entry in proc_root.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                except FileNotFoundError:
+                    continue
+                if fields[0] != "Z" and str(handle["pid"]) in (fields[2], fields[3]):
+                    return "alive"
+    for pattern in ("input-validator-*", "validator-*"):
+        for directory in root.glob(pattern):
+            if directory.is_dir():
+                state = inspect_linux(directory, token, proc_root)
+                if state != "dead":
+                    return state
+    return "dead"
 
 
 def group_memory_mb(group):
@@ -157,6 +199,11 @@ def main(manifest):
                 if hasattr(os, "sched_setaffinity"):
                     cpus = sorted(os.sched_getaffinity(process.pid))[:spec["cpus"]]
                     os.sched_setaffinity(process.pid, cpus)
+            try:
+                write(root / "process-handle.json", {**identity(process.pid), "token": spec["id"]})
+            except (FileNotFoundError, ProcessLookupError):
+                if process.poll() is None:
+                    raise
             while process.poll() is None:
                 memory_mb = process.peak_memory_mb() if os.name == "nt" else group_memory_mb(process.pid)
                 peak_memory_mb = max(peak_memory_mb, memory_mb)
@@ -243,4 +290,8 @@ def main(manifest):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if sys.argv[1] == "--inspect":
+        spec = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+        print(inspect_linux(Path(spec["root"]), spec["id"]))
+    else:
+        main(sys.argv[1])

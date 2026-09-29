@@ -211,6 +211,8 @@ Do not modify shared inputs/environments, push commits, create issues/PRs, uploa
 or use remote compute. This is trusted local mode, not an OS sandbox.
 Events for this turn:
 {json.dumps(events, indent=2)}
+If events you need to handle arrive after this batch, return "continue" to receive
+them in the next turn. Never acknowledge an event ID outside the batch above.
 When finished, append your findings and next steps with `xgenius journal write`.
 Write a JSON object to {result_path} with exactly these fields:
 turn_id: "{turn_id}"
@@ -242,7 +244,8 @@ Do not claim scientific success merely because a process exited zero.
                     has_work = any(a["status"] in ACTIVE for a in self.state.attempts())
                     target = "finishing" if has_work else "completed"
                 elif disposition == "wait":
-                    target = "waiting" if has_work else "blocked"
+                    target = ("waiting" if has_work else
+                              "running" if self.state.pending_events() else "blocked")
                 elif disposition == "blocked":
                     target = "blocked"
                 else:

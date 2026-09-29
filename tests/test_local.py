@@ -253,6 +253,63 @@ def test_wait_without_work_blocks(campaign):
     assert campaign.state.campaign()["state"] == "blocked"
 
 
+def test_wait_handles_completions_arriving_during_turn(campaign):
+    campaign = configure_agent(campaign, agent_source("wait"))
+    turn_id, process, directory = campaign._begin_turn()
+    campaign.state.event("completion", {"attempt_id": "completed-during-turn"}, "late-completion")
+    deadline = time.monotonic() + 15
+    while process.poll() is None:
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+    campaign._end_turn(turn_id, process, directory)
+    assert campaign.state.campaign()["state"] == "running"
+    assert [e["id"] for e in campaign.state.pending_events()] == ["late-completion"]
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("supervisor-alive", "alive"), ("child-alive", "alive"), ("descendant-alive", "alive"),
+    ("validator-alive", "alive"), ("input-validator-alive", "alive"), ("validator-gone", "dead"),
+    ("gone", "dead"), ("reboot", "dead"), ("missing-handle", "unknown"), ("recycled-pid", "unknown"),
+])
+def test_linux_session_liveness_after_supervisor_loss(tmp_path, case, expected):
+    from xgenius.payload import inspect_linux
+    root = tmp_path / "attempt"
+    root.mkdir()
+    proc = tmp_path / "proc"
+    boot = proc / "sys" / "kernel" / "random" / "boot_id"
+    boot.parent.mkdir(parents=True)
+    boot.write_text("new-boot" if case == "reboot" else "original-boot")
+    for filename, pid in (("payload-handle.json", 10), ("process-handle.json", 20)):
+        if case == "missing-handle" and pid == 20:
+            continue
+        (root / filename).write_text(json.dumps({
+            "pid": pid, "start_ticks": "100", "boot_id": "original-boot", "token": "owned",
+        }))
+    def process(pid, group, ticks="100"):
+        directory = proc / str(pid)
+        directory.mkdir()
+        fields = ["S", "1", str(group), str(group)] + ["0"] * 15 + [ticks]
+        (directory / "stat").write_text(f"{pid} (fixture) " + " ".join(fields))
+    if case == "supervisor-alive":
+        process(10, 10)
+    elif case == "child-alive":
+        process(20, 20)
+    elif case == "descendant-alive":
+        process(30, 20)
+    elif case == "recycled-pid":
+        process(20, 20, "200")
+    elif case in ("validator-alive", "input-validator-alive", "validator-gone"):
+        directory = root / ("input-validator-0" if case == "input-validator-alive" else "validator-0")
+        directory.mkdir()
+        (directory / "payload-handle.json").write_bytes((root / "payload-handle.json").read_bytes())
+        (directory / "process-handle.json").write_text(json.dumps({
+            "pid": 40, "start_ticks": "100", "boot_id": "original-boot", "token": "owned",
+        }))
+        if case != "validator-gone":
+            process(40, 40)
+    assert inspect_linux(root, "owned", proc) == expected
+
+
 def test_agent_must_update_journal(campaign):
     campaign = configure_agent(campaign, agent_source().replace(
         "(root/'journal.md').write_text('Observed evidence '+tid,encoding='utf-8')", "pass"), retries=0)

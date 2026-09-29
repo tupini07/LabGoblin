@@ -171,7 +171,7 @@ Linux descendants or unrestricted host tools require stronger isolation.
 
 The campaign's elapsed limit starts on its first run and includes paused time.
 It stops new admission rather than killing admitted experiments. Each attempt
-has a separate hard walltime. GPU budgets reserve requested maximum duration
+has a separate supervised walltime. GPU budgets reserve requested maximum duration
 and account for terminal outcomes, including failures and cancellation. Running
 usage is an estimate; unknown/lost execution retains conservative reservations.
 Agent research, report and compact sessions count toward `max_turns` and have
@@ -199,8 +199,10 @@ no token-to-dollar conversion or hard financial/subagent cap is claimed.
 Each turn acknowledges only its assigned event IDs, references an updated
 `.xgenius/journal.md`, and returns continue/wait/blocked/complete with a reason.
 Invalid output leaves events unacknowledged and retries only within configured
-bounds. Waiting with no work blocks; completion cancels undispatched work and
-drains admitted work. Events arriving during a turn remain distinct.
+bounds. Waiting with no work or pending events blocks. A wait decision still
+triggers another turn when completions arrived during the previous turn, even
+if the last job has already finished. Explicit completion cancels undispatched
+work and drains admitted work; unacknowledged events remain recorded.
 
 Independent worker/agent supervisors persist identity and completion receipts.
 Controller termination does not cancel experiments. On resume, receipt ingestion
@@ -210,6 +212,14 @@ and block the campaign. Inspect the exact attempt directory, supervisor logs,
 backend handle and original engine/distro. Restore access and reconcile. There is
 intentionally no force-release-on-stale-heartbeat command; do not delete the ledger
 or reset state to bypass an unresolved reservation.
+
+Linux/WSL recovery checks the recorded workload process session and validator
+sessions, not only the guest supervisor PID. An orphaned live session keeps its
+reservation; missing launch identities remain unresolved rather than being
+assumed dead. If the guest supervisor itself is lost, its deadline/cancellation
+monitor is also lost. `cancel` records the request but reports that recovery is
+required; inspect and stop the identified owned workload before reconciling.
+Controller loss alone does not have this limitation: the supervisor continues.
 
 Local schema upgrades are transactional and backed up. Historical legacy records
 are not replayed as new local events. New SLURM jobs have cluster-qualified tracker
@@ -248,6 +258,10 @@ does not install proxy certificates or authorize network/credential bypasses.
 python -m pytest tests -q
 $env:XGENIUS_INTEGRATION = "1"
 python -m pytest tests\test_local.py -q
+$env:XGENIUS_SYSTEM_E2E = "1"
+python -m pytest tests\test_system.py -q -k "not live_copilot"
+$env:XGENIUS_LIVE_AGENT = "1"
+python -m pytest tests\test_system.py -q -k "live_copilot"
 ```
 
 The opt-in suite requires prepared Ubuntu WSL2 and local Docker Desktop with
@@ -255,3 +269,11 @@ The opt-in suite requires prepared Ubuntu WSL2 and local Docker Desktop with
 for automated coverage. CUDA execution requires a separately prepared environment
 and an available GPU; successful CPU execution or device enumeration is not a
 CUDA validation.
+
+Full-system tests exercise the actual CLI, shared reservations, controller and
+backend faults, artifacts, dashboard downloads, partial batch errors, cancellation,
+and a tiny local Docker build using that existing base image. They clean up only
+their owned processes/containers/test images and retain logs under pytest's
+temporary directory. Live-agent tests additionally require authenticated Copilot
+and consume provider usage for research, report, and compaction turns. They use
+only synthetic inputs; no real research data or remote compute is involved.

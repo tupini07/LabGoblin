@@ -170,18 +170,17 @@ def inspect_payload(spec: dict) -> str:
     if handle.get("token") != spec["id"]:
         raise ValueError("Payload ownership token mismatch")
     if runner["kind"] == "local":
-        return "alive" if alive(handle) else "dead"
+        if os.name == "nt":
+            return "alive" if alive(handle) else "dead"
+        try:
+            return payload.inspect_linux(root, spec["id"])
+        except OSError:
+            return "unknown"
     if "boot_id" not in handle:
         return "unknown"
-    code = (
-        "from pathlib import Path; import sys; "
-        "p=Path('/proc/'+sys.argv[1]+'/stat'); "
-        "print('alive' if p.exists() and p.read_text().rsplit(')',1)[1].split()[19]"
-        "==sys.argv[2] and Path('/proc/sys/kernel/random/boot_id').read_text().strip()"
-        "==sys.argv[3] else 'dead')"
-    )
     try:
+        guest_root = wsl_path(runner, spec["root"])
         return command(["wsl", "-d", runner["distro"], "--exec", runner["python"],
-                        "-c", code, str(handle["pid"]), handle["start_ticks"], handle["boot_id"]])
+                        f"{guest_root}/payload.py", "--inspect", f"{guest_root}/payload.json"])
     except (RuntimeError, subprocess.TimeoutExpired):
         return "unknown"
