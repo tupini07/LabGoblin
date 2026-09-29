@@ -2,7 +2,7 @@
 
 LLM-oriented autonomous research platform for SLURM clusters.
 
-xgenius enables Claude Code to autonomously run experiments on SLURM clusters: formulate hypotheses, modify code, submit jobs, analyze results, and iterate — with safety guarantees for shared infrastructure.
+xgenius enables Claude Code or GitHub Copilot CLI to autonomously run experiments on SLURM clusters: formulate hypotheses, modify code, submit jobs, analyze results, and iterate — with safety guarantees for shared infrastructure.
 
 ## How it works
 
@@ -10,7 +10,7 @@ xgenius enables Claude Code to autonomously run experiments on SLURM clusters: f
 ┌─────────────────────────────────────────────────────────────┐
 │  Your dev machine                                           │
 │                                                             │
-│  Claude Code ←──── xgenius watch (wakes Claude on job done) │
+│  Research agent ←── xgenius watch (wakes agent on job done)   │
 │    ↓ calls                         ↑ polls clusters         │
 │  xgenius submit / status / pull / journal / ...             │
 └──────────────────────────┬──────────────────────────────────┘
@@ -22,15 +22,15 @@ xgenius enables Claude Code to autonomously run experiments on SLURM clusters: f
 └─────────────────────────────────────────────────────────────┘
 ```
 
-1. Claude submits experiments via `xgenius submit`
+1. Your research agent submits experiments via `xgenius submit`
 2. Jobs run on the cluster inside Singularity containers
-3. `xgenius watch` daemon detects completions and triggers `claude --continue`
-4. Claude wakes up, pulls results, analyzes, and iterates
+3. `xgenius watch` daemon detects completions and starts the configured CLI with `-p`
+4. The agent wakes up, pulls results, analyzes, and iterates
 
 ## Prerequisites
 
 - Python 3.11+
-- [Claude Code](https://claude.ai/code) with an active subscription
+- [Claude Code](https://claude.ai/code) or [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli), installed and authenticated with access to the chosen service
 - SSH access to at least one SLURM cluster
 - Docker + Singularity/Apptainer (for container builds)
 
@@ -46,15 +46,23 @@ pip install -e .
 
 ## One-time setup
 
-### 1. Set up Claude Code auth token
+### 1. Authenticate your research CLI
 
-`xgenius watch` needs to invoke `claude --continue` non-interactively. This requires a long-lived auth token:
+**Claude Code (the default):** Set up a long-lived token for non-interactive sessions:
 
 ```bash
 claude setup-token
 ```
 
-**Important:** Make sure you do NOT have an `ANTHROPIC_API_KEY` environment variable set, as it overrides subscription auth and causes failures.
+**Important for Claude:** Make sure you do NOT have an `ANTHROPIC_API_KEY` environment variable set when starting the initial session, as it overrides subscription auth. xgenius removes this variable from Claude child processes without changing the parent environment.
+
+**GitHub Copilot CLI:** Install the standalone `copilot` command (not the old `gh copilot` extension), then authenticate:
+
+```bash
+copilot login
+```
+
+Authenticate as the same OS user that will run `xgenius watch`. Copilot child processes inherit your environment unchanged.
 
 ### 2. Set up SSH access to your clusters
 
@@ -74,7 +82,7 @@ Host mycluster
 
 ### 1. Create a dedicated research repo
 
-**Important:** Claude needs push access to the repo. Create a **new repo** for your research (do NOT fork — Claude might accidentally PR upstream).
+**Important:** The agent needs push access to the repo. Create a **new repo** for your research (do NOT fork — the agent might accidentally PR upstream).
 
 ```bash
 # Option A: Start from an existing codebase
@@ -96,7 +104,7 @@ git init
 ```
 
 **Requirements:**
-- Claude must be able to `git push` — use SSH keys or `gh auth login`
+- The agent must be able to `git push` — use SSH keys or `gh auth login`
 - `gh` CLI should be installed (`brew install gh` / `sudo apt install gh`)
 - The repo should be private if your research is pre-publication
 
@@ -104,21 +112,25 @@ git init
 
 ```bash
 cd auto-myproject
-xgenius init
+xgenius init --agent copilot   # GitHub Copilot CLI
+# Or: xgenius init            # Claude Code (default)
 ```
 
-This interactively creates:
+This creates:
 - `xgenius.toml` — cluster config, SLURM settings, safety limits
-- `research_goal.md` — describe what you want Claude to achieve
+- `research_goal.md` — describe what you want the agent to achieve
 - `.xgenius/` — runtime state directory with templates, journal, job tracker
-- `CLAUDE.md` — tool documentation and git conventions for Claude
+- `CLAUDE.md` — shared tool documentation and git conventions; both Claude Code and Copilot CLI read this file
+
+**Existing projects:** To switch agents, edit `[watcher].trigger_command` in `xgenius.toml` to `"copilot --allow-all"` and restart the watcher. This also selects Copilot for `xgenius report` and `xgenius compact`. No reinitialization or instruction-file migration is needed; avoid `init --force`, which overwrites your config.
 
 ### 2. Configure `xgenius.toml`
 
-The config file has three sections. **Read the [Configuration Guide](#configuration-guide) below carefully** — getting this right is critical.
+The config file has four sections. **Read the [Configuration Guide](#configuration-guide) below carefully** — getting this right is critical.
 
 Key things to set:
-- **`[safety]`** — maximum resource limits Claude cannot exceed
+- **`[safety]`** — maximum resource limits enforced by xgenius
+- **`[watcher]`** — polling interval and research CLI command
 - **`[clusters.NAME]`** — SSH hostname (must match `~/.ssh/config`), paths on the cluster
 - **`[clusters.NAME.slurm]`** — default SLURM parameters and available GPU types
 
@@ -126,17 +138,17 @@ See [`examples/xgenius.toml`](examples/xgenius.toml) for a fully commented examp
 
 ### 3. Edit your research goal
 
-Open `research_goal.md` and describe your objective, baselines, success criteria, and constraints. Be specific — this is what Claude reads to decide what experiments to run.
+Open `research_goal.md` and describe your objective, baselines, success criteria, and constraints. Be specific — this is what the agent reads to decide what experiments to run.
 
 ### 4. Build and push the container
 
-Open Claude Code in your project directory and tell it:
+Open Claude Code or Copilot CLI in your project directory and tell it:
 
 ```
 Build the Singularity container for this project. Make sure the code runs correctly inside it. Then push it to the cluster.
 ```
 
-Claude will:
+The agent will:
 - Examine the Dockerfile and fix issues (outdated base images, missing deps)
 - Run `xgenius build --json` (docker build → test → singularity convert)
 - Run `xgenius push-image --cluster NAME --json` (push + verify on cluster)
@@ -149,16 +161,23 @@ Run in a single terminal (tmux recommended):
 
 ```bash
 cd auto-myproject
+copilot -p "Start the autonomous research loop. Read CLAUDE.md and research_goal.md and begin." --allow-all ; xgenius watch
+```
+
+Or, for Claude Code:
+
+```bash
+cd auto-myproject
 claude -p "Start the autonomous research loop. Read CLAUDE.md and research_goal.md and begin." --dangerously-skip-permissions ; xgenius watch
 ```
 
-The agent runs first (`claude -p`), does its initial work (reads goal, submits baseline experiments), and exits. Then the watcher daemon starts automatically (`&&`), polls clusters for completed jobs, and triggers a **fresh** `claude -p "..."` session when results are ready. Each wake-up is a clean session — no stale context accumulation.
+Use the same CLI selected in `xgenius.toml`. The agent runs first, does its initial work (reads goal, submits baseline experiments), and exits. Then the watcher daemon starts automatically (`;`), polls clusters for completed jobs, and triggers a **fresh** `copilot -p "..."` or `claude -p "..."` session when results are ready. Each wake-up is a clean session — no stale context accumulation.
 
-**Important:** The `;` ensures the watcher starts after the initial agent exits, even if Claude hits rate limits. Do NOT run them in parallel — it causes duplicate Claude sessions.
+**Important:** The `;` ensures the watcher starts after the initial agent exits, even if it hits rate limits. Do NOT run them in parallel — it causes duplicate agent sessions.
 
-**Safety:** The watcher will never trigger Claude if another Claude process is already running in the project directory. Completions are accumulated and delivered in the next cycle.
+**Permissions:** The default autonomous commands bypass approval prompts. Copilot's `--allow-all` grants tools, paths, and URLs; Claude uses `--dangerously-skip-permissions`. Only use these in a trusted project. The xgenius safety limits apply to operations routed through xgenius, not to arbitrary commands the CLI can execute. You can customize `trigger_command` with narrower permissions, but unattended tasks will fail if required operations are not permitted.
 
-**Warning:** Do not start other Claude Code sessions in the same project directory while the research loop is running — the watcher detects Claude processes by directory and will skip polling cycles until they exit.
+**Warning:** Run only one watcher and do not start other research-agent sessions in the same project directory while the loop is running. The watcher waits for its own child to exit and uses `.xgenius/watcher.lock`; it does not detect independently launched Claude or Copilot sessions.
 
 **Monitor progress:**
 ```bash
@@ -199,14 +218,14 @@ The config has four sections. See [`examples/xgenius.toml`](examples/xgenius.tom
 ```toml
 [project]
 name = "my-research"                 # Project name
-research_goal = "research_goal.md"   # Path to research goal (Claude reads this)
+research_goal = "research_goal.md"   # Path to research goal (the agent reads this)
 container_image = "my-project.sif"   # Singularity image filename
 dockerfile = "Dockerfile"            # Path to Dockerfile
 ```
 
-#### `[safety]` — Hard limits Claude cannot exceed
+#### `[safety]` — Hard limits enforced by xgenius
 
-These are **maximums**. Claude can request less per-job via `--gpus`, `--cpus`, `--memory`, `--walltime` flags. Set these to the most you'd ever want a single job to use.
+These are **maximums**. The agent can request less per-job via `--gpus`, `--cpus`, `--memory`, `--walltime` flags. Set these to the most you'd ever want a single job to use.
 
 ```toml
 [safety]
@@ -229,12 +248,21 @@ require_singularity = true           # All jobs must run inside a container
 ```toml
 [watcher]
 poll_interval_seconds = 60           # How often to check for completed jobs
-trigger_command = "claude --continue" # Command to wake Claude up
+trigger_command = "copilot --allow-all" # Used by watch, report, and compact
+# Claude default: trigger_command = "claude --dangerously-skip-permissions"
 ```
+
+The command is parsed into arguments without a shell, and xgenius appends `-p` and the task prompt. Do not include a prompt or use shell operators such as pipes, redirects, or `&&`. Use shell-style quotes around paths or argument values containing spaces. For Windows paths, a TOML literal string preserves backslashes, with double quotes around the executable:
+
+```toml
+trigger_command = '"C:\Program Files\Copilot\copilot.exe" --allow-all'
+```
+
+Additional CLI options, such as `--model YOUR_MODEL`, apply to all three operations. Missing watcher settings default to Claude; existing explicit commands remain unchanged. Avoid `--continue` or `--resume` unless you deliberately want to reuse session context instead of starting fresh.
 
 #### `[clusters.NAME]` — One section per SLURM cluster
 
-You can define multiple clusters. Claude will submit jobs to whichever cluster you configure.
+You can define multiple clusters. The agent will submit jobs to whichever cluster you configure.
 
 ```toml
 [clusters.mycluster]
@@ -250,7 +278,7 @@ sbatch_template = "slurm_account_template.sbatch"
 
 #### `[clusters.NAME.slurm]` — Default SLURM parameters
 
-These are **defaults** — used when Claude doesn't specify overrides. Claude can request different values per-job within the `[safety]` limits.
+These are **defaults** — used when the agent doesn't specify overrides. The agent can request different values per-job within the `[safety]` limits.
 
 ```toml
 [clusters.mycluster.slurm]
@@ -258,7 +286,7 @@ account = "my-allocation"            # SLURM account (--account). Leave "" if us
 partition = ""                       # SLURM partition (--partition). Leave "" if using account.
 num_gpus = 1                         # Default GPUs per job
 gpu_type = "a100"                    # Default GPU type. Leave "" for any GPU.
-available_gpu_types = [              # All GPU types Claude can pick from on this cluster
+available_gpu_types = [              # All GPU types the agent can pick from on this cluster
     "a100",                          # List the GPU types available on your cluster
     "v100",
 ]
@@ -273,7 +301,7 @@ output_dir_container = "/results"    # Mount point inside the container
 
 ### Resource management
 
-Claude can override defaults per-job using flags on `xgenius submit`:
+The agent can override defaults per-job using flags on `xgenius submit`:
 
 | Flag | Description | Example |
 |------|-------------|---------|
@@ -283,11 +311,11 @@ Claude can override defaults per-job using flags on `xgenius submit`:
 | `--memory SIZE` | RAM | `--memory "16G"` |
 | `--walltime TIME` | Job duration | `--walltime "02:00:00"` |
 
-Claude uses `xgenius job-history --json` to learn how long past jobs took and adjusts future requests accordingly. `xgenius status --json` shows pending times and queue reasons so Claude can make smart scheduling decisions.
+The agent uses `xgenius db jobs --status completed --json` to learn how long past jobs took and adjusts future requests accordingly. `xgenius status --json` shows pending times and queue reasons so the agent can make smart scheduling decisions.
 
 ### Multiple clusters
 
-Define multiple clusters to let Claude distribute jobs across them:
+Define multiple clusters to let the agent distribute jobs across them:
 
 ```toml
 [clusters.gpu-cluster]
@@ -299,11 +327,11 @@ hostname = "cpu-cluster"
 # ... (smaller cluster for quick tests)
 ```
 
-Claude will see all configured clusters and can choose which to submit to based on availability and GPU types.
+The agent will see all configured clusters and can choose which to submit to based on availability and GPU types.
 
 ## Safety
 
-Safety is enforced in Python code — Claude cannot bypass it:
+Safety is enforced in Python code for operations routed through xgenius:
 
 1. **Command validation**: Only allowed prefixes (e.g., `python`). Shell injection blocked.
 2. **Resource limits**: Max GPUs, CPUs, memory, walltime per job (from `[safety]`).
@@ -320,6 +348,7 @@ All commands support `--json` for structured output.
 | Command | Purpose |
 |---------|---------|
 | `xgenius init` | Initialize project (creates config, research goal, CLAUDE.md) |
+| `xgenius init --agent copilot` | Initialize using GitHub Copilot CLI instead of Claude Code |
 | `xgenius build` | Build Singularity container (docker build → test → convert) |
 | `xgenius push-image` | Push container to cluster and verify |
 | `xgenius verify-image` | Verify container exists on cluster |
@@ -333,7 +362,7 @@ All commands support `--json` for structured output.
 | `xgenius sync` | Rsync project code to cluster |
 | `xgenius pull` | Pull results from cluster |
 | `xgenius ls` | List files on cluster |
-| `xgenius journal context` | Full research context for Claude |
+| `xgenius journal context` | Full research context for the agent |
 | `xgenius journal summary` | Concise progress summary |
 | `xgenius journal add-hypothesis` | Record a hypothesis |
 | `xgenius journal add-result` | Record experiment results |
@@ -345,11 +374,12 @@ All commands support `--json` for structured output.
 | `xgenius db active` | Currently running/submitted jobs |
 | `xgenius db hypothesis-check --id H` | Check if all jobs for a hypothesis are done |
 | `xgenius results summary` | Results bank overview |
-| `xgenius journal read` | Read research journal (Claude's memory) |
+| `xgenius journal read` | Read research journal (the agent's memory) |
 | `xgenius journal write "..."` | Append to research journal |
-| `xgenius report` | Generate full research report from journal |
+| `xgenius report` | Generate full research report using the configured CLI |
+| `xgenius compact` | Compact the research journal using the configured CLI (backs up the original) |
 | `xgenius reset` | Clear all state for a fresh research run |
-| `xgenius watch` | Background daemon (triggers Claude on job completion) |
+| `xgenius watch` | Background daemon (triggers the configured CLI on job completion) |
 | `xgenius dashboard` | Web-based DB browser for human inspection |
 
 ## Examples

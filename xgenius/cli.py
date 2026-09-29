@@ -34,7 +34,7 @@ def _load_config(args):
     from xgenius.config import load_config
     try:
         return load_config(args.config)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         _output({"error": str(e)}, getattr(args, "json", False))
         sys.exit(1)
 
@@ -43,7 +43,7 @@ def _load_config(args):
 
 def cmd_init(args):
     """Set up autonomous research project with template config."""
-    from xgenius.config import ensure_xgenius_dir
+    from xgenius.config import AGENT_COMMANDS
 
     project_dir = os.getcwd()
     config_path = os.path.join(project_dir, "xgenius.toml")
@@ -77,7 +77,7 @@ require_singularity = true
 
 [watcher]
 poll_interval_seconds = 60
-trigger_command = "claude --dangerously-skip-permissions"
+trigger_command = "{AGENT_COMMANDS[args.agent]}"
 
 # --- Add your clusters below ---
 # Copy and modify this template for each cluster.
@@ -204,12 +204,12 @@ runs/
     console.print("  2. Edit xgenius.toml to adjust safety limits and cluster settings")
     console.print("  3. Build your container: xgenius build")
     console.print("  4. Push to cluster: xgenius push-image --cluster <name>")
-    console.print("  5. Start the watcher: xgenius watch")
-    console.print("  6. Let Claude begin research!")
+    console.print(f"  5. Start research with {args.agent} and let that session finish")
+    console.print("  6. Then start the watcher: xgenius watch")
 
 
 def _write_claude_md(project_dir: str):
-    """Create or append CLAUDE.md with xgenius tool documentation."""
+    """Write shared research instructions (read by Claude Code and Copilot CLI)."""
     claude_md_path = os.path.join(project_dir, "CLAUDE.md")
 
     xgenius_section = """
@@ -450,7 +450,7 @@ When you need to build/rebuild the container:
             console.print("[green]Appended xgenius docs to CLAUDE.md[/green]")
     else:
         with open(claude_md_path, "w") as f:
-            f.write("# CLAUDE.md\n\nThis file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.\n")
+            f.write("# CLAUDE.md\n\nShared instructions for Claude Code and GitHub Copilot CLI when working in this repository.\n")
             f.write(xgenius_section)
         console.print("[green]Created CLAUDE.md with xgenius docs[/green]")
 
@@ -801,8 +801,8 @@ def cmd_results(args):
 # --- Report ---
 
 def cmd_report(args):
-    """Spawn a Claude agent to generate a thorough research report."""
-    import subprocess
+    """Spawn the configured agent to generate a thorough research report."""
+    from xgenius.agent import run_agent
     config = _load_config(args)
     from xgenius.config import get_project_dir
 
@@ -865,28 +865,39 @@ Write a markdown report with:
 5. The entire `report/` directory should be downloadable as a standalone research report
 """
 
-    console.print("[bold]Generating research report...[/bold]")
-    console.print("This spawns a Claude agent to analyze all data and produce a thorough report.")
+    if not args.json:
+        console.print("[bold]Generating research report...[/bold]")
+        console.print("This spawns the configured agent to analyze all data and produce a thorough report.")
 
-    result = subprocess.run(
-        ["claude", "-p", prompt, "--dangerously-skip-permissions"],
-        cwd=project_dir,
-    )
+    try:
+        result = run_agent(config, prompt, capture_output=args.json)
+    except OSError as e:
+        _output({"status": "error", "reason": f"Could not start report agent: {e}"}, args.json)
+        sys.exit(1)
 
     if result.returncode == 0:
-        console.print(f"[green]Report saved to {report_dir}/[/green]")
-        import webbrowser
-        if os.path.exists(output_html):
-            webbrowser.open(f"file://{os.path.abspath(output_html)}")
+        if args.json:
+            _output({"status": "generated", "report_dir": report_dir}, True)
+        else:
+            console.print(f"[green]Report saved to {report_dir}/[/green]")
+            import webbrowser
+            if os.path.exists(output_html):
+                webbrowser.open(f"file://{os.path.abspath(output_html)}")
     else:
-        console.print(f"[red]Report generation failed (exit code {result.returncode})[/red]")
+        _output({
+            "status": "error",
+            "reason": f"Report generation failed (exit code {result.returncode})",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }, args.json)
+        sys.exit(1)
 
 
 # --- Compact ---
 
 def cmd_compact(args):
-    """Spawn a Claude agent to compact the research journal."""
-    import subprocess
+    """Spawn the configured agent to compact the research journal."""
+    from xgenius.agent import run_agent
     import tempfile
     config = _load_config(args)
     from xgenius.journal import ResearchJournal
@@ -908,7 +919,7 @@ def cmd_compact(args):
 
     if not args.json:
         console.print(f"[bold]Compacting journal ({original_lines} lines, {original_size:,} chars)...[/bold]")
-        console.print("Spawning a Claude agent to distill the journal while preserving essential research context.")
+        console.print("Spawning the configured agent to distill the journal while preserving essential research context.")
 
     # Write current journal to a temp file for the agent to read
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", prefix="journal_full_", dir=project_dir, delete=False)
@@ -996,28 +1007,37 @@ For each hypothesis that matters:
 - Use the timestamp format: **[YYYY-MM-DD HH:MM UTC]**
 """
 
-    result = subprocess.run(
-        ["claude", "-p", prompt, "--dangerously-skip-permissions"],
-        cwd=project_dir,
-    )
+    try:
+        result = run_agent(config, prompt, capture_output=args.json)
+    except OSError as e:
+        os.unlink(tmp.name)
+        os.unlink(compact_out.name)
+        _output({"status": "error", "reason": f"Could not start compaction agent: {e}"}, args.json)
+        sys.exit(1)
 
     if result.returncode != 0:
         # Clean up temp files
         os.unlink(tmp.name)
         os.unlink(compact_out.name)
-        _output({"status": "error", "reason": "Compaction agent failed."}, args.json)
+        _output({
+            "status": "error",
+            "reason": f"Compaction agent failed (exit code {result.returncode}).",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }, args.json)
         if not args.json:
             console.print("[red]Compaction failed.[/red]")
-        return
+        sys.exit(1)
 
     # Read the compacted output
     if not os.path.exists(compact_out.name) or os.path.getsize(compact_out.name) == 0:
         os.unlink(tmp.name)
-        os.unlink(compact_out.name)
+        if os.path.exists(compact_out.name):
+            os.unlink(compact_out.name)
         _output({"status": "error", "reason": "Agent produced empty output."}, args.json)
         if not args.json:
             console.print("[red]Agent produced empty output — journal unchanged.[/red]")
-        return
+        sys.exit(1)
 
     with open(compact_out.name) as f:
         compacted = f.read()
@@ -1258,6 +1278,8 @@ def main():
     # init
     p = subparsers.add_parser("init", parents=[parent_parser], help="Initialize xgenius in current project")
     p.add_argument("--force", action="store_true", help="Overwrite existing config")
+    p.add_argument("--agent", choices=["claude", "copilot"], default="claude",
+                   help="Research CLI to use for watch, report, and compact (default: claude)")
     p.set_defaults(func=cmd_init)
 
     # submit
@@ -1362,7 +1384,7 @@ def main():
     p.set_defaults(func=cmd_journal)
 
     # compact
-    p = subparsers.add_parser("compact", parents=[parent_parser], help="Compact the research journal (spawn Claude agent)")
+    p = subparsers.add_parser("compact", parents=[parent_parser], help="Compact the research journal (spawn configured agent)")
     p.set_defaults(func=cmd_compact)
 
     # budget

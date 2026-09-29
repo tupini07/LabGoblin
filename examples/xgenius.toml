@@ -1,11 +1,12 @@
 # xgenius.toml — Example configuration
 #
 # This file is created by `xgenius init` and lives in your project root.
-# Humans edit this file. Claude reads it but cannot modify it.
+# Humans edit this file. The research agent reads it.
 #
-# Three sections:
+# Four sections:
 #   [project]  — project metadata
-#   [safety]   — resource limits and command restrictions (the ceiling Claude cannot exceed)
+#   [safety]   — resource limits and command restrictions enforced by xgenius
+#   [watcher]  — polling interval and CLI used by watch, report, and compact
 #   [clusters] — one section per SLURM cluster with connection info and default job parameters
 
 # ============================================================================
@@ -14,14 +15,14 @@
 
 [project]
 name = "my-research"                   # Project name (used in logging)
-research_goal = "research_goal.md"     # Path to research goal file (Claude reads this)
+research_goal = "research_goal.md"     # Path to research goal file (the agent reads this)
 container_image = "my-project.sif"     # Singularity image filename
 dockerfile = "Dockerfile"             # Path to Dockerfile for container builds
 
 # ============================================================================
-# SAFETY — Maximum limits Claude cannot exceed
+# SAFETY — Maximum limits enforced by xgenius
 # ============================================================================
-# These are hard ceilings. Claude can request LESS via --gpus, --cpus,
+# These are hard ceilings. The agent can request LESS via --gpus, --cpus,
 # --memory, --walltime, --gpu-type flags on xgenius submit.
 
 [safety]
@@ -32,7 +33,7 @@ max_walltime = "48:00:00"             # Max walltime per job
 max_concurrent_jobs = 50               # Max jobs running/pending at once
 max_total_gpu_hours = 10000            # Total GPU-hours budget across all experiments
 
-# Commands Claude is allowed to run inside the container
+# Commands the agent is allowed to run inside the container
 allowed_command_prefixes = ["python"]
 
 # Patterns that are always blocked (shell injection protection)
@@ -44,12 +45,17 @@ forbidden_patterns = [
 require_singularity = true             # All jobs must run inside a container
 
 # ============================================================================
-# WATCHER — Background daemon that triggers Claude on job completion
+# WATCHER — Background daemon that triggers the agent on job completion
 # ============================================================================
 
 [watcher]
 poll_interval_seconds = 60             # How often to check for completed jobs
-trigger_command = "claude --dangerously-skip-permissions"  # Command to wake Claude up (fresh session each time, must skip permissions)
+trigger_command = "claude --dangerously-skip-permissions"  # Claude Code (default)
+# For GitHub Copilot CLI, replace the command above with:
+# trigger_command = "copilot --allow-all"
+# Used by watch, report, and compact. xgenius appends -p and the prompt.
+# These defaults bypass approval prompts; use only in trusted projects.
+# Add CLI options here (e.g. --model YOUR_MODEL); do not add -p or a prompt.
 
 # ============================================================================
 # CLUSTERS — Define one [clusters.NAME] section per SLURM cluster
@@ -60,7 +66,7 @@ trigger_command = "claude --dangerously-skip-permissions"  # Command to wake Cla
 #   - SLURM parameters (account, GPU type, resources)
 #
 # The [clusters.NAME.slurm] section defines DEFAULT job parameters.
-# Claude can override these per-job (within the [safety] limits above).
+# The agent can override these per-job (within the [safety] limits above).
 
 # --- Example: GPU cluster ---
 
@@ -77,7 +83,7 @@ account = "my-allocation"              # SLURM account (for --account). Leave ""
 partition = ""                         # SLURM partition (for --partition). Leave "" if using account instead.
 num_gpus = 1                           # Default GPUs per job
 gpu_type = "a100"                      # Default GPU type (e.g., "a100", "h100", "v100"). Leave "" for any GPU.
-available_gpu_types = [                # All GPU types Claude can choose from on this cluster
+available_gpu_types = [                # All GPU types the agent can choose from on this cluster
     "a100",                            # List GPU types available on your cluster
     "v100",
 ]

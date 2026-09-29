@@ -1,15 +1,14 @@
 """Background watcher daemon for xgenius.
 
-Simple and reliable: poll for .done markers, update DB, pull results, trigger Claude.
+Simple and reliable: poll for .done markers, update DB, pull results, trigger the agent.
 No clever reconciliation, no process detection — just the basics done right.
 """
 
 import os
-import subprocess
-import sys
 import time
 
-from xgenius.config import load_config, get_xgenius_dir, get_project_dir, ensure_xgenius_dir
+from xgenius.agent import run_agent
+from xgenius.config import load_config, ensure_xgenius_dir
 from xgenius.jobs import JobManager
 
 
@@ -20,19 +19,15 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
     1. Update DB from squeue (sync running/pending states)
     2. Check for .done markers (completions)
     3. Pull results for completed jobs
-    4. If any new completions → trigger Claude with fresh session
+    4. If any new completions → trigger the configured agent with fresh session
     5. Sleep and repeat
 
     Args:
         config_path: Path to xgenius.toml.
         verbose: Print status messages.
     """
-    if "ANTHROPIC_API_KEY" in os.environ:
-        del os.environ["ANTHROPIC_API_KEY"]
-
     config = load_config(config_path)
     xgenius_dir = ensure_xgenius_dir(config)
-    project_dir = get_project_dir(config)
     job_manager = JobManager(config)
     db = job_manager.db
 
@@ -101,7 +96,7 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
                             if missing_counts[jid] >= 3:
                                 db.mark_disappeared(jid)
                                 _log(f"Job {jid} ({job['experiment_id']}) disappeared after 3 checks")
-                                # Try to pull logs so Claude can investigate
+                                # Try to pull logs so the agent can investigate
                                 try:
                                     job_manager.pull_slurm_logs(job["cluster"], jid, job["experiment_id"])
                                     _log(f"Pulled slurm logs for disappeared job {job['experiment_id']}")
@@ -120,7 +115,7 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
                 _log(f"Failed to check completions: {e}")
 
             # Step 3: Pull results AND slurm logs for new completions
-            # Note: results_pulled is NOT set here — only after Claude succeeds
+            # Note: results_pulled is NOT set here — only after the agent succeeds
             for c in completions:
                 try:
                     job_manager.pull_results(cluster_name=c.cluster, job_id=c.job_id)
@@ -134,14 +129,14 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
                 except Exception as e:
                     _log(f"Failed to pull slurm logs for {c.experiment_id}: {e}")
 
-            # Step 4: Trigger Claude if there's work to do
+            # Step 4: Trigger the agent if there's work to do
             # Either new completions from markers, OR completed jobs in DB
             # that haven't been analyzed yet (e.g., from a previous failed trigger)
             needs_trigger = len(completions) > 0
 
             if not needs_trigger:
-                # Check if DB has completed jobs that Claude hasn't processed yet
-                # (happens when Claude hit rate limits or failed on previous trigger)
+                # Check if DB has completed jobs that the agent hasn't processed yet
+                # (happens when the agent hit rate limits or failed on previous trigger)
                 completed_not_pulled = db.get_completed_not_pulled()
                 if completed_not_pulled:
                     needs_trigger = True
@@ -155,28 +150,25 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
                         })()
                         for j in completed_not_pulled
                     ]
-                    _log(f"Retrying: {len(completed_not_pulled)} completed jobs awaiting Claude processing")
+                    _log(f"Retrying: {len(completed_not_pulled)} completed jobs awaiting agent processing")
 
             if needs_trigger:
                 prompt = db.build_wakeup_prompt(completions=completions if completions else None)
                 remaining = len(db.get_active_job_ids())
-                _log(f"Triggering Claude: {len(completions)} new completion(s), {remaining} still active")
-
-                trigger_parts = trigger_cmd.split()
-                trigger_parts.extend(["-p", prompt])
+                _log(f"Triggering agent: {len(completions)} new completion(s), {remaining} still active")
 
                 with open(lock_path, "w") as f:
                     f.write(str(os.getpid()))
                 try:
-                    result = subprocess.run(trigger_parts, cwd=project_dir)
+                    result = run_agent(config, prompt)
                     if result.returncode != 0:
-                        _log(f"Claude exited with error (code {result.returncode}). Will retry next cycle — completed jobs remain unprocessed.")
+                        _log(f"Agent exited with error (code {result.returncode}). Will retry next cycle — completed jobs remain unprocessed.")
                     else:
-                        # Claude succeeded — mark all completed jobs as processed
+                        # Agent succeeded — mark all completed jobs as processed
                         # This prevents retriggering for these jobs next cycle
                         for job in db.get_completed_not_pulled():
                             db.mark_results_pulled(job["job_id"])
-                        _log("Claude finished successfully. Marked jobs as processed.")
+                        _log("Agent finished successfully. Marked jobs as processed.")
                 finally:
                     if os.path.exists(lock_path):
                         os.remove(lock_path)

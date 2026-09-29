@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides shared guidance to Claude Code and GitHub Copilot CLI when working with code in this repository. Both CLIs load `CLAUDE.md`.
 
 ## Project Overview
 
-xgenius is an LLM-oriented autonomous research platform for SLURM clusters. It provides CLI tools that enable Claude Code to autonomously run experiments, track hypotheses, and iterate on research — with safety guarantees for shared infrastructure.
+xgenius is an LLM-oriented autonomous research platform for SLURM clusters. It provides CLI tools that enable Claude Code or GitHub Copilot CLI to autonomously run experiments, track hypotheses, and iterate on research — with safety guarantees for shared infrastructure.
 
 ## Build & Install
 
@@ -28,11 +28,12 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 
 **Two state systems**:
 - **SQLite DB** (`.xgenius/xgenius.db`) — automated operational state (job statuses, walltimes, exit codes). Updated by the watcher every cycle.
-- **Research Journal** (`.xgenius/journal.md`) — Claude's persistent research memory. Written by Claude, read at the start of every session.
+- **Research Journal** (`.xgenius/journal.md`) — the agent's persistent research memory. Written by the agent, read at the start of every session.
 
 **Module layout:**
 - `xgenius/cli.py` — Unified CLI (argparse with 25+ subcommands, all support `--json`)
 - `xgenius/config.py` — TOML config loading, validation, dataclasses, run ID management
+- `xgenius/agent.py` — shared non-interactive launcher using `[watcher].trigger_command` for watch, report, and compact
 - `xgenius/db.py` — SQLite DB for operational state (jobs table, hypotheses table, state sync)
 - `xgenius/safety.py` — `SafetyValidator`: resource limits, command allowlist, path containment, shell injection detection
 - `xgenius/ssh.py` — `SSHClient`: structured SSH/SCP/rsync operations via subprocess, returns `SSHResult`
@@ -40,7 +41,7 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 - `xgenius/journal.py` — Simple append-only markdown research journal
 - `xgenius/results.py` — Results bank: two-table CSV system (experiments + hypotheses)
 - `xgenius/container.py` — `ContainerManager`: step-by-step Docker→Singularity build with structured output
-- `xgenius/watcher.py` — Background daemon: polls for `.done` markers, syncs DB from squeue, pulls results + logs, triggers fresh Claude session
+- `xgenius/watcher.py` — Background daemon: polls for `.done` markers, syncs DB from squeue, pulls results + logs, triggers a fresh configured-agent session
 - `xgenius/templates.py` — SBATCH template loading, `{{PLACEHOLDER}}` rendering, trap-based completion epilog
 - `xgenius/dashboard.py` — Web-based DB browser for human inspection
 
@@ -61,8 +62,9 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 - Safety validation happens before every remote operation in `jobs.py` — the LLM cannot bypass it
 - Job IDs are captured from `sbatch` stdout and tracked in the SQLite DB
 - SBATCH scripts get a trap-based completion epilog that writes `.done` marker files on the cluster
-- The watcher daemon polls for markers, syncs DB from squeue, pulls results + SLURM logs locally, and triggers a fresh Claude session per completion batch
+- The watcher daemon polls for markers, syncs DB from squeue, pulls results + SLURM logs locally, and triggers a fresh agent session per completion batch
+- `xgenius init --agent copilot` selects `copilot --allow-all`; plain `init` keeps Claude as the default. Both CLIs use the generated `CLAUDE.md` instructions. Existing projects switch via `[watcher].trigger_command`.
 - Each run has a unique ID (xg-XXXXXX) that scopes SLURM job names and prevents old jobs from interfering
 - SLURM logs are pulled to `.xgenius/slurm_logs/{hypothesis_id}/{experiment_id}/` for local inspection
 - Project-local SBATCH templates in `.xgenius/templates/` take priority over package templates
-- `xgenius compact` spawns a Claude agent to intelligently compact the research journal — reducing size while preserving all essential context (findings, hypothesis statuses, decisions, human directives, next steps). The original journal is backed up before replacement. Call this when the journal grows large and starts consuming too much context. Works with `--json` for programmatic use.
+- `xgenius compact` spawns the configured agent to intelligently compact the research journal — reducing size while preserving all essential context (findings, hypothesis statuses, decisions, human directives, next steps). The original journal is backed up before replacement. Call this when the journal grows large and starts consuming too much context. Works with `--json` for programmatic use.

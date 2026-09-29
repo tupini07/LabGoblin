@@ -442,10 +442,10 @@ class XGeniusDB:
         self._init_db()
 
     def build_wakeup_prompt(self, completions: list = None, reconciled_ids: list = None) -> str:
-        """Build the prompt sent to Claude when the watcher triggers it.
+        """Build the prompt sent to the configured agent when the watcher triggers it.
 
-        This is a FRESH session — Claude has no prior context.
-        The prompt must be fully self-contained with everything Claude needs.
+        This is a FRESH session — the agent has no prior context.
+        The prompt must be fully self-contained with everything the agent needs.
         """
         status = self.get_full_status()
         parts = []

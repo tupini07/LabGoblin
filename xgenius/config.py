@@ -4,8 +4,15 @@ Loads and validates xgenius.toml project configuration files.
 """
 
 import os
+import shlex
 import tomllib
 from dataclasses import dataclass, field
+
+
+AGENT_COMMANDS = {
+    "claude": "claude --dangerously-skip-permissions",
+    "copilot": "copilot --allow-all",
+}
 
 
 @dataclass
@@ -60,7 +67,19 @@ class SafetyConfig:
 class WatcherConfig:
     """Configuration for the background completion watcher."""
     poll_interval_seconds: int = 60
-    trigger_command: str = "claude --dangerously-skip-permissions"
+    trigger_command: str = AGENT_COMMANDS["claude"]
+
+    def command_args(self) -> list[str]:
+        """Parse the agent command without invoking a shell."""
+        if not isinstance(self.trigger_command, str):
+            raise ValueError("watcher.trigger_command must be a non-empty command string")
+        try:
+            args = shlex.split(self.trigger_command)
+        except ValueError as e:
+            raise ValueError(f"Invalid watcher.trigger_command: {e}") from e
+        if not args or not args[0]:
+            raise ValueError("watcher.trigger_command must be a non-empty command string")
+        return args
 
 
 @dataclass
@@ -165,7 +184,7 @@ def load_config(path: str = "xgenius.toml") -> XGeniusConfig:
     watcher_data = raw.get("watcher", {})
     watcher = WatcherConfig(
         poll_interval_seconds=watcher_data.get("poll_interval_seconds", 60),
-        trigger_command=watcher_data.get("trigger_command", "claude --continue"),
+        trigger_command=watcher_data.get("trigger_command", AGENT_COMMANDS["claude"]),
     )
 
     # Parse clusters
@@ -187,6 +206,7 @@ def load_config(path: str = "xgenius.toml") -> XGeniusConfig:
 
 def _validate_config(config: XGeniusConfig) -> None:
     """Validate configuration for required fields and consistency."""
+    config.watcher.command_args()
     if not config.clusters:
         return  # Empty clusters is valid during init
 
