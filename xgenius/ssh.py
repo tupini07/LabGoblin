@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 from xgenius.config import ClusterConfig
+from xgenius.processes import background_options
 
 
 @dataclass
@@ -69,6 +70,7 @@ class SSHClient:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                **background_options(),
             )
             duration = time.monotonic() - start
             return SSHResult(
@@ -110,6 +112,7 @@ class SSHClient:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                **background_options(),
             )
             duration = time.monotonic() - start
             return SSHResult(
@@ -141,6 +144,7 @@ class SSHClient:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                **background_options(),
             )
             duration = time.monotonic() - start
             return SSHResult(
@@ -181,7 +185,7 @@ class SSHClient:
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd, capture_output=True, text=True, timeout=timeout, **background_options()
             )
             duration = time.monotonic() - start
             return SSHResult(
@@ -219,7 +223,7 @@ class SSHClient:
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd, capture_output=True, text=True, timeout=timeout, **background_options()
             )
             duration = time.monotonic() - start
             return SSHResult(

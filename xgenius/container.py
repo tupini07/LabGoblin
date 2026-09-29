@@ -12,6 +12,7 @@ import subprocess
 import time
 
 from xgenius.config import XGeniusConfig, ClusterConfig, get_project_dir
+from xgenius.processes import background_options
 from xgenius.ssh import SSHClient
 
 
@@ -25,6 +26,7 @@ def _run_step(cmd: list[str], description: str, cwd: str = None, timeout: int = 
             text=True,
             cwd=cwd,
             timeout=timeout,
+            **background_options(),
         )
         duration = time.monotonic() - start
         return {

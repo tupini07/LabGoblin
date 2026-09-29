@@ -9,6 +9,7 @@ import sys
 import time
 
 from xgenius.workspace import atomic_json, read_json
+from xgenius.processes import background_options
 
 
 def sandbox_preflight(config) -> dict:
@@ -90,7 +91,7 @@ def _sandbox_probe(config) -> dict:
         result = subprocess.run(
             [*command, "--experimental", "--sandbox", "-p", prompt],
             cwd=project, env=env, capture_output=True, text=True,
-            encoding="utf-8", timeout=local.turn_timeout)
+            encoding="utf-8", timeout=local.turn_timeout, **background_options())
         (canary_root / "stdout.log").write_text(result.stdout, encoding="utf-8")
         (canary_root / "stderr.log").write_text(result.stderr, encoding="utf-8")
         if result.returncode:

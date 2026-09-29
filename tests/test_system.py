@@ -18,6 +18,9 @@ import uuid
 import pytest
 import tomli_w
 
+from xgenius.processes import background_options
+from tests.test_processes import WINDOW_PROBE
+
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("XGENIUS_SYSTEM_E2E") != "1" or os.name != "nt",
@@ -77,7 +80,8 @@ class System:
     def cli(self, project, *args, expected=0, timeout=40):
         result = subprocess.run(
             [sys.executable, "-m", "xgenius.cli", *args, "--json"], cwd=project,
-            env=self.env, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+            env=self.env, capture_output=True, text=True, encoding="utf-8", timeout=timeout,
+            **background_options())
         self.commands.append({"project": str(project), "argv": list(args), "returncode": result.returncode,
                               "stdout": result.stdout, "stderr": result.stderr})
         write(self.root / "commands.json", self.commands)
@@ -89,7 +93,8 @@ class System:
         with (project / (name + ".out")).open("wb") as out, (project / (name + ".err")).open("wb") as err:
             process = subprocess.Popen(
                 [sys.executable, "-m", "xgenius.cli", *args, "--json"],
-                cwd=project, env=self.env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+                cwd=project, env=self.env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                **background_options())
         self.processes.append(process)
         return process
 
@@ -176,21 +181,21 @@ class System:
             for path in project.rglob("backend.json"):
                 info = read(path)
                 result = subprocess.run(["docker", "--context", "desktop-linux", "inspect", info["container_id"]],
-                                        capture_output=True, text=True, timeout=20)
+                                        capture_output=True, text=True, timeout=20, **background_options())
                 if result.returncode == 0:
                     container = json.loads(result.stdout)[0]
                     spec = read(path.parent / "spec.json")
                     assert container["Config"]["Labels"]["xgenius.attempt"] == spec["id"]
                     subprocess.run(["docker", "--context", "desktop-linux", "rm", "-f", info["container_id"]],
-                                   capture_output=True, check=True, timeout=20)
+                                   capture_output=True, check=True, timeout=20, **background_options())
         for image, token in self.images:
             result = subprocess.run(
                 ["docker", "--context", "desktop-linux", "image", "inspect", image],
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, timeout=20, **background_options())
             if result.returncode == 0:
                 assert json.loads(result.stdout)[0]["Config"]["Labels"]["xgenius.system_test"] == token
                 subprocess.run(["docker", "--context", "desktop-linux", "image", "rm", image],
-                               capture_output=True, check=True, timeout=20)
+                               capture_output=True, check=True, timeout=20, **background_options())
         self.wait(lambda: self._supervisors_stopped(), timeout=70)
         for project in self.projects:
             self.cli(project, "reconcile")
@@ -256,7 +261,8 @@ def test_cli_campaigns_share_resources_and_recover(system):
                 f"sys.argv=['xgenius','dashboard','--port','{port}'];"
                 "from xgenius.cli import main;main()")
     server = subprocess.Popen([sys.executable, "-c", launcher], cwd=a, env=system.env,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              **background_options())
     system.processes.append(server)
     base = f"http://127.0.0.1:{port}"
     def ready():
@@ -363,7 +369,8 @@ def guest_alive(handle):
     )
     return subprocess.check_output(
         ["wsl", "-d", "Ubuntu", "--exec", "python3", "-c", script,
-         str(handle["pid"]), handle["start_ticks"], handle["boot_id"]], text=True).strip() == "1"
+         str(handle["pid"]), handle["start_ticks"], handle["boot_id"]], text=True,
+        **background_options()).strip() == "1"
 
 
 @pytest.mark.parametrize("phase", ["workload", "validator"])
@@ -394,7 +401,7 @@ def test_wsl_supervisor_loss_does_not_release_live_work(system, phase):
     )
     subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "python3", "-c", script,
                     str(supervisor["pid"]), supervisor["start_ticks"], supervisor["boot_id"]],
-                   check=True, capture_output=True, timeout=10)
+                   check=True, capture_output=True, timeout=10, **background_options())
     try:
         system.wait(lambda: not guest_alive(supervisor), timeout=10)
         observed_live_child = False
@@ -421,14 +428,40 @@ def test_docker_kill_is_interrupted_not_success(system):
     system.wait(lambda: (out / "ready.json").exists())
     handle = read(out.parent / "backend.json")
     info = json.loads(subprocess.check_output(
-        ["docker", "--context", "desktop-linux", "inspect", handle["container_id"]], text=True))[0]
+        ["docker", "--context", "desktop-linux", "inspect", handle["container_id"]], text=True,
+        **background_options()))[0]
     assert info["Config"]["Labels"]["xgenius.attempt"] == job_id
     subprocess.run(["docker", "--context", "desktop-linux", "kill", handle["container_id"]],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=15, **background_options())
     system.wait(lambda: system.finished(a, job_id))
     assert system.attempt(a, job_id)["status"] == "interrupted"
     assert not (out.parent / "completion.json").exists()
     assert not system.cli(a, "machine", "status")["reservations"]
+
+
+@pytest.mark.skipif(os.environ.get("XGENIUS_LIVE_AGENT") != "1",
+                    reason="Separate opt-in for a live Copilot shell/console check")
+def test_live_copilot_shell_is_windowless(system):
+    a = system.project("windowless Copilot")
+    (a / "console_probe.py").write_text(
+        WINDOW_PROBE + ";from pathlib import Path;"
+        "Path('console-probe.json').write_text(json.dumps(dict(window=window,"
+        "visible=bool(window and user.IsWindowVisible(window)),"
+        "console_codepage=kernel.GetConsoleCP())),encoding='utf-8')\n",
+        encoding="utf-8")
+    (a / "research_goal.md").write_text(
+        "# Windows background console smoke test\n"
+        f"Use your shell tool to run this exact argv once: {json.dumps([sys.executable, 'console_probe.py'])}.\n"
+        "It measures only its own console and writes console-probe.json. Read that file and "
+        "record its result in the journal, then complete. Do not submit experiments. "
+        "Do not edit the probe or result, create issues/PRs/commits, upload data, install packages, "
+        "use subagents, or access anything outside this synthetic project. Do not ask questions.\n",
+        encoding="utf-8")
+    result = system.cli(a, "run", timeout=300)
+    assert result["state"] == "completed", result
+    probe = read(a / "console-probe.json")
+    assert not probe["window"] and not probe["visible"] and probe["console_codepage"], probe
+    assert not system.cli(a, "status")["events"]
 
 
 @pytest.mark.skipif(os.environ.get("XGENIUS_LIVE_AGENT") != "1",

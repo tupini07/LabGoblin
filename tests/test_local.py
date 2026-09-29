@@ -20,6 +20,7 @@ from xgenius.scheduler import ResourceLedger
 from xgenius.state import TERMINAL
 from xgenius.db import _connect
 from xgenius.backends import alive
+from xgenius.processes import background_options
 
 
 @pytest.fixture
@@ -389,7 +390,8 @@ def test_parent_job_closure_keeps_worker_alive(campaign):
         "Campaign(load_config()).dispatch();time.sleep(30)"
     )
     controller = subprocess.Popen([sys.executable, "-c", code], cwd=campaign.project,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                  **background_options())
     try:
         deadline = time.monotonic() + 15
         while campaign.state.attempt(job_id)["status"] != "running":

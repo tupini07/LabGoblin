@@ -11,6 +11,7 @@ import time
 import psutil
 
 from xgenius.local_config import positive
+from xgenius.processes import background_options
 
 
 def ledger_path() -> Path:
@@ -90,7 +91,8 @@ class ResourceLedger:
         if json.loads(capacity["gpus"]):
             result = subprocess.run(
                 ["nvidia-smi", "--query-compute-apps=gpu_uuid", "--format=csv,noheader"],
-                capture_output=True, text=True, encoding="utf-8", timeout=10)
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
+                **background_options())
             if result.returncode:
                 raise RuntimeError(f"Cannot observe GPU activity: {result.stderr.strip()}")
             external_gpus = set(result.stdout.strip().splitlines())

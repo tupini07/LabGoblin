@@ -161,9 +161,13 @@ with configured headroom and outstanding reservations. Oldest eligible fitting
 requests are preferred; requests outside capacity are rejected.
 
 Windows payloads use Job Objects and CPU affinity. Docker sets CPU/RAM limits.
-Independent Windows supervisors request detached process groups and permitted
-Job Object breakaway. A parent policy that prohibits breakaway is a launch error,
-not permission to silently weaken crash-survival behavior.
+Windows supervisors, payloads, agent sessions, and background probes use windowless
+consoles, so their ordinary child processes do not open terminals or steal focus.
+Logs still go to their existing files or captured CLI output. Independent
+supervisors retain separate process groups and permitted Job Object breakaway.
+A parent policy that prohibits breakaway is a launch error, not permission to
+silently weaken crash-survival behavior. This does not prevent an experiment from
+explicitly opening its own GUI or requesting a new console.
 Linux/WSL uses process groups, affinity and memory monitoring, not a kernel-hard
 memory quota. `hard_memory_limit=true` is rejected for monitored runners. Native
 and WSL trusted processes are not a hostile-code boundary: deliberately detached

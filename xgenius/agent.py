@@ -3,8 +3,10 @@
 import ntpath
 import os
 import subprocess
+import sys
 
 from xgenius.config import XGeniusConfig, get_project_dir
+from xgenius.processes import background_options
 
 
 def run_agent(
@@ -20,6 +22,7 @@ def run_agent(
     if executable == "claude":
         # Keep subscription auth for Claude without changing the parent or Copilot.
         env.pop("ANTHROPIC_API_KEY", None)
+    streams = {} if capture_output or os.name != "nt" else {"stdout": sys.stdout, "stderr": sys.stderr}
     return subprocess.run(
         [*command, "-p", prompt],
         cwd=get_project_dir(config),
@@ -27,4 +30,6 @@ def run_agent(
         capture_output=capture_output,
         text=True,
         encoding="utf-8",
+        **streams,
+        **background_options(),
     )

@@ -101,7 +101,8 @@ class WindowsPayload:
         info["JobMemoryLimit"] = spec["memory_mb"] * 1024 * 1024
         win32job.SetInformationJobObject(self.job, win32job.JobObjectExtendedLimitInformation, info)
         startup = win32process.STARTUPINFO()
-        startup.dwFlags |= win32con.STARTF_USESTDHANDLES
+        startup.dwFlags |= win32con.STARTF_USESTDHANDLES | win32con.STARTF_USESHOWWINDOW
+        startup.wShowWindow = win32con.SW_HIDE
         null = open(os.devnull, "rb")
         handles = [msvcrt.get_osfhandle(f.fileno()) for f in (null, out, err)]
         for handle in handles:
@@ -110,7 +111,7 @@ class WindowsPayload:
         try:
             self.process, thread, self.pid, _ = win32process.CreateProcess(
                 None, subprocess.list2cmdline(argv), None, None, True,
-                win32con.CREATE_SUSPENDED | win32con.CREATE_NEW_PROCESS_GROUP,
+                win32con.CREATE_SUSPENDED | win32con.CREATE_NEW_PROCESS_GROUP | win32con.CREATE_NO_WINDOW,
                 env, cwd, startup)
             try:
                 win32job.AssignProcessToJobObject(self.job, self.process)

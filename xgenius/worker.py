@@ -9,6 +9,7 @@ import time
 
 from xgenius.backends import own_handle, payload_command
 from xgenius.config import load_config
+from xgenius.processes import background_options
 from xgenius.scheduler import ResourceLedger
 from xgenius.state import LocalState
 from xgenius.workspace import atomic_json, collect_artifacts, read_json
@@ -27,7 +28,8 @@ def main(spec_path):
     try:
         argv, _ = payload_command(spec)
         with (root / "backend.stdout.log").open("wb") as out, (root / "backend.stderr.log").open("wb") as err:
-            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                       **background_options())
             state.transition(spec["id"], "running", handle=handle)
             while process.poll() is None:
                 atomic_json(root / "supervisor-heartbeat.json",

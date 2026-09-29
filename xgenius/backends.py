@@ -10,12 +10,13 @@ import sys
 import psutil
 
 from xgenius import payload
+from xgenius.processes import background_options
 from xgenius.workspace import atomic_json, read_json
 
 
 def command(argv, *, timeout=30) -> str:
     result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                            errors="replace", timeout=timeout)
+                            errors="replace", timeout=timeout, **background_options())
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exited {result.returncode}: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -36,12 +37,9 @@ def own_handle(token: str) -> dict:
 
 
 def launch_independent(argv, root: Path):
-    options = {"start_new_session": True} if os.name != "nt" else {
-        "creationflags": (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP |
-                          subprocess.CREATE_BREAKAWAY_FROM_JOB),
-    }
     with (root / "supervisor.stdout.log").open("ab") as out, (root / "supervisor.stderr.log").open("ab") as err:
-        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, **options)
+        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                **background_options(independent=True))
 
 
 def docker_prefix(runner: dict) -> list[str]:
@@ -156,7 +154,8 @@ def inspect_payload(spec: dict) -> str:
         validate_docker_endpoint(runner["context"])
         name = f'xgenius-{spec["id"]}'
         result = subprocess.run([*docker_prefix(runner), "inspect", name],
-                                capture_output=True, text=True, encoding="utf-8")
+                                capture_output=True, text=True, encoding="utf-8",
+                                **background_options())
         if result.returncode:
             return "unknown"
         value = json.loads(result.stdout)[0]
