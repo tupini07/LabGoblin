@@ -10,6 +10,8 @@ setup(
         'paramiko',
         'scp',
         'tomli_w',
+        'psutil>=5.9',
+        'pywin32>=306; sys_platform == "win32"',
     ],
     package_data={
         'xgenius': ['sbatch_templates/*'],
@@ -22,7 +24,7 @@ setup(
     author='Roger Creus Castanyer',
     author_email='creus99@gmail.com',
     description='LLM-oriented autonomous research platform for SLURM clusters',
-    long_description=open('README.md').read(),
+    long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/roger-creus/xgenius',
     classifiers=[

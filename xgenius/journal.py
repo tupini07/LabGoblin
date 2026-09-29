@@ -38,13 +38,13 @@ class ResearchJournal:
         """Read the full journal. Claude reads this every session."""
         if not os.path.exists(self.journal_path):
             return ""
-        with open(self.journal_path) as f:
+        with open(self.journal_path, encoding="utf-8") as f:
             return f.read()
 
     def write(self, entry: str) -> None:
         """Append a timestamped entry to the journal."""
         ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
-        with open(self.journal_path, "a") as f:
+        with open(self.journal_path, "a", encoding="utf-8") as f:
             f.write(f"\n---\n**[{ts}]**\n\n{entry}\n")
 
     def backup(self) -> str:
@@ -59,7 +59,7 @@ class ResearchJournal:
 
     def replace(self, content: str) -> None:
         """Replace the journal contents (used by compaction)."""
-        with open(self.journal_path, "w") as f:
+        with open(self.journal_path, "w", encoding="utf-8") as f:
             f.write(content)
 
     def clear(self) -> None:

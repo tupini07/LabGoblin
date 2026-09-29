@@ -58,7 +58,7 @@ def test_init_selects_agent_and_preserves_shared_instructions(tmp_path, monkeypa
     monkeypatch.chdir(tmp_path)
     instructions = tmp_path / "CLAUDE.md"
     instructions.write_text("# Existing project guidance\n\nKeep this.\n", encoding="utf-8")
-    argv = ["xgenius", "init"]
+    argv = ["xgenius", "init", "--backend", "slurm"]
     if provider:
         argv.extend(["--agent", provider])
     monkeypatch.setattr(sys, "argv", argv)

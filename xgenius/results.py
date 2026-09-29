@@ -9,8 +9,47 @@ the structural columns (IDs, command, comment, status).
 """
 
 import csv
+import json
 import os
+from pathlib import Path
 from typing import Any
+
+
+def registered_results(config) -> list[dict]:
+    """Transactional projection; does not overwrite user-maintained experiment CSVs."""
+    from xgenius.db import _connect
+    from xgenius.state import LocalState
+    state = LocalState(config)
+    with _connect(state.path) as c:
+        c.execute("BEGIN")
+        attempts = [dict(r) for r in c.execute(
+            "SELECT j.*,a.reason FROM jobs j JOIN attempts a ON a.id=j.job_id ORDER BY a.created")]
+        for attempt in attempts:
+            artifacts = [json.loads(r["metadata"]) for r in c.execute(
+                "SELECT metadata FROM artifacts WHERE attempt_id=? ORDER BY path", (attempt["job_id"],))]
+            attempt["artifacts"] = artifacts
+            attempt["scientific_acceptance"] = "not_inferred"
+    return attempts
+
+
+def export_registered(config) -> str:
+    from xgenius.config import get_project_dir
+    from xgenius.state import identifier
+    rows = registered_results(config)
+    path = Path(get_project_dir(config)) / "results" / "attempts.csv"
+    path.parent.mkdir(exist_ok=True)
+    temporary = path.with_name(f"attempts-{identifier()}.tmp")
+    fields = ["job_id", "experiment_id", "hypothesis_id", "cluster", "status",
+              "exit_code", "gpu_hours", "reason", "artifacts", "scientific_acceptance"]
+    with temporary.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({**row, "artifacts": json.dumps(row["artifacts"])})
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporary, path)
+    return str(path)
 
 
 class ExperimentsBank:

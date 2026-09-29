@@ -1,10 +1,56 @@
 # xgenius
 
-LLM-oriented autonomous research platform for SLURM clusters.
+Local-first autonomous research with Claude Code or GitHub Copilot CLI.
 
-xgenius enables Claude Code or GitHub Copilot CLI to autonomously run experiments on SLURM clusters: formulate hypotheses, modify code, submit jobs, analyze results, and iterate — with safety guarantees for shared infrastructure.
+xgenius coordinates research turns, immutable experiment snapshots, resource reservations,
+supervised jobs, artifacts, and a persistent journal. New projects run locally:
+native Windows processes, an explicitly selected WSL2 distro, or local Linux Docker
+containers. Existing SSH/SLURM/Singularity projects remain supported.
 
-## How it works
+## Local quick start
+
+Install Python 3.11+ and authenticate either supported agent CLI. Docker and WSL
+are optional; native execution needs neither SLURM nor Singularity.
+
+```powershell
+pip install -e .
+mkdir my-research
+cd my-research
+xgenius init --agent copilot
+```
+
+Edit `research_goal.md`, review the generated campaign limits, and explicitly
+configure a **shared capacity envelope**, leaving room for other applications.
+For example, the following permits at most two experiment CPUs and 4 GiB of
+reserved RAM across this user's campaigns (it does not reserve the entire PC):
+
+```powershell
+xgenius machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
+xgenius doctor --json
+xgenius run
+```
+
+Agents submit JSON job manifests; independent workers enforce job deadlines and
+survive controller termination. Use `pause` to stop new work, `stop` to drain
+running jobs, `cancel --job-ids ID` to cancel a specific attempt, and `resume`
+to reconnect. `status --json` includes campaign state and durable events.
+
+**Trusted by default:** resource admission is not a sandbox around an unrestricted
+agent. Local compute still uses the configured AI service. No automatic uploads,
+pushes, remote compute, image pulls, or changes to shared environments are part of
+the research loop. Optional Copilot sandbox mode fails closed when its isolated
+profile or host prerequisites are unavailable.
+
+See the [local research guide](docs/local-research.md) for manifest/config examples,
+WSL and Docker setup, accounting, recovery, and isolation limitations.
+
+## Legacy SLURM workflow
+
+The remainder of this guide describes the existing cluster workflow.
+Files without `schema_version = 2` retain their SLURM interpretation.
+Use `xgenius init --backend slurm` for a new cluster project.
+
+### How it works
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -112,8 +158,8 @@ git init
 
 ```bash
 cd auto-myproject
-xgenius init --agent copilot   # GitHub Copilot CLI
-# Or: xgenius init            # Claude Code (default)
+xgenius init --backend slurm --agent copilot   # GitHub Copilot CLI
+# Or: xgenius init --backend slurm             # Claude Code (default)
 ```
 
 This creates:

@@ -6,6 +6,7 @@ for SLURM jobs across clusters.
 
 import json
 import os
+import posixpath
 import re
 import tempfile
 import time
@@ -251,7 +252,7 @@ class JobManager:
             local_script = f.name
 
         try:
-            remote_script = os.path.join(cluster.project_path, f"xg_{experiment_id}.sh")
+            remote_script = posixpath.join(cluster.project_path, f"xg_{experiment_id}.sh")
 
             # Ensure markers directory exists on cluster
             ssh.run(f"mkdir -p {cluster.scratch_path}/.xgenius/markers")
@@ -284,7 +285,7 @@ class JobManager:
             ssh.run(f"rm -f {remote_script}")
 
             # Record in job tracker
-            self._record_job(
+            stored_id = self._record_job(
                 job_id=job_id,
                 cluster=cluster_name,
                 experiment_id=experiment_id,
@@ -309,7 +310,7 @@ class JobManager:
 
             return SubmitResult(
                 success=True,
-                job_id=job_id,
+                job_id=stored_id,
                 cluster=cluster_name,
                 experiment_id=experiment_id,
                 command=command,
@@ -359,8 +360,10 @@ class JobManager:
                     # Only include jobs from this run
                     if run_id and not name.startswith(run_id):
                         continue
+                    external_id = parts[0].strip().strip('"')
+                    tracked = self.db.get_job(external_id, cname)
                     all_statuses.append(JobStatus(
-                        job_id=parts[0].strip().strip('"'),
+                        job_id=tracked["job_id"] if tracked else external_id,
                         name=parts[1].strip(),
                         state=parts[2].strip(),
                         elapsed=parts[3].strip(),
@@ -403,14 +406,20 @@ class JobManager:
         results = {}
 
         for job_id in job_ids:
-            result = ssh.run(f"scancel {job_id}")
+            job = self.db.get_job(job_id, cluster_name)
+            if not job:
+                raise ValueError(f"Job {job_id} is not tracked on {cluster_name}")
+            external_id = job["external_job_id"] or job["job_id"]
+            if not external_id.isdigit():
+                raise ValueError("SLURM cancellation requires a numeric scheduler handle")
+            result = ssh.run(f"scancel {external_id}")
             results[job_id] = {
                 "cancelled": result.success,
                 "error": result.stderr if not result.success else "",
             }
 
             if result.success:
-                self._update_job_status(job_id, "cancelled")
+                self._update_job_status(job["job_id"], "cancelled")
 
             self.safety.log_action(
                 "cancel",
@@ -420,9 +429,12 @@ class JobManager:
 
         return results
 
-    def _get_local_log_dir(self, hypothesis_id: str, experiment_id: str) -> str:
+    def _get_local_log_dir(self, hypothesis_id: str, experiment_id: str, cluster: str = "") -> str:
         """Get local slurm log directory for an experiment."""
-        return os.path.join(self._xgenius_dir, "slurm_logs", hypothesis_id or "unknown", experiment_id)
+        from pathlib import Path
+        from xgenius.workspace import contained
+        root = Path(self._xgenius_dir) / "slurm_logs"
+        return str(contained(root, os.path.join(cluster, hypothesis_id or "unknown", experiment_id)))
 
     def pull_slurm_logs(self, cluster_name: str, job_id: str, experiment_id: str) -> None:
         """Pull SLURM .out and .err files from cluster to local .xgenius/slurm_logs/."""
@@ -430,10 +442,11 @@ class JobManager:
         ssh = self._get_ssh(cluster_name)
 
         # Look up hypothesis_id from DB
-        job = self.db.get_job(job_id)
+        job = self.db.get_job(job_id, cluster_name)
         hypothesis_id = job["hypothesis_id"] if job else "unknown"
+        job_id = (job["external_job_id"] or job["job_id"]) if job else job_id
 
-        local_dir = self._get_local_log_dir(hypothesis_id, experiment_id)
+        local_dir = self._get_local_log_dir(hypothesis_id, experiment_id, cluster_name)
         os.makedirs(local_dir, exist_ok=True)
 
         # The log file on cluster is at the path stored in DB
@@ -446,22 +459,35 @@ class JobManager:
             ssh.scp_from(err_file, os.path.join(local_dir, f"{experiment_id}_{job_id}.err"))
         else:
             # Fallback: try common patterns
-            log_dir = os.path.join(cluster.scratch_path, ".xgenius", "logs")
+            log_dir = posixpath.join(cluster.scratch_path, ".xgenius", "logs")
             ssh.scp_from(f"{log_dir}/{experiment_id}_{job_id}.out", os.path.join(local_dir, f"{experiment_id}_{job_id}.out"))
 
     def _find_local_log(self, job_id: str = "", experiment_id: str = "", ext: str = "out") -> str:
         """Find a local slurm log file. Returns path if found."""
+        if job_id:
+            job = self.db.get_job(job_id)
+            if job:
+                job_id = job["external_job_id"] or job["job_id"]
+                folder = self._get_local_log_dir(job["hypothesis_id"], job["experiment_id"], job["cluster"])
+                path = os.path.join(folder, f'{job["experiment_id"]}_{job_id}.{ext}')
+                if os.path.isfile(path):
+                    return path
+                if ":" in job["job_id"]:
+                    return ""
         slurm_logs_dir = os.path.join(self._xgenius_dir, "slurm_logs")
         if not os.path.isdir(slurm_logs_dir):
             return ""
 
         # Search by job_id or experiment_id in filename
         search_term = job_id or experiment_id
+        matches = []
         for root, dirs, files in os.walk(slurm_logs_dir):
             for f in files:
                 if search_term in f and f.endswith(f".{ext}"):
-                    return os.path.join(root, f)
-        return ""
+                    matches.append(os.path.join(root, f))
+        if len(matches) > 1:
+            raise ValueError("Ambiguous local logs; select a cluster-qualified job ID")
+        return matches[0] if matches else ""
 
     def logs(self, cluster_name: str = "", job_id: str = "", experiment_id: str = "", lines: int = 200) -> str:
         """Read SLURM stdout log from local .xgenius/slurm_logs/.
@@ -517,8 +543,6 @@ class JobManager:
             [cluster_name] if cluster_name else list(self.config.clusters.keys())
         )
 
-        all_db_jobs = {j["job_id"] for j in self.db.get_all_jobs(limit=10000)}
-
         completions = []
         for cname in clusters_to_check:
             cluster = self._get_cluster(cname)
@@ -544,13 +568,13 @@ class JobManager:
                 try:
                     data = json.loads(cat_result.stdout)
                     job_id = str(data.get("job_id", ""))
-
-                    if job_id not in all_db_jobs:
+                    tracked = self.db.get_job(job_id, cname)
+                    if not tracked:
                         files_to_remove.append(marker_path)
                         continue
 
                     completion = CompletionEvent(
-                        job_id=job_id,
+                        job_id=tracked["job_id"],
                         experiment_id=str(data.get("experiment_id", "")),
                         exit_code=int(data.get("exit_code", -1)),
                         cluster=cname,
@@ -790,14 +814,14 @@ class JobManager:
         effective_cpus: int = 8,
         effective_memory: str = "",
         effective_walltime: str = "",
-    ) -> None:
+    ) -> str:
         """Record a submitted job in the DB."""
         cluster_config = self._get_cluster(cluster)
-        log_dir = os.path.join(cluster_config.scratch_path, ".xgenius", "logs")
-        log_file = os.path.join(log_dir, f"{experiment_id}_{job_id}.out")
+        log_dir = posixpath.join(cluster_config.scratch_path, ".xgenius", "logs")
+        log_file = posixpath.join(log_dir, f"{experiment_id}_{job_id}.out")
 
         self.db.record_job(
-            job_id=job_id,
+            job_id=f"{cluster}:{job_id}",
             cluster=cluster,
             experiment_id=experiment_id,
             hypothesis_id=hypothesis_id,
@@ -808,7 +832,9 @@ class JobManager:
             cpus=effective_cpus,
             memory=effective_memory,
             walltime=effective_walltime,
+            external_job_id=job_id,
         )
+        return f"{cluster}:{job_id}"
 
     def _update_job_status(self, job_id: str, new_status: str, gpu_hours: float = 0) -> None:
         """Update job status in DB."""

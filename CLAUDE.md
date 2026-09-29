@@ -4,7 +4,7 @@ This file provides shared guidance to Claude Code and GitHub Copilot CLI when wo
 
 ## Project Overview
 
-xgenius is an LLM-oriented autonomous research platform for SLURM clusters. It provides CLI tools that enable Claude Code or GitHub Copilot CLI to autonomously run experiments, track hypotheses, and iterate on research — with safety guarantees for shared infrastructure.
+xgenius is a local-first autonomous research harness for Claude Code or GitHub Copilot CLI, with native, WSL2 and local Docker execution and a preserved legacy SLURM workflow. Trusted agent execution is not a sandbox. See `docs/local-research.md`.
 
 ## Build & Install
 
@@ -13,7 +13,7 @@ pip install -e .           # editable install for development
 pip install .              # standard install
 ```
 
-Dependencies: `rich`, `paramiko`, `scp`, `tomli_w`. Requires Python 3.11+ (`tomllib` in stdlib).
+Dependencies: `rich`, `paramiko`, `scp`, `tomli_w`, `psutil`, and Windows-only `pywin32`. Requires Python 3.11+ (`tomllib` in stdlib).
 
 ## Running Tests
 
@@ -24,13 +24,19 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 
 ## Architecture
 
-**Config-driven**: Everything starts from `xgenius.toml` (TOML format). Created by `xgenius init` in any project. Contains cluster definitions, SLURM parameters, safety limits, and watcher settings.
+**Config-driven**: Everything starts from `xgenius.toml`. New local projects configure named runners, campaign limits, declared inputs and agent settings. Legacy projects retain cluster definitions, SLURM limits and watcher settings.
 
 **Two state systems**:
 - **SQLite DB** (`.xgenius/xgenius.db`) — automated operational state (job statuses, walltimes, exit codes). Updated by the watcher every cycle.
 - **Research Journal** (`.xgenius/journal.md`) — the agent's persistent research memory. Written by the agent, read at the start of every session.
 
 **Module layout:**
+- `xgenius/local_config.py`, `local_cli.py` — explicit schema v2 local contracts and command routing; absent schema version stays SLURM
+- `xgenius/state.py`, `campaign.py` — migration-backed attempts/events/turns and campaign lifecycle
+- `xgenius/scheduler.py` — shared per-user CPU/RAM/GPU reservations; unknown liveness retains capacity
+- `xgenius/workspace.py` — explicit source snapshots, declared inputs, registered artifacts
+- `xgenius/backends.py`, `worker.py`, `payload.py` — owned independent native/WSL/Docker execution; guests write receipts, never host SQLite
+- `xgenius/agent_policy.py`, `agent_worker.py` — bounded provider sessions, maintenance serialization, isolated optional sandbox preflight
 - `xgenius/cli.py` — Unified CLI (argparse with 25+ subcommands, all support `--json`)
 - `xgenius/config.py` — TOML config loading, validation, dataclasses, run ID management
 - `xgenius/agent.py` — shared non-interactive launcher using `[watcher].trigger_command` for watch, report, and compact
@@ -45,9 +51,9 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 - `xgenius/templates.py` — SBATCH template loading, `{{PLACEHOLDER}}` rendering, trap-based completion epilog
 - `xgenius/dashboard.py` — Web-based DB browser for human inspection
 
-**Safety enforcement**: Three layers — Python-level `SafetyValidator` (command allowlist, resource limits, path containment), Singularity containerization (filesystem isolation), SLURM scheduler limits.
+**Safety enforcement**: Local resource reservations and owned process supervision do not constrain an unrestricted agent. Legacy SLURM operations use `SafetyValidator`, containerization, and scheduler limits. Remote paths use POSIX semantics even on Windows.
 
-**Per-project state**: `xgenius init` creates `xgenius.toml`, `research_goal.md`, and `.xgenius/` directory with:
+**Per-project state**: `xgenius init` creates `xgenius.toml`, `research_goal.md`, and `.xgenius/`. Local projects add per-attempt snapshots/receipts and agent-turn logs. Legacy cluster projects also use templates and SLURM logs:
 - `xgenius.db` — SQLite operational database
 - `journal.md` — research memory
 - `DEBUG.md` — error log for human review
@@ -63,8 +69,8 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 - Job IDs are captured from `sbatch` stdout and tracked in the SQLite DB
 - SBATCH scripts get a trap-based completion epilog that writes `.done` marker files on the cluster
 - The watcher daemon polls for markers, syncs DB from squeue, pulls results + SLURM logs locally, and triggers a fresh agent session per completion batch
-- `xgenius init --agent copilot` selects `copilot --allow-all`; plain `init` keeps Claude as the default. Both CLIs use the generated `CLAUDE.md` instructions. Existing projects switch via `[watcher].trigger_command`.
+- `xgenius init --agent copilot` selects `copilot --allow-all`; plain `init` keeps Claude as the default. New projects are local. `--backend slurm` selects legacy init; legacy projects switch agents via `[watcher].trigger_command`, local projects via `[agent].command`.
 - Each run has a unique ID (xg-XXXXXX) that scopes SLURM job names and prevents old jobs from interfering
-- SLURM logs are pulled to `.xgenius/slurm_logs/{hypothesis_id}/{experiment_id}/` for local inspection
+- New SLURM logs are pulled to `.xgenius/slurm_logs/{cluster}/{hypothesis_id}/{experiment_id}/`; unambiguous legacy logs remain readable.
 - Project-local SBATCH templates in `.xgenius/templates/` take priority over package templates
 - `xgenius compact` spawns the configured agent to intelligently compact the research journal — reducing size while preserving all essential context (findings, hypothesis statuses, decisions, human directives, next steps). The original journal is backed up before replacement. Call this when the journal grows large and starts consuming too much context. Works with `--json` for programmatic use.

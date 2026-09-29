@@ -7,8 +7,11 @@ Every command supports --json for structured output.
 import argparse
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 
+import psutil
 from rich.console import Console
 from rich.table import Table
 
@@ -465,7 +468,7 @@ def cmd_submit(args):
     manager = JobManager(config)
     result = manager.submit(
         cluster_name=args.cluster,
-        command=args.command,
+        command=args.command_text,
         experiment_id=args.experiment_id or "",
         hypothesis_id=args.hypothesis_id or "",
         num_gpus=args.gpus,
@@ -778,8 +781,22 @@ def cmd_results(args):
     project_dir = get_project_dir(config)
     bank = ResultsBank(os.path.join(project_dir, "results"))
 
+    if args.results_command in ("attempts", "export"):
+        if not config.local:
+            raise ValueError("Registered attempt results require a local campaign")
+        from xgenius.results import registered_results, export_registered
+        result = registered_results(config) if args.results_command == "attempts" else {
+            "path": export_registered(config)}
+        _output(result, args.json)
+        return
     if args.results_command == "summary":
-        _output(bank.summary(), args.json)
+        if config.local:
+            from xgenius.results import registered_results
+            rows = registered_results(config)
+            _output({"results_bank": bank.summary(), "attempts": len(rows),
+                     "artifacts": sum(len(row["artifacts"]) for row in rows)}, args.json)
+        else:
+            _output(bank.summary(), args.json)
     elif args.results_command == "experiments":
         _output(bank.experiments.get_all(), args.json)
     elif args.results_command == "hypotheses":
@@ -804,10 +821,16 @@ def cmd_report(args):
     """Spawn the configured agent to generate a thorough research report."""
     from xgenius.agent import run_agent
     config = _load_config(args)
+    from xgenius.agent_policy import require_idle_agent
+    require_idle_agent(config)
     from xgenius.config import get_project_dir
 
     project_dir = get_project_dir(config)
-    report_dir = os.path.join(project_dir, "report")
+    if config.local:
+        from xgenius.state import identifier
+        report_dir = os.path.join(project_dir, "reports", identifier())
+    else:
+        report_dir = os.path.join(project_dir, "report")
     os.makedirs(report_dir, exist_ok=True)
     output_md = os.path.join(report_dir, "report.md")
     output_html = os.path.join(report_dir, "report.html")
@@ -864,6 +887,17 @@ Write a markdown report with:
    - The human will open this HTML in a browser
 5. The entire `report/` directory should be downloadable as a standalone research report
 """
+    if config.local:
+        prompt = f"""Generate a research report using only the research goal, journal,
+`xgenius db summary --json`, `xgenius results summary --json`, and approved
+registered artifact summaries (`xgenius results attempts --json`). Do not open raw inputs, source datasets, private
+targets, credentials, or bulk logs. Do not install packages or upload anything.
+Write nonempty Markdown to {output_md} and self-contained HTML to {output_html}.
+Use measured results, distinguish execution, validation and scientific acceptance,
+and clearly describe missing evidence. Include tables and available local plots;
+do not invent metrics. Put new images under {report_dir}.
+This is a new historical snapshot. Never delete or modify earlier reports.
+"""
 
     if not args.json:
         console.print("[bold]Generating research report...[/bold]")
@@ -875,6 +909,10 @@ Write a markdown report with:
         _output({"status": "error", "reason": f"Could not start report agent: {e}"}, args.json)
         sys.exit(1)
 
+    if result.returncode == 0 and config.local:
+        if not all(os.path.isfile(p) and os.path.getsize(p) for p in (output_md, output_html)):
+            _output({"status": "error", "reason": "Report agent did not produce nonempty Markdown and HTML"}, args.json)
+            sys.exit(1)
     if result.returncode == 0:
         if args.json:
             _output({"status": "generated", "report_dir": report_dir}, True)
@@ -900,6 +938,8 @@ def cmd_compact(args):
     from xgenius.agent import run_agent
     import tempfile
     config = _load_config(args)
+    from xgenius.agent_policy import require_idle_agent
+    require_idle_agent(config)
     from xgenius.journal import ResearchJournal
     from xgenius.config import get_project_dir
 
@@ -922,12 +962,14 @@ def cmd_compact(args):
         console.print("Spawning the configured agent to distill the journal while preserving essential research context.")
 
     # Write current journal to a temp file for the agent to read
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", prefix="journal_full_", dir=project_dir, delete=False)
+    tmp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".md",
+                                      prefix="journal_full_", dir=project_dir, delete=False)
     tmp.write(content)
     tmp.close()
 
     # Where the agent writes the compacted output
-    compact_out = tempfile.NamedTemporaryFile(mode="w", suffix=".md", prefix="journal_compact_", dir=project_dir, delete=False)
+    compact_out = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".md",
+                                              prefix="journal_compact_", dir=project_dir, delete=False)
     compact_out.close()
 
     prompt = f"""You are a research journal compactor. Your job is to read a research journal and produce a compacted version that preserves ALL essential information while dramatically reducing size.
@@ -1039,7 +1081,7 @@ For each hypothesis that matters:
             console.print("[red]Agent produced empty output — journal unchanged.[/red]")
         sys.exit(1)
 
-    with open(compact_out.name) as f:
+    with open(compact_out.name, encoding="utf-8") as f:
         compacted = f.read()
 
     new_size = len(compacted)
@@ -1047,6 +1089,11 @@ For each hypothesis that matters:
     reduction = round((1 - new_size / original_size) * 100, 1) if original_size > 0 else 0
 
     # Backup original journal, then replace
+    if journal.read() != content:
+        os.unlink(tmp.name)
+        os.unlink(compact_out.name)
+        _output({"status": "error", "reason": "Journal changed during compaction; refusing to replace it"}, args.json)
+        sys.exit(1)
     backup_path = journal.backup()
     journal.replace(compacted)
 
@@ -1110,6 +1157,27 @@ def cmd_audit(args):
 def cmd_reset(args):
     """Reset xgenius state for a fresh research run."""
     config = _load_config(args)
+    if config.local:
+        from xgenius.campaign import Campaign
+        from xgenius.backends import alive
+        campaign = Campaign(config)
+        current = campaign.state.campaign()
+        if (current["controller"] and alive(json.loads(current["controller"]))) or any(
+                a["status"] in ("queued", "starting", "running", "recovery_required")
+                for a in campaign.state.attempts()):
+            raise ValueError("Stop/reconcile all campaign jobs and controllers before reset")
+        from xgenius.agent_policy import require_idle_agent
+        require_idle_agent(config)
+        from pathlib import Path
+        from xgenius.state import LocalState, identifier
+        archive = Path(config.config_path).parent / ".xgenius-archives" / identifier()
+        archive.parent.mkdir(exist_ok=True)
+        for attempt in campaign.state.attempts():
+            campaign.ledger.finish(attempt["id"])
+        campaign.state.root.rename(archive)
+        state = LocalState(config)
+        _output({"status": "reset", "archive": str(archive), "campaign_id": state.id}, args.json)
+        return
     from xgenius.config import get_xgenius_dir, create_run_id
 
     xgenius_dir = get_xgenius_dir(config)
@@ -1235,6 +1303,9 @@ def cmd_steer(args):
 
     entry = f"## HUMAN DIRECTIVE [{priority}]\n\n{directive}"
     journal.write(entry)
+    if config.local:
+        from xgenius.state import LocalState
+        LocalState(config).event("directive", {"priority": priority, "directive": directive})
 
     if args.json:
         _output({"status": "recorded", "priority": priority}, True)
@@ -1269,7 +1340,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="xgenius",
-        description="LLM-oriented autonomous research platform for SLURM clusters",
+        description="Local-first autonomous research with optional SLURM execution",
         parents=[parent_parser],
     )
 
@@ -1278,14 +1349,18 @@ def main():
     # init
     p = subparsers.add_parser("init", parents=[parent_parser], help="Initialize xgenius in current project")
     p.add_argument("--force", action="store_true", help="Overwrite existing config")
+    p.add_argument("--backend", choices=["local", "slurm"], default="local",
+                   help="New project execution model (default: local)")
     p.add_argument("--agent", choices=["claude", "copilot"], default="claude",
                    help="Research CLI to use for watch, report, and compact (default: claude)")
     p.set_defaults(func=cmd_init)
 
     # submit
     p = subparsers.add_parser("submit", parents=[parent_parser], help="Submit a job to a SLURM cluster")
-    p.add_argument("--cluster", required=True, help="Cluster name")
-    p.add_argument("--command", required=True, help="Command to run in container")
+    p.add_argument("--cluster", help="Cluster name (legacy SLURM)")
+    p.add_argument("--command", dest="command_text", help="Command to run in a SLURM container")
+    p.add_argument("--spec", help="Local job JSON manifest with argv and idempotency key")
+    p.add_argument("--runner", help="Named local runner (may also be selected in the manifest)")
     p.add_argument("--experiment-id", default="", help="Experiment identifier")
     p.add_argument("--hypothesis-id", default="", help="Associated hypothesis ID")
     p.add_argument("--gpus", type=int, default=None, help="GPUs (override, must be <= safety max)")
@@ -1307,7 +1382,7 @@ def main():
 
     # cancel
     p = subparsers.add_parser("cancel", parents=[parent_parser], help="Cancel specific jobs")
-    p.add_argument("--cluster", required=True, help="Cluster name")
+    p.add_argument("--cluster", help="Cluster name (legacy SLURM)")
     p.add_argument("--job-ids", required=True, help="Comma-separated job IDs")
     p.set_defaults(func=cmd_cancel)
 
@@ -1351,6 +1426,7 @@ def main():
 
     # build
     p = subparsers.add_parser("build", parents=[parent_parser], help="Build Singularity container")
+    p.add_argument("--runner", help="Named local Docker runner")
     p.add_argument("--dockerfile", default=None, help="Path to Dockerfile")
     p.add_argument("--image-name", default=None, help="Output image name")
     p.add_argument("--tag", default="latest", help="Docker tag")
@@ -1399,6 +1475,8 @@ def main():
     # results (with sub-subcommands)
     p = subparsers.add_parser("results", parents=[parent_parser], help="Query the results bank")
     rp = p.add_subparsers(dest="results_command", required=True)
+    rp.add_parser("attempts", parents=[parent_parser], help="Local attempt outcomes and registered artifact summaries")
+    rp.add_parser("export", parents=[parent_parser], help="Export local outcomes to results/attempts.csv")
     rp.add_parser("summary", parents=[parent_parser], help="Results bank summary")
     rp.add_parser("experiments", parents=[parent_parser], help="All experiment results")
     rp.add_parser("hypotheses", parents=[parent_parser], help="All hypotheses with status/notes")
@@ -1478,8 +1556,43 @@ def main():
     p.add_argument("--priority", default="critical", choices=["critical", "high", "normal"], help="Priority level")
     p.set_defaults(func=cmd_steer)
 
+    from xgenius import local_cli
+    local_cli.register(subparsers, parent_parser)
     args = parser.parse_args()
-    args.func(args)
+    try:
+        if args.command == "init" and args.backend == "local":
+            _output(local_cli.initialize(args), args.json)
+            return
+        if hasattr(args, "local_action"):
+            result = local_cli.execute(args)
+            _output(result, args.json)
+            if result.get("state") == "blocked" or result.get("failed_attempts", 0):
+                sys.exit(1)
+            return
+        routed = {"submit", "batch-submit", "status", "cancel", "logs", "errors",
+                  "check-completions", "reconcile", "budget", "watch",
+                  "sync", "pull", "push-image", "verify-image", "ls", "build"}
+        if args.command in routed:
+            config = _load_config(args)
+            if config.local:
+                result = local_cli.execute(args, config)
+                _output(result, args.json)
+                if isinstance(result, list) and any(not r.get("success", True) for r in result):
+                    sys.exit(1)
+                return
+        if args.command == "submit" and (not args.cluster or not args.command_text):
+            raise ValueError("SLURM submission requires --cluster and --command")
+        if args.command == "submit" and (args.spec or args.runner):
+            raise ValueError("--spec/--runner require local configuration")
+        if args.command in ("compact", "report"):
+            from xgenius.agent_policy import maintenance_lock
+            with maintenance_lock(_load_config(args)):
+                args.func(args)
+        else:
+            args.func(args)
+    except (ValueError, OSError, RuntimeError, sqlite3.Error, subprocess.TimeoutExpired, psutil.Error) as e:
+        _output({"status": "error", "reason": str(e)}, args.json)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

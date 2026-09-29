@@ -9,10 +9,13 @@ import json
 import os
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+import uuid
 
 from xgenius.config import XGeniusConfig, get_xgenius_dir, ensure_xgenius_dir
 
+ACTIVE_STATUSES = ("queued", "starting", "submitted", "pending", "running", "recovery_required")
+ACTIVE_SQL = ",".join(f"'{s}'" for s in ACTIVE_STATUSES)
 
 @contextmanager
 def _connect(db_path: str):
@@ -59,6 +62,14 @@ class XGeniusDB:
     def _init_db(self):
         """Create tables if they don't exist."""
         with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > 1:
+                raise ValueError(f"Operational database version {version} is newer than this xgenius")
+            if version == 0 and conn.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
+                backup = self.db_path + ".before-db-v1-" + uuid.uuid4().hex
+                with closing(sqlite3.connect(self.db_path)) as source, closing(sqlite3.connect(backup)) as target:
+                    source.backup(target)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
@@ -102,11 +113,14 @@ class XGeniusDB:
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
             if "last_checked_at" not in existing_cols:
                 conn.execute("ALTER TABLE jobs ADD COLUMN last_checked_at TEXT DEFAULT NULL")
+            if "external_job_id" not in existing_cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN external_job_id TEXT DEFAULT ''")
 
             # Index for common queries
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_hypothesis ON jobs(hypothesis_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status)")
+            conn.execute("PRAGMA user_version=1")
 
     # =========================================================================
     # JOBS — automatically maintained by xgenius
@@ -115,17 +129,17 @@ class XGeniusDB:
     def record_job(self, job_id: str, cluster: str, experiment_id: str,
                    hypothesis_id: str, command: str, log_file: str = "",
                    gpus: int = 1, gpu_type: str = "", cpus: int = 8,
-                   memory: str = "", walltime: str = "") -> None:
+                   memory: str = "", walltime: str = "", external_job_id: str = "") -> None:
         """Record a newly submitted job."""
         with _connect(self.db_path) as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO jobs
                 (job_id, cluster, experiment_id, hypothesis_id, command, status,
-                 submitted_at, log_file, gpus, gpu_type, cpus, memory, walltime_requested)
-                VALUES (?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?)
+                 submitted_at, log_file, gpus, gpu_type, cpus, memory, walltime_requested, external_job_id)
+                VALUES (?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, cluster, experiment_id, hypothesis_id, command,
                   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                  log_file, gpus, gpu_type, cpus, memory, walltime))
+                  log_file, gpus, gpu_type, cpus, memory, walltime, external_job_id or job_id))
 
     def update_job_status(self, job_id: str, status: str, **kwargs) -> None:
         """Update a job's status and optional fields.
@@ -167,11 +181,18 @@ class XGeniusDB:
         with _connect(self.db_path) as conn:
             conn.execute("UPDATE jobs SET results_pulled=1 WHERE job_id=?", (job_id,))
 
-    def get_job(self, job_id: str) -> dict | None:
+    def get_job(self, job_id: str, cluster: str | None = None) -> dict | None:
         """Get a single job by ID."""
         with _connect(self.db_path) as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-            return dict(row) if row else None
+            sql = "SELECT * FROM jobs WHERE (job_id=? OR external_job_id=?)"
+            params = [job_id, job_id]
+            if cluster:
+                sql += " AND cluster=?"
+                params.append(cluster)
+            rows = conn.execute(sql, params).fetchall()
+            if len(rows) > 1:
+                raise ValueError("Ambiguous scheduler ID; use the cluster-qualified job ID")
+            return dict(rows[0]) if rows else None
 
     def get_jobs_by_hypothesis(self, hypothesis_id: str) -> list[dict]:
         """Get all jobs for a hypothesis."""
@@ -193,7 +214,7 @@ class XGeniusDB:
         """Get all jobs that are submitted or running."""
         with _connect(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE status IN ('submitted', 'running') ORDER BY submitted_at"
+                f"SELECT * FROM jobs WHERE status IN ({ACTIVE_SQL}) ORDER BY submitted_at"
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -201,7 +222,7 @@ class XGeniusDB:
         """Get set of job IDs that are submitted or running."""
         with _connect(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT job_id FROM jobs WHERE status IN ('submitted', 'running')"
+                f"SELECT job_id FROM jobs WHERE status IN ({ACTIVE_SQL})"
             ).fetchall()
             return {r["job_id"] for r in rows}
 
@@ -216,9 +237,9 @@ class XGeniusDB:
     def is_hypothesis_complete(self, hypothesis_id: str) -> bool:
         """Check if ALL jobs for a hypothesis have finished (completed/failed/cancelled)."""
         with _connect(self.db_path) as conn:
-            row = conn.execute("""
+            row = conn.execute(f"""
                 SELECT COUNT(*) as pending FROM jobs
-                WHERE hypothesis_id=? AND status IN ('submitted', 'running')
+                WHERE hypothesis_id=? AND status IN ({ACTIVE_SQL})
             """, (hypothesis_id,)).fetchone()
             return row["pending"] == 0
 
@@ -232,7 +253,7 @@ class XGeniusDB:
             summary = {r["status"]: r["count"] for r in rows}
             total = sum(summary.values())
             summary["total"] = total
-            summary["all_done"] = summary.get("submitted", 0) + summary.get("running", 0) == 0
+            summary["all_done"] = sum(summary.get(s, 0) for s in ACTIVE_STATUSES) == 0
             return summary
 
     def get_all_jobs(self, limit: int = 500) -> list[dict]:
@@ -274,7 +295,7 @@ class XGeniusDB:
             for h in hyp_meta:
                 hid = h["hypothesis_id"]
                 job_counts = hypotheses.get(hid, {})
-                pending = job_counts.get("submitted", 0) + job_counts.get("running", 0)
+                pending = sum(job_counts.get(s, 0) for s in ACTIVE_STATUSES)
                 hyp_info[hid] = {
                     "description": h["description"][:80],
                     "status": h["status"],
@@ -431,7 +452,7 @@ class XGeniusDB:
         """Get job IDs that are in non-terminal states."""
         with _connect(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT job_id FROM jobs WHERE status IN ('submitted', 'pending', 'running')"
+                f"SELECT job_id FROM jobs WHERE status IN ({ACTIVE_SQL})"
             ).fetchall()
             return {r["job_id"] for r in rows}
 
@@ -485,7 +506,7 @@ class XGeniusDB:
                 elif info["all_done"]:
                     tag = "ALL DONE (check for failures)"
                 else:
-                    pending = jobs.get("submitted", 0) + jobs.get("running", 0)
+                    pending = sum(jobs.get(s, 0) for s in ACTIVE_STATUSES)
                     tag = f"WAITING ({pending} running)"
 
                 parts.append(f"- **{hid}** [{info['status']}]: {counts} — **{tag}**")

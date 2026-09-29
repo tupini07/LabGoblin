@@ -4,9 +4,11 @@ Loads and validates xgenius.toml project configuration files.
 """
 
 import os
+import posixpath
 import shlex
 import tomllib
 from dataclasses import dataclass, field
+from xgenius.local_config import LocalConfig, parse_local
 
 
 AGENT_COMMANDS = {
@@ -99,6 +101,7 @@ class XGeniusConfig:
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
     clusters: dict[str, ClusterConfig] = field(default_factory=dict)
     config_path: str = ""  # Path to the loaded config file
+    local: LocalConfig | None = None
 
 
 def _parse_slurm(data: dict) -> SlurmConfig:
@@ -198,6 +201,7 @@ def load_config(path: str = "xgenius.toml") -> XGeniusConfig:
         watcher=watcher,
         clusters=clusters,
         config_path=path,
+        local=parse_local(raw),
     )
 
     _validate_config(config)
@@ -217,9 +221,9 @@ def _validate_config(config: XGeniusConfig) -> None:
             raise ValueError(f"Cluster '{name}' missing required field: project_path")
         if not cluster.scratch_path:
             raise ValueError(f"Cluster '{name}' missing required field: scratch_path")
-        if not os.path.isabs(cluster.project_path):
+        if not posixpath.isabs(cluster.project_path):
             raise ValueError(f"Cluster '{name}' project_path must be absolute: {cluster.project_path}")
-        if not os.path.isabs(cluster.scratch_path):
+        if not posixpath.isabs(cluster.scratch_path):
             raise ValueError(f"Cluster '{name}' scratch_path must be absolute: {cluster.scratch_path}")
 
 

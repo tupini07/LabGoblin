@@ -48,10 +48,12 @@ class BudgetReport:
     active_jobs: int
     max_concurrent_jobs: int
     jobs_slots_remaining: int
+    gpu_hours_reserved: float = 0
 
     def to_dict(self) -> dict:
         return {
             "gpu_hours_used": round(self.gpu_hours_used, 2),
+            "gpu_hours_reserved": round(self.gpu_hours_reserved, 2),
             "gpu_hours_limit": self.gpu_hours_limit,
             "gpu_hours_remaining": round(self.gpu_hours_remaining, 2),
             "active_jobs": self.active_jobs,
@@ -221,7 +223,11 @@ class SafetyValidator:
         """Get current compute budget status."""
         gpu_hours_used = self._calculate_gpu_hours_used()
         active_jobs = self._count_active_jobs()
-        gpu_hours_remaining = max(0, self.safety.max_total_gpu_hours - gpu_hours_used)
+        from xgenius.db import XGeniusDB
+        gpu_hours_reserved = sum(
+            max(0, row["gpus"] * parse_walltime(row["walltime_requested"] or self.safety.max_walltime) / 3600
+                - (row["gpu_hours"] or 0)) for row in XGeniusDB(self.config).get_pending_jobs())
+        gpu_hours_remaining = max(0, self.safety.max_total_gpu_hours - gpu_hours_used - gpu_hours_reserved)
         job_slots = max(0, self.safety.max_concurrent_jobs - active_jobs)
 
         return BudgetReport(
@@ -231,6 +237,7 @@ class SafetyValidator:
             active_jobs=active_jobs,
             max_concurrent_jobs=self.safety.max_concurrent_jobs,
             jobs_slots_remaining=job_slots,
+            gpu_hours_reserved=gpu_hours_reserved,
         )
 
     def log_action(self, action: str, details: dict, result: ValidationResult) -> None:
@@ -265,35 +272,13 @@ class SafetyValidator:
         return entries[-limit:]
 
     def _count_active_jobs(self) -> int:
-        """Count jobs with status 'submitted' or 'running' from job tracker."""
-        jobs_path = os.path.join(self._xgenius_dir, "jobs.jsonl")
-        if not os.path.exists(jobs_path):
-            return 0
-
-        active = 0
-        with open(jobs_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                job = json.loads(line)
-                if job.get("status") in ("submitted", "running"):
-                    active += 1
-        return active
+        """Count active jobs from the authoritative operational database."""
+        from xgenius.db import XGeniusDB
+        return len(XGeniusDB(self.config).get_active_job_ids())
 
     def _calculate_gpu_hours_used(self) -> float:
-        """Calculate total GPU-hours consumed from completed jobs."""
-        jobs_path = os.path.join(self._xgenius_dir, "jobs.jsonl")
-        if not os.path.exists(jobs_path):
-            return 0.0
-
-        total = 0.0
-        with open(jobs_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                job = json.loads(line)
-                if job.get("status") == "completed" and "gpu_hours" in job:
-                    total += job["gpu_hours"]
-        return total
+        """Account for recorded usage across all outcomes, not just success."""
+        from xgenius.db import XGeniusDB, _connect
+        db = XGeniusDB(self.config)
+        with _connect(db.db_path) as c:
+            return float(c.execute("SELECT COALESCE(SUM(gpu_hours),0) FROM jobs").fetchone()[0])

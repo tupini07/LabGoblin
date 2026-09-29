@@ -7,6 +7,7 @@ and decide next steps.
 """
 
 import os
+import posixpath
 import subprocess
 import time
 
@@ -252,7 +253,7 @@ class ContainerManager:
             return {"success": False, "error": f"Image not found: {image_path}"}
 
         ssh = SSHClient(cluster)
-        remote_path = os.path.join(cluster.image_path, os.path.basename(image_path))
+        remote_path = posixpath.join(cluster.image_path, os.path.basename(image_path))
         steps = []
 
         # Step 1: Create remote directory
@@ -310,7 +311,7 @@ class ContainerManager:
         image_name = image_name or os.path.basename(self.config.project.container_image)
         ssh = SSHClient(cluster)
 
-        image_path = os.path.join(cluster.image_path, image_name)
+        image_path = posixpath.join(cluster.image_path, image_name)
         result = ssh.run(f"ls -lh {image_path}")
 
         if not result.success or image_name not in result.stdout:

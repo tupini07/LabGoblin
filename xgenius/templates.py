@@ -4,6 +4,7 @@ Handles loading, rendering, and epilog injection for SBATCH scripts.
 """
 
 import os
+import posixpath
 import re
 
 from xgenius.config import ClusterConfig
@@ -200,8 +201,8 @@ def build_params_from_cluster(cluster: ClusterConfig, container_image: str = "")
     # Resolve full image path: if image_path is a directory, join with container_image basename
     image_path = cluster.image_path
     if container_image and not image_path.endswith(".sif"):
-        image_path = os.path.join(image_path, os.path.basename(container_image))
-    image_name = os.path.basename(image_path)
+        image_path = posixpath.join(image_path, os.path.basename(container_image))
+    image_name = posixpath.basename(image_path)
 
     # GPU_TYPE: "h100:" when set, "" when empty — so gres becomes gpu:h100:1 or gpu:1
     gpu_type_prefix = f"{slurm.gpu_type}:" if slurm.gpu_type else ""
@@ -230,10 +231,10 @@ def build_params_from_cluster(cluster: ClusterConfig, container_image: str = "")
     # Log directory and file — all logs go to a predictable xgenius-managed path
     # The experiment_id and job_id (%j) are embedded in the filename so Claude
     # can always find logs by experiment name or SLURM job ID.
-    log_dir = os.path.join(cluster.scratch_path, ".xgenius", "logs")
+    log_dir = posixpath.join(cluster.scratch_path, ".xgenius", "logs")
     params["LOG_DIR"] = log_dir
     # LOG_FILE uses %j which SLURM replaces with the actual job ID at runtime.
     # EXPERIMENT_ID is set later in render_template, but we set a default here.
-    params["LOG_FILE"] = os.path.join(log_dir, "{{EXPERIMENT_ID}}_%j.out")
+    params["LOG_FILE"] = posixpath.join(log_dir, "{{EXPERIMENT_ID}}_%j.out")
 
     return params

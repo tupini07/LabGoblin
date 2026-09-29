@@ -50,8 +50,8 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
         try:
             with open(lock_path) as f:
                 pid = int(f.read().strip())
-            os.kill(pid, 0)
-            return True
+            import psutil
+            return psutil.pid_exists(pid)
         except (ValueError, ProcessLookupError, PermissionError):
             os.remove(lock_path)
             return False
@@ -154,6 +154,7 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
 
             if needs_trigger:
                 prompt = db.build_wakeup_prompt(completions=completions if completions else None)
+                delivered_ids = {c.job_id for c in completions}
                 remaining = len(db.get_active_job_ids())
                 _log(f"Triggering agent: {len(completions)} new completion(s), {remaining} still active")
 
@@ -167,7 +168,8 @@ def run_watcher(config_path: str = "xgenius.toml", verbose: bool = False) -> Non
                         # Agent succeeded — mark all completed jobs as processed
                         # This prevents retriggering for these jobs next cycle
                         for job in db.get_completed_not_pulled():
-                            db.mark_results_pulled(job["job_id"])
+                            if job["job_id"] in delivered_ids:
+                                db.mark_results_pulled(job["job_id"])
                         _log("Agent finished successfully. Marked jobs as processed.")
                 finally:
                     if os.path.exists(lock_path):

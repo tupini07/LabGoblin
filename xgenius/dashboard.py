@@ -8,11 +8,13 @@ Uses only Python stdlib (http.server + sqlite3) — no extra deps.
 import html
 import json
 import os
+from pathlib import Path
 import sqlite3
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from xgenius.config import load_config, get_xgenius_dir, get_run_id
+from xgenius.db import ACTIVE_SQL
 
 
 DB_PATH = ""
@@ -45,6 +47,8 @@ def _render_table(rows: list[dict], title: str = "", highlight_col: str = "") ->
                     "completed": "#2ecc71", "failed": "#e74c3c", "running": "#3498db",
                     "pending": "#f39c12", "submitted": "#f39c12", "cancelled": "#95a5a6",
                     "disappeared": "#e67e22", "timeout": "#e74c3c", "oom": "#e74c3c",
+                    "queued": "#f39c12", "starting": "#f39c12", "recovery_required": "#e74c3c",
+                    "timed_out": "#e74c3c", "interrupted": "#e74c3c",
                     "proposed": "#f39c12", "open": "#3498db", "promising": "#2ecc71", "closed": "#95a5a6",
                 }
                 bg = color_map.get(val.lower(), "")
@@ -124,6 +128,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             content = self._debug()
         elif path == "/hypothesis":
             content = self._hypothesis_detail(params)
+        elif path == "/artifact" and CONFIG.local:
+            rows = _query("SELECT a.path,t.spec FROM artifacts a JOIN attempts t ON t.id=a.attempt_id WHERE a.id=?",
+                          (params.get("id", [""])[0],))
+            if not rows:
+                self.send_error(404, "Unknown artifact")
+                return
+            from xgenius.workspace import contained
+            artifact = contained(Path(json.loads(rows[0]["spec"])["output"]), rows[0]["path"])
+            if not artifact.is_file():
+                self.send_error(404, "Artifact no longer present")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", "attachment")
+            self.send_header("Content-Length", str(artifact.stat().st_size))
+            self.end_headers()
+            with artifact.open("rb") as f:
+                import shutil
+                shutil.copyfileobj(f, self.wfile)
+            return
         else:
             content = "<h2>Not Found</h2>"
 
@@ -148,12 +172,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         stats += '</div>'
 
         # Per-hypothesis summary
-        hyp_rows = _query("""
+        hyp_rows = _query(f"""
             SELECT h.hypothesis_id, h.description, h.status as hyp_status,
                    COUNT(j.job_id) as total_jobs,
                    SUM(CASE WHEN j.status='completed' THEN 1 ELSE 0 END) as completed,
                    SUM(CASE WHEN j.status='failed' THEN 1 ELSE 0 END) as failed,
-                   SUM(CASE WHEN j.status IN ('submitted','running','pending') THEN 1 ELSE 0 END) as active
+                   SUM(CASE WHEN j.status IN ({ACTIVE_SQL}) THEN 1 ELSE 0 END) as active
             FROM hypotheses h
             LEFT JOIN jobs j ON h.hypothesis_id = j.hypothesis_id
             GROUP BY h.hypothesis_id
@@ -176,7 +200,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         recent = _query("SELECT job_id, experiment_id, cluster, status, walltime_seconds, exit_code FROM jobs ORDER BY submitted_at DESC LIMIT 10")
         recent_table = _render_table(recent, "Recent Jobs")
 
-        return stats + hyp_table + recent_table
+        local = ""
+        if CONFIG.local:
+            local += _render_table(_query("SELECT id,state,reason,started FROM campaign"), "Campaign")
+            local += _render_table(_query(
+                "SELECT id,kind,state,started,ended,usage FROM turns ORDER BY started DESC LIMIT 20"), "Agent turns")
+            from xgenius.scheduler import ResourceLedger
+            local += _render_table(ResourceLedger().rows(), "Shared resource reservations")
+            artifacts = _query("SELECT id,attempt_id,path FROM artifacts ORDER BY rowid DESC LIMIT 100")
+            local += "<h2>Registered artifacts (download)</h2><ul>"
+            for artifact in artifacts:
+                local += (f'<li><a href="/artifact?id={html.escape(artifact["id"])}">'
+                          f'{html.escape(artifact["attempt_id"] + ": " + artifact["path"])}</a></li>')
+            local += "</ul>"
+        return stats + local + hyp_table + recent_table
 
     def _jobs(self, params: dict) -> str:
         status_filter = params.get("status", [None])[0]
@@ -184,7 +221,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         # Filter links
         filters = '<p>Filter: <a href="/jobs">All</a>'
-        for s in ["submitted", "running", "completed", "failed", "cancelled", "disappeared"]:
+        for s in ["queued", "starting", "submitted", "running", "completed", "failed",
+                  "cancelled", "timed_out", "interrupted", "recovery_required", "disappeared"]:
             filters += f' | <a href="/jobs?status={s}">{s}</a>'
         filters += '</p>'
 
