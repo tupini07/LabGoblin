@@ -1,33 +1,39 @@
-# Local research campaigns
+# Operating local research
 
-## Operating model
+## Fresh initialization and capacity
 
-Run the controller on Windows. Each project owns a SQLite database, journal,
-queue, and agent budget. Independent native supervisors run experiments locally,
-in an explicitly selected WSL distro, or in Linux Docker containers. All three
-share one per-user reservation ledger: WSL and Docker are not additional machines.
-There is no automatic backend fallback or remote staging.
+Run `xgenius init --agent copilot` in a dedicated project, or omit `--agent` for
+Claude. It creates schema-3 state and a shared owned section in `CLAUDE.md`,
+preserving unrelated text. `instructions --target copilot` explicitly updates
+the owned section in `.github/copilot-instructions.md` when that file takes
+precedence. Nothing changes global provider settings.
 
-The legacy SLURM adapter remains available through legacy configuration and
-`init --backend slurm`. A local configuration does not permit remote runners.
-Old configuration files are never rewritten on load. `init --force` is an explicit
-replacement, preserves the original TOML in a uniquely named backup, and refuses
-active or unresolved local work. It is not an automatic configuration translator.
+Config loading never creates state or migrates old installations. After an
+explicit quiescent `reset --confirm ID`, `init --existing-config` creates fresh
+state without overwriting the existing configuration/goal. Reset archives the
+old directory, not the ledger, and never starts research.
 
-`init` defaults to local execution and Claude; add `--agent copilot` to select
-Copilot. Both CLIs read the managed section of `CLAUDE.md`. User-written sections
-are preserved. New configuration uses an argv array in `[agent].command`;
-legacy configuration retains `[watcher].trigger_command`. Do not configure both.
+The shared ledger defaults to `%LOCALAPPDATA%\xgenius\resources.db` on Windows
+and the user's local state directory elsewhere. Tests can select an isolated
+ledger with `init --ledger PATH` or `XGENIUS_RESOURCE_DB`. Production campaigns
+sharing a workstation must coordinate through the same ledger; a new filename
+is not permission to ignore work in an older ledger.
+
+Configure capacity explicitly with `machine configure --cpus 2 --memory-mb 4096
+--headroom-mb 2048`. Reconfiguration refuses active/uncertain grants.
+Reasoning, experiments and maintenance compete fairly for capacity; a one-slot
+deployment alternates rather than keeping a permanent reasoning reservation.
+The oldest eligible satisfiable request gets a drain-to-fit barrier.
 
 ## Configuration
 
-The generated native runner records the interpreter used during initialization.
-Run it from a persistent installation, not an environment you intend to delete.
-An explicitly referenced interpreter/environment must already be prepared. Workers
-never install or synchronize dependencies and set `PYTHONDONTWRITEBYTECODE=1`.
+Init records the Python executable that ran it. Use a persistent prepared
+environment. Add only the runners needed for the investigation; no fallback is
+performed. `doctor --runner NAME --provider` checks the selected runner and
+model-free provider help, not all optional runners or a billable canary.
 
 ```toml
-schema_version = 2
+schema_version = 3
 
 [project]
 name = "local-study"
@@ -38,7 +44,7 @@ default_runner = "native"
 source_files = ["experiment.py"]
 
 [runners.native]
-kind = "local"
+kind = "native"
 python = 'D:\research-env\Scripts\python.exe'
 
 [runners.ubuntu]
@@ -48,395 +54,269 @@ python = "/usr/bin/python3"
 
 [runners.container]
 kind = "docker"
-context = "desktop-linux"
+context = "default"
 image = "python:3.11-slim"
 python = "python"
 network = false
 
 [campaign]
 cpus = 2
-memory_mb = 2048
+memory_mb = 4096
 gpus = []
 max_jobs = 1
 max_gpu_hours = 0
 max_seconds = 3600
+max_invocations = 10
 
 [agent]
+provider = "copilot"
 command = ["copilot", "--allow-all"]
-max_turns = 10
 timeout_seconds = 600
 retries = 1
 sandbox = false
+# model = "an explicitly supported installed-provider model"
+# reasoning_effort = "an explicitly supported effort"
 
-[inputs.observations]
-path = 'D:\approved-data\observations.json'
-identity = "observations-v1"
-prompt_access = false
-# sha256 = "an optional known SHA256 for a bounded file"
-# wsl_path = "/explicit/guest/mapping/observations.json"
+[agent.resources]
+cpus = 1
+memory_mb = 2048
+
+[storage]
+log_bytes = 16777216
+tail_bytes = 65536
+snapshot_bytes = 268435456
+capture_bytes = 1048576
+metrics_bytes = 262144
+
+[storage.volumes.project]
+path = "."
+min_free_mb = 2048
+
+# [inputs.observations]
+# path = 'D:\approved-data\observations.json'
+# identity = "observations-v1"
+# prompt_access = false
+# sha256 = "64 hexadecimal characters for an explicitly bounded file"
+# verification_bytes = 67108864
+# assurance = "checked"
 ```
 
-Only configure runners that are actually prepared; `doctor` checks every named
-runner and input. WSL uses a copied standard-library helper, not a Linux install
-of xgenius or a guest connection to the host SQLite database. Guest access paths
-are checked explicitly; junction resolution does not rewrite original identities.
-Windows-hosted scratch is the default. Do not point campaign state at a shared
-producer tree or move/junction `.xgenius` outside the campaign.
+All fields are strict; unknown or inapplicable options fail. Omitted model/effort
+remain the provider default/unknown, not a claimed effective model. Explicit
+choices must be supported by installed provider help. Commands are argv arrays,
+not shell strings. Claude defaults to `claude --dangerously-skip-permissions`
+and its child environment removes `ANTHROPIC_API_KEY` for subscription auth.
+Windows batch shims must be replaced by a direct executable argv.
 
-Docker requires an existing approved image and a local engine endpoint.
-Submission never pulls an image. Image IDs, container IDs and ownership labels
-are recorded. Code and declared inputs are read-only mounts. Containers have
-CPU/RAM/device limits, no restart policy, and no network unless explicitly enabled.
-Finished containers remain available for inspection; remove only their recorded
-IDs after reviewing the durable outputs.
+## Budgets and control
 
-`xgenius build --runner container` explicitly authorizes a local Docker build,
-without a registry push or SIF conversion. Review the Dockerfile and `.dockerignore`
-before invoking it: Docker builds send the selected project build context to the
-local engine, and missing base images can require acquisition. Prepare base images
-separately when offline operation is required. Test images through queued jobs.
+`max_seconds = 0` is an unlimited campaign admission horizon;
+`max_invocations = 0` is unlimited managed campaign invocations. Starter values
+are finite. Zero GPU-hours/no devices means no GPU work. Resource, storage and
+per-operation limits remain strictly positive.
 
-## Experiments
+Elapsed time begins with the first admitted campaign operation, includes
+shutdown/pauses, never decreases on clock rollback, and does not reset on
+reopen. Expiry gates new admission, not an already admitted operation's deadline.
+Changing TOML limits is recorded at the next admission; it does not reopen work.
+
+Invocation accounting covers research, retries, report, compact, final analysis
+and model-executing sandbox canaries. A canary/main bundle reserves both calls
+before the first; uncertain armed launches retain their commitment. A finite
+open generation reserves one final analysis plus any required canary. This is a
+managed-process count, not an API-call/token/money cap.
+
+`pause` gates new admission; an armed turn may finish and retain its action.
+`resume` restores eligible progression, including a deferred finalize decision.
+`stop` retires queued work and drains admitted work without a final model call.
+`cancel --id ID` targets one owned attempt. `reopen` requires quiescence and
+starts a new generation with old evidence/accounting intact.
+Controls accept `--request-id` and `--expected-revision`; replaying a request
+returns its original response and cannot undo newer intent.
+
+`status --json` is observational. `reconcile --state-dir PATH` performs recovery
+without requiring usable current TOML, providers or unrelated runners. A missing,
+replaced or incompatible recorded ledger is an error, never an empty ledger.
+Keep uncertain records/grants; do not fabricate receipts or restart their work.
+
+## Experiments and evidence
 
 ```json
 {
   "key": "baseline-001",
   "experiment_id": "baseline",
-  "hypothesis_id": "h001",
-  "hypothesis_description": "Relational constraints reduce invalid arrangements without lowering coverage.",
   "runner": "native",
-  "argv": ["python", "experiment.py", "--label", "with spaces"],
+  "argv": ["python", "experiment.py", "--offset", "0"],
   "source_files": ["experiment.py"],
   "cpus": 1,
-  "memory_mb": 512,
+  "memory_mb": 256,
   "gpus": [],
   "seconds": 60,
-  "artifacts": ["metrics.json", "plot.png"],
-  "input_validators": [["python", "check_inputs.py"]],
-  "validators": [["python", "check_outputs.py"]]
+  "artifacts": ["metrics.json"]
 }
 ```
 
-Include validator scripts in `source_files`, or omit the optional validator
-arrays. Input validators run before the workload; output validators run after it.
-All share the attempt's deadline, resources, input references, and cancellation.
+Use `validate --spec work.json`, `submit --spec work.json`, or
+`batch-submit --file batch.json`. A batch preserves individual failures and
+returns nonzero if any item fails. Reusing a key with the identical request is
+idempotent; changing the request requires a new key.
 
-Submit with `xgenius submit --spec experiment.json --json`; `--runner NAME` can
-select the runner if it does not conflict with the manifest. Arrays preserve empty
-arguments, quoting, Unicode and native Windows paths. There is no implicit shell.
-Use runner-relative paths inside argv; only declared input/workspace paths are
-translated. `python`/`python3` select the runner's configured interpreter.
+`python`/`python3` select the runner's configured interpreter. Argv preserves
+spaces, empty strings, quotes and Unicode. Explicit `source_files` are copied
+with an enforced byte cap and hashes; Git identity alone is not a snapshot.
+No environments, datasets, caches or dependencies are automatically copied or
+installed. Payloads inherit essential PATH/home/temp variables and explicit
+non-secret overrides, not the controller's complete credential environment.
 
-Record the claim being tested with `hypothesis_description`, not only a shorthand
-`hypothesis_id`. The description is optional for compatibility, but when supplied
-it must be nonempty, have an ID, and not repeat an autogenerated placeholder.
-Submission creates the hypothesis or fills its missing/placeholder description
-without replacing motivation, status, or conclusions. Reusing an ID with a
-different statement is rejected atomically; intentionally revise an existing
-statement with `xgenius db hypothesis-update --id h001 --description "The revised claim"`.
-Old manifests still work, but a newly created hypothesis without a description
-is explicitly undescribed rather than treating its ID as its scientific meaning.
+Write artifacts under `XGENIUS_OUTPUT_DIR`. A `metrics.json` artifact is an
+object of finite numeric values, not booleans or strings. Optional
+`input_validators` and `validators` are arrays of argv arrays and share the
+operation's resources, deadline and cancellation; include their source files.
+Successful execution and invalid output remain distinct facts.
 
-Use a stable idempotency key for retries of the same request. Changing a request
-under an existing key is an error; a deliberate new attempt needs a new key.
-Only explicitly selected files are copied, including selected untracked files.
-Git revisions alone are not snapshots. Do not include secrets, caches, large
-datasets or shared environments. Snapshots record file hashes, selected runner and
-interpreter, input identities, resource requests, environment overrides and argv.
-Dependencies remain the responsibility of the explicitly prepared environment.
+Hypothesis-associated work supplies both `hypothesis_id` and a scientific
+`hypothesis_description`, not its own opaque ID. Evaluated statements cannot be
+changed. Use a new ID and optional `hypothesis set --supersedes OLD_ID` for a
+revised claim. Support/setup/replication work need not invent a hypothesis.
 
-Payloads receive PATH/home/temp essentials and explicit string environment
-overrides, not the controller's complete credential environment. Do not put secrets
-in environment overrides: non-secret overrides are persisted in manifests.
-`XGENIUS_INPUT_OBSERVATIONS` identifies the example input; `XGENIUS_OUTPUT_DIR`
-is the only published output root. Inputs are not automatically included in model
-prompts. `prompt_access` documents the approved disclosure policy; it cannot
-constrain a trusted agent's own tools.
+Declared inputs use `XGENIUS_INPUT_NAME`. `declared` does not certify content;
+`checked` requires an explicit bounded hash policy; pre/post checks do not prove
+no mutation during execution. `stable-consumption` prepares only a bounded small
+file and requires supported Windows read leases or read-only Docker access.
+Unsupported guarantees are refused. `prompt_access` records disclosure policy
+but cannot constrain a trusted provider's independent tools.
 
-Artifacts are contained relative paths. Collection checks required files, hashes
-and optional `metrics.json` (a finite numeric object, not booleans or strings).
-A successful process and invalid output remain distinct: status can be completed
-with a validation-failure event. Scientific acceptance is never inferred.
+Small exact observations are captured once and retrieved with
+`evidence observation --id ID`; downloads serve those captured bytes.
+Large unmanaged artifacts are qualified references, not historical byte claims.
+Recollection creates a new observation instead of changing an old report.
+`logs --id ID` and `errors --id ID` return bounded tails and truncation metadata.
 
-## Capacity and budgets
+## Owned memory, maintenance and closure
 
-Run `machine configure` once with an explicit CPU/RAM/headroom/GPU envelope.
-The ledger is `%LOCALAPPDATA%\xgenius\resources.db`; `XGENIUS_RESOURCE_DB` is an
-explicit isolation override for tests. Campaigns must use the same ledger to
-coordinate. It is not a multi-user scheduler or protection against external apps.
+Each turn gets a bounded immutable packet and one result path. Its delta handoff
+records observations/support work, what changed and why, the governing next
+step, evidence dispositions and a continue/wait/blocked/finalize decision.
+Handoff acceptance, exact acknowledgements and the journal projection are one
+transaction. Writing an unrelated checkpoint cannot substitute for it.
 
-GPU requests use physical `GPU-...` UUIDs, not runner-local ordinals. Whole
-devices are reserved. Admission conservatively waits while `nvidia-smi` reports
-external compute processes; it never evicts them. Host available RAM is rechecked
-with configured headroom and outstanding reservations. Oldest eligible fitting
-requests are preferred; requests outside capacity are rejected.
+`steer --text TEXT` records attributed operator constraints; `--supersedes ID`
+explicitly replaces one. `source set --kind goal|protocol --file PATH` versions
+small authority. Observed manual edits are retained as imports, with observation
+time distinguished from edit time. `journal search --query TEXT` searches a
+bounded prefix coverage; `journal entry --id ID` retrieves retained original
+text. Zero lexical matches do not establish the absence of evidence.
 
-Windows payloads use Job Objects and CPU affinity. Docker sets CPU/RAM limits.
-Windows supervisors, payloads, agent sessions, and background probes use windowless
-consoles, so their ordinary child processes do not open terminals or steal focus.
-Logs still go to their existing files or captured CLI output. Independent
-supervisors retain separate process groups and permitted Job Object breakaway.
-A parent policy that prohibits breakaway is a launch error, not permission to
-silently weaken crash-survival behavior. This does not prevent an experiment from
-explicitly opening its own GUI or requesting a new console.
-Linux/WSL uses process groups, affinity and memory monitoring, not a kernel-hard
-memory quota. `hard_memory_limit=true` is rejected for monitored runners. Native
-and WSL trusted processes are not a hostile-code boundary: deliberately detached
-Linux descendants or unrestricted host tools require stronger isolation.
+`compact` and `report` request fixed maintenance at an eligible safe point; they
+do not launch a second provider from inside a research turn. An explicit operator
+request may run after quiescent closure without reopening research. New control
+revisions fence pending maintenance. Automatic compaction is deduplicated by
+source revision; it cannot delete authority or repeatedly spend on a
+non-shrinking summary. Reports are explicit, not automatic periodic inference.
 
-The campaign's elapsed limit starts on its first run and includes paused time.
-It stops new admission rather than killing admitted experiments. Each attempt
-has a separate supervised walltime. GPU budgets reserve requested maximum duration
-and account for terminal outcomes, including failures and cancellation. Running
-usage is an estimate; unknown/lost execution retains conservative reservations.
-Agent research, report and compact sessions count toward `max_turns` and have
-independently supervised deadlines. Provider usage is explicitly unknown (`null`);
-no token-to-dollar conversion or hard financial/subagent cap is claimed.
+`report --no-agent` always offers a deterministic inventory without inference.
+Reports retain a complete cutoff denominator, exact source versions and selected
+observation reasons. HTML/Markdown/JSONL outputs never overwrite previous reports.
+Numeric claims are checked against captured metrics; prose and scientific
+interpretation are not certified.
 
-## Lifecycle, evidence and recovery
+Finalize names the stopping criterion and limitations. The sealed cohort
+includes unperformed queued work and every admitted attempt, including late
+replications, failures and invalid measurements. One additional analysis at most
+can assess the complete inventory. No allowance, failure, timeout or a more-work
+decision gives an explicit incomplete/unassessed/needs-more-work outcome.
+Later edits/directives mark historical assessment staleness without silently
+expanding or rerunning it. Fully completed means assessed closure **and**
+operational quiescence.
 
-| Command | Behavior |
-|---|---|
-| `run` | Preflight, reconcile, initial research turn, dispatch, completion turns |
-| `run --no-agent` | Run only already queued experiments |
-| `run --once --no-agent` | Dispatch one cycle; independent workers continue |
-| `pause` | No new dispatch/turns; current jobs and turn finish |
-| `stop` | Cancel queued work, drain running work, retain unanalyzed events |
-| `cancel --job-ids ID` | Cancel only the selected owned attempts |
-| `resume` | Reconcile the same attempts and reconnect, never resubmit |
-| `steer "directive"` | Append a journal directive and durable event |
-| `results attempts --json` | Registered outcomes and artifact summaries |
-| `results export` | Atomic `results/attempts.csv` projection; leaves manual CSVs intact |
-| `report` | New historical `reports/ID` snapshot, requiring Markdown and HTML |
-| `compact` | Serialized journal compaction with original backup |
-| `reset` | Refuse active/unresolved work; archive old state under `.xgenius-archives` |
+## Prepared backends and explicit Docker builds
 
-Each turn acknowledges only its assigned event IDs, references an updated
-`.xgenius/journal.md`, and returns continue/wait/blocked/complete with a reason.
-Invalid output leaves events unacknowledged and retries only within configured
-bounds. Waiting with no work or pending events blocks. A wait decision still
-triggers another turn when completions arrived during the previous turn, even
-if the last job has already finished. Explicit completion cancels undispatched
-work and drains admitted work; unacknowledged events remain recorded.
+WSL needs an explicit development distro with Python 3.11+ and Linux pidfd
+support, not Docker Desktop's internal distro. Guest helpers are frozen copies
+and write receipts, never host SQLite. Derived path/validator mappings are hashed
+and verified at the guest entry point. Losing `wsl.exe` does not prove guest death.
+Unavailable guest inspection keeps capacity reserved.
 
-Independent worker/agent supervisors persist identity and completion receipts.
-Controller termination does not cancel experiments. On resume, receipt ingestion
-is idempotent; PID reuse does not establish ownership. Engine/distro loss, missing
-launch handles or unprovable liveness become `recovery_required`, retain capacity,
-and block the campaign. Inspect the exact attempt directory, supervisor logs,
-backend handle and original engine/distro. Restore access and reconcile. There is
-intentionally no force-release-on-stale-heartbeat command; do not delete the ledger
-or reset state to bypass an unresolved reservation.
+Docker execution requires a prepared existing Linux image and local Unix socket
+or Windows named-pipe endpoint; remote contexts are rejected. It executes the
+resolved image ID with `--pull=never`, no restart, read-only source/inputs/helpers,
+finite CPU/RAM and explicit GPUs/network. It does not expose credentials, the
+Docker socket, broad host mounts or privileged mode. A payload receipt alone does
+not prove container quiescence. Completed owned containers remain inspectable.
 
-Linux/WSL recovery checks the recorded workload process session and validator
-sessions, not only the guest supervisor PID. An orphaned live session keeps its
-reservation; missing launch identities remain unresolved rather than being
-assumed dead. If the guest supervisor itself is lost, its deadline/cancellation
-monitor is also lost. `cancel` records the request but reports that recovery is
-required; inspect and stop the identified owned workload before reconciling.
-Controller loss alone does not have this limitation: the supervisor continues.
+An image build is an **explicit operator operation**, not automatic work in
+`run`, and uses the optional `docker-build` extra:
 
-Local schema upgrades are transactional and backed up. Historical legacy records
-are not replayed as new local events. New SLURM jobs have cluster-qualified tracker
-IDs; bare scheduler IDs are rejected when ambiguous.
+```powershell
+python -m pip install "xgenius[docker-build]"
+xgenius build --runner container --context . --include experiment.py --seconds 600
+```
 
-The loopback dashboard (`xgenius dashboard`, default port 8765) is read-only.
-Its overview distinguishes campaign state/stop reason, in-flight experiments,
-validation/recovery failures, elapsed/turn limits, and the latest agent decision.
-Search and paginate experiments/artifacts; inspect individual attempts, source
-hashes, numeric metrics and captured logs. Agent activity separates turn decisions
-from pending/acknowledged events. Resource views show the shared reservation
-ledger, not measured desktop utilization or a guarantee that stored handles live.
-Displayed limits come from the current config file; a running controller may
-have loaded earlier values.
+The Dockerfile is always included. Repeat `--include` for every additional
+relative file: this explicit allowlist, not `.dockerignore`, defines the reviewed
+context. The copied context is bounded, hashed and retained. Existing local base
+images become bare full IDs; dynamic/external stage references, ONBUILD bases,
+ADD, heredocs and BuildKit syntax are refused. No base/front-end image is pulled.
 
-Hypothesis lists lead with the recorded statement and show the stable ID
-secondarily. Details render the full statement, motivation, expected outcome,
-conclusion, and notes when recorded. ID-only or automatically generated
-submission descriptions are labelled **Hypothesis statement not recorded**.
-Related journal excerpts match the exact hypothesis, attempt, or experiment
-identifiers; they are labelled context, not invented definitions. This lookup
-searches the latest 128 KiB using up to 200 recent experiments and shows at most
-six excerpts of 3,000 characters each, with truncation notices. Dashboard reads
-never backfill or otherwise edit research records.
+The adapter uses the local classic Engine build API (`version=1`, `pull=false`),
+not an unowned buildx daemon/plugin. The engine must support it. CPU placement
+and memory/swap bounds apply to each build container, and `network=false`
+disables RUN networking. Build vCPU IDs are not native host placement identities.
+The grant additionally reserves one CPU and 256 MiB for its owned API client.
+Engine bookkeeping/container layers remain covered by headroom and soft
+volume monitoring, not a hard disk quota.
 
-Journal, goal and debug documents render locally as Markdown (raw HTML escaped).
-The journal groups the append format's timestamps into collapsible entries, not
-every nested heading. It shows the newest 20 entries first, with the first entry
-open; older/newer paging and case-insensitive search cover the whole current
-journal, including entries beyond the former document-tail limit. A compact sticky
-toolbar provides **Jump to latest**, **Expand page**, and **Collapse page**.
-Each entry has its timestamp, headline, source view, older/newer entry links, and
-a bookmark link that remains on the same entry as new entries are appended.
-Compaction or replacement can invalidate those links; historical backup files
-are not part of this reader.
+A complete engine response, native-client shutdown and no running owned build
+containers are required for release. A killed client or lost response retains
+uncertain daemon work and its grant; `machine reconcile` ingests only matching
+terminal consumer receipts. There are no automatic retries, pushes, daemon
+restarts, builders with elevated privileges or backend fallback.
 
-The journal is indexed without retaining all entry bodies in memory, and only
-one page is rendered. Individual entry previews are limited to 16 KiB, with a
-larger 128 KiB view when opening an entry link. Oversized entries have explicit
-notices rather than silently losing content. Untimestamped/compacted Markdown
-is retained as a notes entry with a bounded 128 KiB tail. Source changes during
-a read produce a visible refresh error rather than a mixed snapshot. Manual
-refresh preserves existing open/closed entries and the visible reading position;
-the journal never auto-refreshes or closes the Copilot sidebar.
+## Dashboard Copilot observer
 
-Goal/debug documents over 128 KiB are explicitly truncated, using the beginning
-of the goal and the latest portion of the debug log; log views show at most the
-latest 64 KiB per stream. Full files remain on disk.
-Registered artifacts download as attachments, never active
-HTML. The dashboard does not serve arbitrary workspace files or load CDN assets
-or remote Markdown images. Optional 15-second refresh updates operational pages;
-document/detail views refresh on request so reading is not interrupted.
-
-Dashboard reads never reconcile jobs, release reservations or acknowledge
-events. Keep lifecycle control in the CLI. `--json` commands keep provider
-chatter in per-turn logs. `blocked` run results return a nonzero exit code.
-
-### Dashboard Copilot observer
-
-The optional `dashboard-chat` extra installs the supported Python Copilot SDK.
-It requires a separately installed Copilot CLI and your existing login; xgenius
-does not download a runtime, copy credentials, or change global Copilot settings.
-Enable chat with `xgenius dashboard --chat`, or add this to `xgenius.toml`:
+Ordinary `dashboard` needs no SDK. Use `dashboard --chat` plus the
+`dashboard-chat` extra for on-demand questions. It remains a fresh empty-mode
+SDK session per question with curated read-only tools, not the research session.
+Prior answers are hints, not evidence. Tools expose revisions, retrieval times,
+pagination and searched coverage; unavailable historical IDs never redirect
+silently to current summaries. Raw files/logs/datasets and research writes are
+not available.
 
 ```toml
 [dashboard.chat]
-enabled = true
+enabled = false
 model = "auto"
 reasoning_effort = ""
 timeout_seconds = 120
-cli_path = ""
+cpus = 1
+memory_mb = 2048
+max_invocations = 20
 ```
 
-An empty `cli_path` searches PATH for `copilot`. `model` and `reasoning_effort`
-are independent of the research agent's command. Empty effort uses the runtime
-default; supported effort levels depend on the selected model. Invalid or
-unavailable provider settings produce an error, not a different-model fallback.
-The deadline must be between 5 and 600 seconds; settings are loaded when the
-dashboard starts. Missing SDK/runtime prerequisites leave ordinary dashboard
-pages usable and show an actionable chat-unavailable message.
+These are separate from `[agent]`. The positive allowance applies to the current
+dashboard process; usage does not spend campaign invocations. Waiting is visible
+and cancellable. Native ownership includes the SDK and its descendants, and
+failed shutdown keeps the grant. No silent model retry occurs.
 
-For an already-running campaign, use a separate dashboard environment rather
-than installing packages into its controller or experiment environment. For
-example, from the campaign directory, with `uv` and a local xgenius checkout:
+Chat/sidebar/maximized state survives navigation/reload, not dashboard restart.
+Only Close hides chat, and New chat clears it. Escape restores a maximized view
+without discarding the conversation. Dashboard refreshes do not launch inference.
+Only loopback is supported; Host/Origin/CSRF/CSP guards remain in force.
 
-```powershell
-uv run --no-project --python 3.11 --with-editable "D:\path\to\xgenius[dashboard-chat]" xgenius dashboard --chat --port 8766
-```
+## Storage, isolation and recovery limits
 
-Replace the checkout path; choose an unused port. This starts only a dashboard,
-not a controller or experiment. An existing dashboard must be restarted to load
-upgraded code; the research controller does not need restarting.
+`storage inventory` is a bounded cold-path walk, not a recursive hot-loop scan.
+`storage retention --dry-run` only identifies explicitly marked uncommitted
+preparations with proven-dead owners; unknown/unmarked/referenced objects remain.
+There is no delete/apply mode.
 
-The observer creates a fresh restricted SDK session for each question, supplying
-bounded recent chat history and fresh recorded evidence. It does **not** attach
-to, message, or share instructions with the autonomous research session. Its only
-tools read campaign summaries, recent experiments, a specific experiment's
-registered numeric metrics, recent agent decisions/events, and the journal or
-research goal (up to 16,000 bytes each). Shell, arbitrary file/SQL access,
-skills, MCPs, extensions, subagents, steering, submissions, cancellation of
-experiments, and campaign edits are unavailable. Managed Copilot settings remain
-enabled. Recorded handles are not proof that a process is still alive.
+Named-volume watermarks block admission/copy and monitor owned output roots
+periodically. Unnamed locations, temp directories, native writes and container
+layers are not subject to a hard quota. If a volume cannot persist a receipt or SQLite write,
+missing data remains uncertainty, not an invented ENOSPC/terminal outcome.
 
-**Privacy and usage:** sending a question shares the question, recent chat, and
-requested evidence with your configured Copilot service. Local research does
-not mean offline inference. Raw logs, execution environments, dataset inputs,
-private targets, and artifact file bodies are not available through these tools.
-However, journal/goal text, names, reasons, and metrics can themselves contain
-sensitive material; curate those records before enabling chat. This is an
-explicit evidence allowlist, not content redaction.
-
-Opening or refreshing the dashboard never starts inference. Only one answer
-runs at a time per dashboard server, with at most 12 evidence-tool calls and
-64,000 answer characters. Conversations allow 20 questions, retain at most six
-successful exchanges/24,000 characters as model history; at most eight
-conversations are retained. Capacity limits reject new work rather than
-automatically discarding existing conversations.
-**Cancel answer** aborts the observer only. Timeouts and limits retain partial
-text with a failure/cancellation notice, never as a successful answer. Requests
-are not automatically retried; retrying an uncertain submission in the same
-page reuses its ID to avoid duplicate inference.
-
-Chat history is held in dashboard memory, not the research DB/journal. A tab
-stores an opaque conversation handle, open/closed state, and maximized/sidebar
-size preference in session storage. Navigation and page reloads restore the same
-conversation, including an answer in progress, and leave the sidebar as you chose.
-**Maximize** fills the browser window, with larger text and a centered reading
-column rather than excessively long lines on wide monitors. **Restore** or Escape
-returns to the sidebar; neither clears the conversation, interrupts an answer,
-nor discards the current draft. Resizing keeps your place in the visible paragraph
-where possible, or stays at the bottom if you were following the latest answer.
-The maximized view keeps keyboard focus inside chat and prevents scrolling or
-interacting with the covered dashboard. The conversation area itself can receive
-keyboard focus for scrolling. Restoring or closing makes the dashboard accessible
-again. Closing/reopening and **New chat** also retain your size preference.
-Only **Close** hides chat; Escape never closes it. Closing the sidebar does not clear
-history or cancel an answer. **New chat** explicitly discards that conversation
-without closing the sidebar; idle time does not clear it. Restarting the dashboard
-still loses all chats. Normal completion/cancellation closes the owned runtime and
-deletes its SDK session. A hard crash may leave SDK session records behind.
-Token usage is provider-reported, separate from research-turn budgets, and
-**not a monetary cap**. Multiple dashboard processes have independent limits.
-
-## Optional Copilot sandbox
-
-Trusted mode is the default. It does not disable existing managed Copilot policy.
-For sandbox mode, separately provision/authenticate a dedicated `COPILOT_HOME`
-inside this campaign's `.xgenius`, set `agent.copilot_home`, and set
-`agent.sandbox=true`. Never copy authentication files or change global settings.
-Its `settings.json` must explicitly set `sandbox.enabled=true` and
-`sandbox.allowBypass=false`.
-
-Preflight temporarily adds an exact denied canary and allowed scratch grant,
-runs a pre-created shell probe, checks its challenge receipt, and restores the
-profile's original settings bytes. Configured WSL/Docker IPC is also exercised.
-An exclusive profile-local lock prevents overlapping preflights; inspect a stale
-lock's recorded owner before removing it after an interrupted preflight.
-Failure refuses startup; there is no unsandboxed fallback. Windows requires the
-BaseContainer/PowerShell host capabilities documented by the installed CLI;
-Linux has additional namespace/network prerequisites.
-
-This is shell-policy preflight, not proof of complete isolation. Built-in file
-edits are best-effort; remote MCPs and harness workers are outside that boundary.
-Network restrictions must be reviewed in the provisioned profile; the harness
-does not install proxy certificates or authorize network/credential bypasses.
-
-## Validation
-
-Dashboard HTTP/observer coverage uses fake inference without agents or workers:
-`python -m pytest tests\test_dashboard.py tests\test_dashboard_chat.py -q`.
-SDK policy cases require the optional extra. The optional desktop/mobile
-browser case requires Playwright and a prepared Chromium installation. Set
-`XGENIUS_BROWSER_TESTS=1` to include it; `XGENIUS_BROWSER_EXECUTABLE` can select an
-existing Chromium executable instead of Playwright's default. It checks navigation,
-Markdown, refresh/error behavior and downloads, and saves synthetic screenshots
-under its pytest temporary directory. It never installs a browser automatically.
-Observer browser coverage includes streaming, navigation continuity, maximized
-reading/keyboard behavior, cancellation, and idempotent retry after a lost response.
-Set `XGENIUS_LIVE_CHAT=1` to include
-the real, billable SDK case against synthetic evidence; it verifies evidence-tool
-use, a known metric, unchanged campaign state, and owned runtime/session cleanup.
-
-```powershell
-python -m pytest tests -q
-$env:XGENIUS_INTEGRATION = "1"
-python -m pytest tests\test_local.py -q
-$env:XGENIUS_SYSTEM_E2E = "1"
-python -m pytest tests\test_system.py -q -k "not live_copilot"
-$env:XGENIUS_LIVE_AGENT = "1"
-python -m pytest tests\test_system.py -q -k "live_copilot"
-```
-
-The opt-in suite requires prepared Ubuntu WSL2 and local Docker Desktop with
-`python:3.11-slim`; it never pulls images. No real cluster or dataset is needed
-for automated coverage. CUDA execution requires a separately prepared environment
-and an available GPU; successful CPU execution or device enumeration is not a
-CUDA validation.
-
-Full-system tests exercise the actual CLI, shared reservations, controller and
-backend faults, artifacts, dashboard downloads, partial batch errors, cancellation,
-and a tiny local Docker build using that existing base image. They clean up only
-their owned processes/containers/test images and retain logs under pytest's
-temporary directory. Live-agent tests additionally require authenticated Copilot
-and consume provider usage for research, report, and compaction turns. They use
-only synthetic inputs; no real research data or remote compute is involved.
+Windows uses nonoverlapping supported native CPU sets, assigned Job Objects and
+windowless independent launches. Affinity is not CPU-time quota. WSL uses
+process-session monitoring rather than hard RAM enforcement. Unsupported
+processor topology, unavailable ownership and unsupported sandbox policy fail
+closed. The ledger does not control external programs or hostile same-user code.

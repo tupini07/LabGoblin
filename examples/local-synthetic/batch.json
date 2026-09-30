@@ -1,0 +1,35 @@
+[
+  {
+    "key": "synthetic-baseline",
+    "experiment_id": "baseline",
+    "runner": "native",
+    "argv": ["python", "experiment.py", "--offset", "0"],
+    "source_files": ["experiment.py"],
+    "cpus": 1,
+    "memory_mb": 128,
+    "seconds": 30,
+    "artifacts": ["metrics.json"]
+  },
+  {
+    "key": "synthetic-replication",
+    "experiment_id": "replication",
+    "runner": "native",
+    "argv": ["python", "experiment.py", "--offset", "0"],
+    "source_files": ["experiment.py"],
+    "cpus": 1,
+    "memory_mb": 128,
+    "seconds": 30,
+    "artifacts": ["metrics.json"]
+  },
+  {
+    "key": "synthetic-shift",
+    "experiment_id": "shift",
+    "runner": "native",
+    "argv": ["python", "experiment.py", "--offset", "1"],
+    "source_files": ["experiment.py"],
+    "cpus": 1,
+    "memory_mb": 128,
+    "seconds": 30,
+    "artifacts": ["metrics.json"]
+  }
+]

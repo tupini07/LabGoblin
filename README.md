@@ -1,504 +1,175 @@
 # xgenius
 
-Local-first autonomous research with Claude Code or GitHub Copilot CLI.
+**Local autonomous research with Claude Code or GitHub Copilot CLI.**
 
-xgenius coordinates research turns, immutable experiment snapshots, resource reservations,
-supervised jobs, artifacts, and a persistent journal. New projects run locally:
-native Windows processes, an explicitly selected WSL2 distro, or local Linux Docker
-containers. Existing SSH/SLURM/Singularity projects remain supported.
+xgenius runs a long investigation as fresh, bounded research sessions and
+independently supervised experiments. It preserves why decisions were made,
+shares CPU/RAM/GPU admission across campaigns, recovers owned work after
+controller exit, and distinguishes successful execution from assessed research.
+Native Windows, an explicitly prepared WSL2 distro, and local Linux Docker are
+supported. No backend or provider is silently substituted.
 
-## Local quick start
+**Version 2 is a clean break.** Configuration, campaign state, the machine ledger
+and worker protocol use schema 3. Old formats are rejected, not migrated.
+Cluster/SSH/SBATCH/Singularity operations are removed. Never replace an old
+machine ledger while its workers might still be running; establish quiescence
+with the old installation before setting up a fresh runtime.
 
-Install Python 3.11+ and authenticate either supported agent CLI. Docker and WSL
-are optional; native execution needs neither SLURM nor Singularity.
+## Start a local investigation
+
+Use Python 3.11+ in a persistent environment. Install and authenticate the
+standalone `copilot` CLI or Claude Code separately.
 
 ```powershell
-pip install -e .
-mkdir my-research
-cd my-research
+python -m pip install .
+New-Item -ItemType Directory my-research
+Set-Location my-research
 xgenius init --agent copilot
 ```
 
-Edit `research_goal.md`, review the generated campaign limits, and explicitly
-configure a **shared capacity envelope**, leaving room for other applications.
-For example, the following permits at most two experiment CPUs and 4 GiB of
-reserved RAM across this user's campaigns (it does not reserve the entire PC):
+Plain `init` selects Claude. Edit `research_goal.md` to define the question,
+evaluation protocol, permitted data and environments, stopping criterion, and
+what negative or inconclusive findings would mean. This is an autonomous
+investigation, not an instruction to stop after writing a proposal.
+
+Review `xgenius.toml`, then configure the shared machine envelope explicitly.
+This example permits two managed CPUs and 4 GiB of reserved RAM, plus 2 GiB of
+unallocated headroom; it is not a recommendation for every workstation:
 
 ```powershell
 xgenius machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
-xgenius doctor --json
+xgenius doctor --provider --json
 xgenius run
 ```
 
-Agents submit JSON job manifests; independent workers enforce job deadlines and
-survive controller termination. Use `pause` to stop new work, `stop` to drain
-running jobs, `cancel --job-ids ID` to cancel a specific attempt, and `resume`
-to reconnect. `status --json` includes campaign state and durable events.
+The envelope includes research and maintenance reasoning, not just experiments.
+The generated agent allowance is a starter estimate, not a measured provider
+requirement. Existing incompatible ledgers block admission rather than hiding
+older reservations behind a new file.
 
-**Trusted by default:** resource admission is not a sandbox around an unrestricted
-agent. Local compute still uses the configured AI service. No automatic uploads,
-pushes, remote compute, image pulls, or changes to shared environments are part of
-the research loop. Optional Copilot sandbox mode fails closed when its isolated
-profile or host prerequisites are unavailable.
+The starter campaign limits are **one hour and ten managed provider invocations**.
+For a long investigation, review them deliberately. `max_seconds = 0` and
+`max_invocations = 0` mean unlimited admission time and unlimited managed
+invocations respectively; no other zero means unlimited. Every operation still
+has a finite deadline, and an open generation reserves its final analysis.
+Managed invocations are not API-call, token, or spending caps.
 
-See the [local research guide](docs/local-research.md) for manifest/config examples,
-WSL and Docker setup, accounting, recovery, and isolation limitations.
+See the [operating guide](docs/local-research.md) for complete configuration,
+budgets, provenance, Docker builds, and recovery. The
+[synthetic example](examples/local-synthetic/README.md) runs without a dataset,
+GPU, or model call when used with `--no-agent`.
+
+## Control and observe
+
+| Command | Meaning |
+|---|---|
+| `run` | Recover compatible owned work, then continue eligible research. |
+| `run --no-agent` | Run/recover submitted experiments without inference. |
+| `pause` / `resume` | Gate new admission / resume an open generation. Armed work can finish. |
+| `stop` | Stop admission, retire queued work, drain admitted work, retain a partial handoff. No final model call. |
+| `cancel --id ID` | Request cancellation of exactly one owned attempt. |
+| `reopen` | Start a new generation after quiescent closure/stop; cumulative budgets remain. |
+| `status` / `budget` | Read only: no reconciliation, inference, or state initialization. |
+| `reconcile --state-dir PATH` | Recover supported state even when current TOML is broken or missing. |
+| `steer --text TEXT` | Record an attributed operator constraint, not an anonymous journal edit. |
+| `report --no-agent` | Publish an immutable deterministic HTML/Markdown inventory without inference. |
+| `report` / `compact` | Request fixed, resource-admitted safe-point maintenance. |
+| `storage inventory` | Inspect bounded owned-file sizes and retained references. |
+| `storage retention --dry-run` | Review proven-unowned preparation candidates; never delete. |
+| `reset --confirm CAMPAIGN_ID` | Archive supported quiescent state; never erase the machine ledger or auto-restart. |
+
+Commands support `--json` and return nonzero on failure. `--project PATH` selects
+the project explicitly. Control requests accept stable `--request-id` and
+`--expected-revision` values for retry-safe scripts.
+
+The controller is not the owner of running payload trees. Its exit does not
+cancel already admitted work; their independent supervisors retain deadlines
+and completion receipts. Unknown ownership keeps its resource reservation.
+Do not manually delete a grant, invent a receipt, or retry uncertain work.
+
+## Evidence and research closure
+
+An experiment manifest has an idempotency key, argv array, explicit source files,
+resources, a finite deadline, and relative output artifacts. Small metric
+documents are captured once: parsing, hashing, historical reports and downloads
+use those same bytes. A mutable large file is not advertised as an exact
+historical download. Scientific statements become immutable when first admitted;
+a changed claim requires a new hypothesis ID.
+
+Each research turn receives a versioned packet and returns one owned delta
+handoff. Exact evidence acknowledgements, decisions, and the journal projection
+commit together. Operator constraints remain outside model-written summaries,
+and historical source revisions survive compaction.
+
+Finalization seals the complete attempt inventory, including failed, cancelled,
+unperformed and still-running admitted work. At most one additional analysis
+assesses the sealed evidence, including late replications. Missing allowance,
+failed analysis, or a request for more work produces an honest incomplete outcome,
+not an automatic paid loop. The harness checks reference/value integrity and
+explicit coverage; it does **not** certify scientific truth, novelty or adequacy.
 
 ## Research dashboard
 
-Run `xgenius dashboard` to open the read-only dashboard at `http://127.0.0.1:8765`
-(`--port` selects another port). The responsive interface includes campaign
-state and stop reasons, elapsed/agent-turn budgets, searchable experiment history,
-hypotheses, agent turns and completion events, shared resource reservations,
-and registered artifact downloads with numeric metrics.
-Hypotheses show their recorded statements, rationale, and related journal
-excerpts, rather than presenting autogenerated IDs as descriptions. Missing
-statements are explicitly marked; local submissions can record them through
-`hypothesis_description` alongside `hypothesis_id`.
+```powershell
+xgenius dashboard --open-browser
+```
 
-The journal, research goal and debug log render as Markdown, including tables
-and fenced code, with an expandable source view. The journal is a newest-first,
-paginated entry reader: the latest entry opens automatically, older entries fold
-under dated headlines, and you can search the whole journal, jump to the latest,
-or follow links to individual entries. Folding controls affect only the current
-page; there is no ever-growing outline competing with the Copilot sidebar.
-Experiment and agent-turn detail pages expose bounded log tails without
-truncating recorded failure reasons.
-Use **Refresh**, or opt into **Auto-refresh (15s)** on operational pages.
+The read-only loopback dashboard defaults to `http://127.0.0.1:8765`. It shows
+operator intent, research progression, recovery blockers, budgets, experiments,
+hypothesis statements, exact evidence and historical sources. Journal entries
+are folded and paginated with stable revision links and bounded search coverage.
+Markdown disables raw HTML and images; assets are packaged locally.
+Opening or refreshing a page never reconciles or acknowledges research.
 
-All assets and Markdown rendering are local: no CDN, remote fonts or automatic
-remote Markdown image requests. Raw HTML in Markdown is escaped, and registered
-artifacts download rather than execute in the dashboard. Opening the dashboard
-does not reconcile jobs, acknowledge events or change campaign state. Restart an
-already-running dashboard after upgrading xgenius to load the new interface.
-The existing SLURM job, hypothesis and journal views remain available.
-
-### Dashboard Copilot
-
-Install the optional observer in the environment used for your dashboard:
+### Dashboard Copilot observer
 
 ```powershell
-pip install -e ".[dashboard-chat]"   # from the xgenius checkout
-xgenius dashboard --chat            # from your campaign directory
+python -m pip install "xgenius[dashboard-chat]"
+xgenius dashboard --chat
 ```
 
-This requires an installed, authenticated Copilot CLI. **Ask Copilot** opens a
-separate, read-only chat for progress reports and evidence questions, with streamed
-answers, dashboard citations, cancellation, and provider-reported token usage.
-Use **Maximize** for a full-window reading view with a comfortable text width,
-then **Restore** (or Escape) to return to the sidebar while preserving your draft
-and keeping your reading position where possible. The conversation, open/closed
-state, and size preference survive navigation and page reloads while the dashboard
-server remains running.
-Only **Close** hides the sidebar; only **New chat** clears the conversation.
-It can inspect recorded campaign state, experiments, numeric metrics, agent
-decisions, and bounded journal/goal text. It cannot steer the researcher, run
-commands, edit campaign state, or open datasets, raw logs, or artifact bodies.
-
-Inference happens only when you send a question, uses your Copilot service, and
-is accounted separately from research turns. Model/effort and request deadlines
-are configured under `[dashboard.chat]`, not `[agent]`. See the
-[observer guide](docs/local-research.md#dashboard-copilot-observer) for configuration,
-privacy boundaries, limits, and an isolated launch alongside running research.
-
-## Legacy SLURM workflow
-
-The remainder of this guide describes the existing cluster workflow.
-Files without `schema_version = 2` retain their SLURM interpretation.
-Use `xgenius init --backend slurm` for a new cluster project.
-
-### How it works
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Your dev machine                                           │
-│                                                             │
-│  Research agent ←── xgenius watch (wakes agent on job done)   │
-│    ↓ calls                         ↑ polls clusters         │
-│  xgenius submit / status / pull / journal / ...             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ SSH
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  SLURM Cluster (Singularity container, sandboxed)           │
-│  sbatch → job runs → writes .done marker on completion      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-1. Your research agent submits experiments via `xgenius submit`
-2. Jobs run on the cluster inside Singularity containers
-3. `xgenius watch` daemon detects completions and starts the configured CLI with `-p`
-4. The agent wakes up, pulls results, analyzes, and iterates
-
-## Prerequisites
-
-- Python 3.11+
-- [Claude Code](https://claude.ai/code) or [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli), installed and authenticated with access to the chosen service
-- SSH access to at least one SLURM cluster
-- Docker + Singularity/Apptainer (for container builds)
-
-## Installation
-
-```bash
-git clone https://github.com/roger-creus/xgenius.git
-cd xgenius
-pip install -e .
-```
-
-**Always install from source (editable mode).** This way the research agent can modify xgenius itself if it encounters issues during the autonomous loop — fixing bugs, adapting behavior, etc. Changes take effect immediately without reinstalling.
-
-## One-time setup
-
-### 1. Authenticate your research CLI
-
-**Claude Code (the default):** Set up a long-lived token for non-interactive sessions:
-
-```bash
-claude setup-token
-```
-
-**Important for Claude:** Make sure you do NOT have an `ANTHROPIC_API_KEY` environment variable set when starting the initial session, as it overrides subscription auth. xgenius removes this variable from Claude child processes without changing the parent environment.
-
-**GitHub Copilot CLI:** Install the standalone `copilot` command (not the old `gh copilot` extension), then authenticate:
-
-```bash
-copilot login
-```
-
-Authenticate as the same OS user that will run `xgenius watch`. Copilot child processes inherit your environment unchanged.
-
-### 2. Set up SSH access to your clusters
-
-xgenius connects to clusters via SSH. You need passwordless SSH key authentication.
-
-**Basic setup** (if your cluster doesn't require MFA):
-
-```
-# ~/.ssh/config
-Host mycluster
-  HostName mycluster.example.com
-  User myuser
-  IdentityFile ~/.ssh/id_ed25519
-```
-
-## Quick start
-
-### 1. Create a dedicated research repo
-
-**Important:** The agent needs push access to the repo. Create a **new repo** for your research (do NOT fork — the agent might accidentally PR upstream).
-
-```bash
-# Option A: Start from an existing codebase
-mkdir auto-myproject
-cp -r original-project/* auto-myproject/
-cd auto-myproject
-git init
-git add -A
-git commit -m "initial: import codebase"
-# Create repo on GitHub, then:
-git remote add origin git@github.com:yourusername/auto-myproject.git
-git push -u origin main
-
-# Option B: Start fresh
-mkdir auto-myproject
-cd auto-myproject
-git init
-# ... add your code ...
-```
-
-**Requirements:**
-- The agent must be able to `git push` — use SSH keys or `gh auth login`
-- `gh` CLI should be installed (`brew install gh` / `sudo apt install gh`)
-- The repo should be private if your research is pre-publication
-
-### 2. Initialize xgenius
-
-```bash
-cd auto-myproject
-xgenius init --backend slurm --agent copilot   # GitHub Copilot CLI
-# Or: xgenius init --backend slurm             # Claude Code (default)
-```
-
-This creates:
-- `xgenius.toml` — cluster config, SLURM settings, safety limits
-- `research_goal.md` — describe what you want the agent to achieve
-- `.xgenius/` — runtime state directory with templates, journal, job tracker
-- `CLAUDE.md` — shared tool documentation and git conventions; both Claude Code and Copilot CLI read this file
-
-**Existing projects:** To switch agents, edit `[watcher].trigger_command` in `xgenius.toml` to `"copilot --allow-all"` and restart the watcher. This also selects Copilot for `xgenius report` and `xgenius compact`. No reinitialization or instruction-file migration is needed; avoid `init --force`, which overwrites your config.
-
-### 2. Configure `xgenius.toml`
-
-The config file has four sections. **Read the [Configuration Guide](#configuration-guide) below carefully** — getting this right is critical.
-
-Key things to set:
-- **`[safety]`** — maximum resource limits enforced by xgenius
-- **`[watcher]`** — polling interval and research CLI command
-- **`[clusters.NAME]`** — SSH hostname (must match `~/.ssh/config`), paths on the cluster
-- **`[clusters.NAME.slurm]`** — default SLURM parameters and available GPU types
-
-See [`examples/xgenius.toml`](examples/xgenius.toml) for a fully commented example.
-
-### 3. Edit your research goal
-
-Open `research_goal.md` and describe your objective, baselines, success criteria, and constraints. Be specific — this is what the agent reads to decide what experiments to run.
-
-### 4. Build and push the container
-
-Open Claude Code or Copilot CLI in your project directory and tell it:
-
-```
-Build the Singularity container for this project. Make sure the code runs correctly inside it. Then push it to the cluster.
-```
-
-The agent will:
-- Examine the Dockerfile and fix issues (outdated base images, missing deps)
-- Run `xgenius build --json` (docker build → test → singularity convert)
-- Run `xgenius push-image --cluster NAME --json` (push + verify on cluster)
-
-**Important:** The container should contain only dependencies (CUDA, Python, pip packages), NOT source code. Code is synced separately via `xgenius sync` and mounted at runtime.
-
-### 5. Start the autonomous research loop
-
-Run in a single terminal (tmux recommended):
-
-```bash
-cd auto-myproject
-copilot -p "Start the autonomous research loop. Read CLAUDE.md and research_goal.md and begin." --allow-all ; xgenius watch
-```
-
-Or, for Claude Code:
-
-```bash
-cd auto-myproject
-claude -p "Start the autonomous research loop. Read CLAUDE.md and research_goal.md and begin." --dangerously-skip-permissions ; xgenius watch
-```
-
-Use the same CLI selected in `xgenius.toml`. The agent runs first, does its initial work (reads goal, submits baseline experiments), and exits. Then the watcher daemon starts automatically (`;`), polls clusters for completed jobs, and triggers a **fresh** `copilot -p "..."` or `claude -p "..."` session when results are ready. Each wake-up is a clean session — no stale context accumulation.
-
-**Important:** The `;` ensures the watcher starts after the initial agent exits, even if it hits rate limits. Do NOT run them in parallel — it causes duplicate agent sessions.
-
-**Permissions:** The default autonomous commands bypass approval prompts. Copilot's `--allow-all` grants tools, paths, and URLs; Claude uses `--dangerously-skip-permissions`. Only use these in a trusted project. The xgenius safety limits apply to operations routed through xgenius, not to arbitrary commands the CLI can execute. You can customize `trigger_command` with narrower permissions, but unattended tasks will fail if required operations are not permitted.
-
-**Warning:** Run only one watcher and do not start other research-agent sessions in the same project directory while the loop is running. The watcher waits for its own child to exit and uses `.xgenius/watcher.lock`; it does not detect independently launched Claude or Copilot sessions.
-
-**Monitor progress:**
-```bash
-tail -f .xgenius/watcher.log           # watcher activity
-xgenius db summary                     # job and hypothesis status
-xgenius journal read                   # research narrative
-xgenius dashboard                      # web-based DB browser
-```
-
-**Steer the agent:** Add directives the agent must follow on its next wake-up:
-```bash
-xgenius steer "Revisit all rejected hypotheses with full 15-game evaluation"
-xgenius steer "Switch to HNS metric for all comparisons" --priority high
-xgenius steer "Stop working on h012, focus on h016 instead" --priority critical
-```
-
-Directives are timestamped and appended to the journal. The agent reads the journal first on every wake-up.
-
-### Resetting for a fresh run
-
-```bash
-cd auto-myproject
-xgenius reset                          # clear journal, jobs, audit log
-git add -A && git commit -m "reset: fresh research run"
-git push
-```
-
-The agent will start fresh and begin the research loop from scratch.
-
-## Configuration Guide
-
-### `xgenius.toml` structure
-
-The config has four sections. See [`examples/xgenius.toml`](examples/xgenius.toml) for a fully commented example.
-
-#### `[project]` — Project metadata
-
-```toml
-[project]
-name = "my-research"                 # Project name
-research_goal = "research_goal.md"   # Path to research goal (the agent reads this)
-container_image = "my-project.sif"   # Singularity image filename
-dockerfile = "Dockerfile"            # Path to Dockerfile
-```
-
-#### `[safety]` — Hard limits enforced by xgenius
-
-These are **maximums**. The agent can request less per-job via `--gpus`, `--cpus`, `--memory`, `--walltime` flags. Set these to the most you'd ever want a single job to use.
-
-```toml
-[safety]
-max_gpus_per_job = 4                 # Max GPUs per single job
-max_cpus_per_job = 32                # Max CPUs per single job
-max_memory_per_job = "128G"          # Max RAM per job
-max_walltime = "48:00:00"            # Max walltime per job
-max_concurrent_jobs = 50             # Max jobs running/pending at once
-max_total_gpu_hours = 10000          # Total GPU-hours budget across all experiments
-allowed_command_prefixes = ["python"] # Only allow running Python scripts
-forbidden_patterns = [               # Always blocked (shell injection protection)
-    "rm -rf", "sudo", "chmod", "chown", "wget", "curl",
-    "mkfs", "dd ", "shutdown", "reboot", "kill -9",
-]
-require_singularity = true           # All jobs must run inside a container
-```
-
-#### `[watcher]` — Background daemon settings
-
-```toml
-[watcher]
-poll_interval_seconds = 60           # How often to check for completed jobs
-trigger_command = "copilot --allow-all" # Used by watch, report, and compact
-# Claude default: trigger_command = "claude --dangerously-skip-permissions"
-```
-
-The command is parsed into arguments without a shell, and xgenius appends `-p` and the task prompt. Do not include a prompt or use shell operators such as pipes, redirects, or `&&`. Use shell-style quotes around paths or argument values containing spaces. For Windows paths, a TOML literal string preserves backslashes, with double quotes around the executable:
-
-```toml
-trigger_command = '"C:\Program Files\Copilot\copilot.exe" --allow-all'
-```
-
-Additional CLI options, such as `--model YOUR_MODEL`, apply to all three operations. Missing watcher settings default to Claude; existing explicit commands remain unchanged. Avoid `--continue` or `--resume` unless you deliberately want to reuse session context instead of starting fresh.
-
-#### `[clusters.NAME]` — One section per SLURM cluster
-
-You can define multiple clusters. The agent will submit jobs to whichever cluster you configure.
-
-```toml
-[clusters.mycluster]
-hostname = "mycluster"               # MUST match a Host entry in ~/.ssh/config
-username = "myuser"                  # SSH username on the cluster
-project_path = "/home/myuser/project" # Where project code lives (absolute path)
-scratch_path = "/scratch/myuser"     # Scratch space for outputs/state (absolute path)
-image_path = "/scratch/myuser/images" # Where .sif container images are stored
-sbatch_template = "slurm_account_template.sbatch"
-# Use "slurm_account_template.sbatch" if your cluster uses --account
-# Use "slurm_partition_template.sbatch" if your cluster uses --partition
-```
-
-#### `[clusters.NAME.slurm]` — Default SLURM parameters
-
-These are **defaults** — used when the agent doesn't specify overrides. The agent can request different values per-job within the `[safety]` limits.
-
-```toml
-[clusters.mycluster.slurm]
-account = "my-allocation"            # SLURM account (--account). Leave "" if using partition.
-partition = ""                       # SLURM partition (--partition). Leave "" if using account.
-num_gpus = 1                         # Default GPUs per job
-gpu_type = "a100"                    # Default GPU type. Leave "" for any GPU.
-available_gpu_types = [              # All GPU types the agent can pick from on this cluster
-    "a100",                          # List the GPU types available on your cluster
-    "v100",
-]
-num_cpus = 8                         # Default CPUs per job
-memory = "32G"                       # Default RAM per job
-walltime = "12:00:00"                # Default walltime per job
-modules = "apptainer"                # Modules to load before running container
-singularity_command = "apptainer"    # "singularity" or "apptainer"
-output_dir_cluster = "/scratch/myuser/runs"  # Where experiment outputs go
-output_dir_container = "/results"    # Mount point inside the container
-```
-
-### Resource management
-
-The agent can override defaults per-job using flags on `xgenius submit`:
-
-| Flag | Description | Example |
-|------|-------------|---------|
-| `--gpus N` | Number of GPUs | `--gpus 1` |
-| `--gpu-type TYPE` | GPU model | `--gpu-type "a100"` |
-| `--cpus N` | Number of CPUs | `--cpus 4` |
-| `--memory SIZE` | RAM | `--memory "16G"` |
-| `--walltime TIME` | Job duration | `--walltime "02:00:00"` |
-
-The agent uses `xgenius db jobs --status completed --json` to learn how long past jobs took and adjusts future requests accordingly. `xgenius status --json` shows pending times and queue reasons so the agent can make smart scheduling decisions.
-
-### Multiple clusters
-
-Define multiple clusters to let the agent distribute jobs across them:
-
-```toml
-[clusters.gpu-cluster]
-hostname = "gpu-cluster"
-# ... (GPU cluster for training)
-
-[clusters.cpu-cluster]
-hostname = "cpu-cluster"
-# ... (smaller cluster for quick tests)
-```
-
-The agent will see all configured clusters and can choose which to submit to based on availability and GPU types.
-
-## Safety
-
-Safety is enforced in Python code for operations routed through xgenius:
-
-1. **Command validation**: Only allowed prefixes (e.g., `python`). Shell injection blocked.
-2. **Resource limits**: Max GPUs, CPUs, memory, walltime per job (from `[safety]`).
-3. **GPU type validation**: Only GPU types listed in `available_gpu_types` are allowed.
-4. **Budget tracking**: Total GPU-hours cap across all experiments.
-5. **Path containment**: Code changes restricted to project directory.
-6. **Singularity sandboxing**: All code runs inside containers.
-7. **Audit log**: Every action logged to `.xgenius/audit.jsonl`.
-
-## Commands
-
-All commands support `--json` for structured output.
-
-| Command | Purpose |
-|---------|---------|
-| `xgenius init` | Initialize project (creates config, research goal, CLAUDE.md) |
-| `xgenius init --agent copilot` | Initialize using GitHub Copilot CLI instead of Claude Code |
-| `xgenius build` | Build Singularity container (docker build → test → convert) |
-| `xgenius push-image` | Push container to cluster and verify |
-| `xgenius verify-image` | Verify container exists on cluster |
-| `xgenius submit` | Submit a SLURM job (safety-validated, resource overrides) |
-| `xgenius batch-submit` | Submit multiple jobs from JSON file |
-| `xgenius status` | Check job statuses (elapsed time, pending reason, resources) |
-| `xgenius cancel` | Cancel specific jobs by ID |
-| `xgenius logs` | Fetch job stdout |
-| `xgenius errors` | Fetch job stderr / crash logs |
-| `xgenius check-completions` | Check for completed jobs |
-| `xgenius sync` | Rsync project code to cluster |
-| `xgenius pull` | Pull results from cluster |
-| `xgenius ls` | List files on cluster |
-| `xgenius journal context` | Full research context for the agent |
-| `xgenius journal summary` | Concise progress summary |
-| `xgenius journal add-hypothesis` | Record a hypothesis |
-| `xgenius journal add-result` | Record experiment results |
-| `xgenius journal update-hypothesis` | Update hypothesis status |
-| `xgenius budget` | Show remaining compute budget |
-| `xgenius validate` | Dry-run safety check on a command |
-| `xgenius db summary` | Full status overview from SQLite DB |
-| `xgenius db jobs` | List jobs (filter by `--hypothesis-id`, `--status`) |
-| `xgenius db active` | Currently running/submitted jobs |
-| `xgenius db hypothesis-check --id H` | Check if all jobs for a hypothesis are done |
-| `xgenius results summary` | Results bank overview |
-| `xgenius journal read` | Read research journal (the agent's memory) |
-| `xgenius journal write "..."` | Append to research journal |
-| `xgenius report` | Generate full research report using the configured CLI |
-| `xgenius compact` | Compact the research journal using the configured CLI (backs up the original) |
-| `xgenius reset` | Clear all state for a fresh research run |
-| `xgenius watch` | Background daemon (triggers the configured CLI on job completion) |
-| `xgenius dashboard` | Web-based DB browser for human inspection |
-
-## Examples
-
-Two full autonomous research projects built with xgenius:
-
-| Project | Goal | Hypotheses | Report |
-|---------|------|-----------|--------|
-| [auto-cleanrl](https://github.com/roger-creus/auto-cleanrl) | SOTA on 15 Atari games (PPO/PQN, 40M steps) | 45+ | [Report](examples/auto-cleanrl-report/report.html) |
-| [auto-craftax](https://github.com/roger-creus/auto-craftax) | SOTA on Craftax-Symbolic-v1 (1B steps) | 20+ | [Report](examples/auto-craftax-report/report.html) |
-
-Both repos are public — check their `research_goal.md` and `.xgenius/journal.md` to see the full autonomous research process.
-
-## Citation
-
-If you use xgenius in your research, please cite it:
+From a checkout, use `python -m pip install ".[dashboard-chat]"`.
+**Ask Copilot** starts inference only when you send a question. The observer gets
+curated, bounded, read-only tools for recorded state, metrics, historical rationale
+and exact source revisions. It cannot steer research, attach to its provider
+session, run commands, or read arbitrary files, logs, datasets or artifact bodies.
+
+Chat, drafts, open/closed state and maximized layout survive navigation/reload
+while the dashboard process remains alive. **Close** hides it; **New chat** clears
+it; **Maximize/Restore** changes the reading layout. Cancellation and visible
+machine-capacity waiting are supported. Chat is not persisted across server
+restarts. Observer invocation allowance and usage are separate from research,
+but its owned SDK processes still acquire machine capacity.
+
+## Boundaries
+
+Trusted native execution is not a hostile-code sandbox. CPU placement is not a
+CPU-time quota; WSL memory monitoring is not a kernel-hard memory limit. The
+ledger coordinates cooperating xgenius consumers, not every process or OS user.
+Explicit free-space monitoring is a soft safeguard, not a filesystem quota.
+Optional Copilot sandboxing fails closed when its prepared policy is unavailable.
+
+No automatic image pulls, remote compute, pushes, uploads or shared-environment
+installations are part of the research loop. A trusted provider can still use
+its own tools: define approved data disclosure and operational constraints.
+Do not put credentials in persisted manifests or environment overrides.
+
+## Development and historical work
+
+Install with `python -m pip install -e .`, then run `python -m pytest tests -q`.
+See [contributor runtime contracts](docs/runtime-protocol.md) and `CLAUDE.md`.
+Guest/browser/build acceptance requires explicit opt-in and already prepared
+environments. Ordinary tests never invoke a real research model.
+
+The illustrated [Atari](examples/auto-cleanrl-report/report.html) and
+[Craftax](examples/auto-craftax-report/report.html) reports are **historical v1
+artifacts**, not supported v2 onboarding. Their original cluster methods,
+figures and conclusions are preserved.
+
+## Attribution and citation
+
+This local-runtime edition builds on Roger Creus Castanyer's xgenius.
+The original software citation remains:
 
 ```bibtex
 @software{creus2026xgenius,
@@ -511,8 +182,4 @@ If you use xgenius in your research, please cite it:
 }
 ```
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19038735.svg)](https://doi.org/10.5281/zenodo.19038735)
-
-## License
-
-MIT — see [LICENSE](LICENSE) for details.
+MIT license; see [LICENSE](LICENSE) and [CITATION.cff](CITATION.cff).

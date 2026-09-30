@@ -1,3 +1,3 @@
-"""xgenius — LLM-oriented autonomous research platform for SLURM clusters."""
+"""xgenius: local autonomous research for Claude and GitHub Copilot."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

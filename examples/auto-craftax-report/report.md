@@ -1,5 +1,8 @@
 # Autonomous Research Report: Pushing State-of-the-Art on Craftax-Symbolic-v1
 
+> Historical xgenius v1 report. Original methods and results are preserved;
+> this is not an onboarding example for the schema-3 local runtime.
+
 **Date:** 2026-03-24
 **Duration:** 7 days (Mar 17–24, 2026)
 **Infrastructure:** 4 SLURM clusters (rorqual, narval, nibi, fir) with NVIDIA H100 and A100 GPUs

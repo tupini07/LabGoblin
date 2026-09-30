@@ -1,308 +1,312 @@
-"""Configuration management for xgenius.
+"""Strict local-only configuration. Loading never creates or migrates state."""
 
-Loads and validates xgenius.toml project configuration files.
-"""
-
-import os
-import posixpath
-import shlex
-import tomllib
 from dataclasses import dataclass, field
-from xgenius.local_config import LocalConfig, parse_local
+from pathlib import Path
+import re
+import sys
+import tomllib
+
+from xgenius.protocol import (
+    CONFIG_VERSION, Limit, Resources, argv, boolean, fingerprint, integer,
+    number, require_version, strings, table, text,
+)
 
 
 AGENT_COMMANDS = {
-    "claude": "claude --dangerously-skip-permissions",
-    "copilot": "copilot --allow-all",
+    "claude": ("claude", "--dangerously-skip-permissions"),
+    "copilot": ("copilot", "--allow-all"),
 }
 
 
-@dataclass
-class SlurmConfig:
-    """Per-cluster SLURM job parameters."""
-    account: str = ""
-    partition: str = ""
-    num_gpus: int = 1
-    gpu_type: str = ""  # default GPU type, e.g., "h100" — empty means any GPU
-    available_gpu_types: list[str] = field(default_factory=list)  # all GPU types Claude can pick from
-    num_cpus: int = 8
-    memory: str = "32G"
-    walltime: str = "12:00:00"
-    modules: str = ""
-    singularity_command: str = "singularity"
-    output_dir_cluster: str = ""
-    output_dir_container: str = "/results"
-    output_file: str = ""
-
-
-@dataclass
-class ClusterConfig:
-    """Configuration for a single cluster."""
-    name: str
-    hostname: str
-    username: str
-    project_path: str
-    scratch_path: str
-    image_path: str
-    sbatch_template: str = "slurm_partition_template.sbatch"
-    slurm: SlurmConfig = field(default_factory=SlurmConfig)
-
-
-@dataclass
-class SafetyConfig:
-    """Safety limits enforced on all operations."""
-    max_gpus_per_job: int = 1
-    max_cpus_per_job: int = 16
-    max_memory_per_job: str = "64G"
-    max_walltime: str = "24:00:00"
-    max_concurrent_jobs: int = 10
-    max_total_gpu_hours: float = 500
-    allowed_command_prefixes: list[str] = field(default_factory=lambda: ["python"])
-    forbidden_patterns: list[str] = field(default_factory=lambda: [
-        "rm -rf", "sudo", "chmod", "chown", "wget", "curl",
-        "mkfs", "dd ", "shutdown", "reboot", "kill -9",
-    ])
-    require_singularity: bool = True
-
-
-@dataclass
-class WatcherConfig:
-    """Configuration for the background completion watcher."""
-    poll_interval_seconds: int = 60
-    trigger_command: str = AGENT_COMMANDS["claude"]
-
-    def command_args(self) -> list[str]:
-        """Parse the agent command without invoking a shell."""
-        if not isinstance(self.trigger_command, str):
-            raise ValueError("watcher.trigger_command must be a non-empty command string")
-        try:
-            args = shlex.split(self.trigger_command)
-        except ValueError as e:
-            raise ValueError(f"Invalid watcher.trigger_command: {e}") from e
-        if not args or not args[0]:
-            raise ValueError("watcher.trigger_command must be a non-empty command string")
-        return args
-
-
-@dataclass
+@dataclass(frozen=True)
 class ProjectConfig:
-    """Top-level project settings."""
-    name: str = "my-research"
+    name: str
     research_goal: str = "research_goal.md"
-    container_image: str = ""
-    dockerfile: str = "Dockerfile"
 
 
-@dataclass
+@dataclass(frozen=True)
+class Runner:
+    kind: str
+    python: str
+    distro: str = ""
+    image: str = ""
+    context: str = ""
+    network: bool = False
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    default_runner: str
+    source_files: tuple[str, ...] = ()
+    environment: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CampaignConfig:
+    resources: Resources
+    max_jobs: int
+    max_gpu_hours: float
+    max_seconds: Limit
+    max_invocations: Limit
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    provider: str
+    command: tuple[str, ...]
+    resources: Resources
+    timeout_seconds: float = 600
+    retries: int = 1
+    model: str = ""
+    reasoning_effort: str = ""
+    sandbox: bool = False
+    copilot_home: str = ""
+
+    @property
+    def invocation_bundle(self) -> int:
+        return 2 if self.sandbox else 1
+
+
+@dataclass(frozen=True)
+class Watermark:
+    path: str
+    min_free_mb: int
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    log_bytes: int = 16 * 1024 * 1024
+    tail_bytes: int = 64 * 1024
+    snapshot_bytes: int = 256 * 1024 * 1024
+    capture_bytes: int = 1024 * 1024
+    metrics_bytes: int = 256 * 1024
+    volumes: dict[str, Watermark] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InputConfig:
+    path: str
+    identity: str = ""
+    sha256: str = ""
+    wsl_path: str = ""
+    prompt_access: bool = False
+    assurance: str = "declared"
+    verification_bytes: int = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ChatSettings:
+    enabled: bool = False
+    model: str = "auto"
+    reasoning_effort: str = ""
+    timeout_seconds: float = 120
+    cli_path: str = ""
+    cpus: int = 1
+    memory_mb: int = 2048
+    max_invocations: int = 20
+
+
+def parse_chat_settings(value: dict) -> ChatSettings:
+    value = table(value, "dashboard.chat", set(ChatSettings.__dataclass_fields__))
+    settings = ChatSettings(**value)
+    boolean(settings.enabled, "dashboard.chat.enabled")
+    for name in ("model", "reasoning_effort", "cli_path"):
+        item = text(getattr(settings, name), f"dashboard.chat.{name}", empty=name != "model")
+        if len(item) > 1024:
+            raise ValueError(f"dashboard.chat.{name} exceeds 1024 characters")
+    if settings.reasoning_effort not in ("", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        raise ValueError("Unsupported dashboard.chat.reasoning_effort")
+    number(settings.timeout_seconds, "dashboard.chat.timeout_seconds")
+    if not 5 <= settings.timeout_seconds <= 600:
+        raise ValueError("dashboard.chat.timeout_seconds must be between 5 and 600")
+    Resources(settings.cpus, settings.memory_mb)
+    integer(settings.max_invocations, "dashboard.chat.max_invocations")
+    return settings
+
+
+@dataclass(frozen=True)
 class XGeniusConfig:
-    """Complete xgenius configuration."""
-    project: ProjectConfig = field(default_factory=ProjectConfig)
-    safety: SafetyConfig = field(default_factory=SafetyConfig)
-    watcher: WatcherConfig = field(default_factory=WatcherConfig)
-    clusters: dict[str, ClusterConfig] = field(default_factory=dict)
-    config_path: str = ""  # Path to the loaded config file
-    local: LocalConfig | None = None
+    project: ProjectConfig
+    execution: ExecutionConfig
+    runners: dict[str, Runner]
+    campaign: CampaignConfig
+    agent: AgentConfig
+    storage: StorageConfig
+    inputs: dict[str, InputConfig]
+    config_path: str
+    revision: str
+    chat: ChatSettings = field(default_factory=ChatSettings)
+
+    @property
+    def root(self) -> Path:
+        return Path(self.config_path).parent
+
+    @property
+    def state_dir(self) -> Path:
+        return self.root / ".xgenius"
 
 
-def _parse_slurm(data: dict) -> SlurmConfig:
-    """Parse a [clusters.X.slurm] section."""
-    return SlurmConfig(
-        account=str(data.get("account", "")),
-        partition=str(data.get("partition", "")),
-        num_gpus=int(data.get("num_gpus", 1)),
-        gpu_type=str(data.get("gpu_type", "")),
-        available_gpu_types=data.get("available_gpu_types", []),
-        num_cpus=int(data.get("num_cpus", 8)),
-        memory=str(data.get("memory", "32G")),
-        walltime=str(data.get("walltime", "12:00:00")),
-        modules=str(data.get("modules", "")),
-        singularity_command=str(data.get("singularity_command", "singularity")),
-        output_dir_cluster=str(data.get("output_dir_cluster", "")),
-        output_dir_container=str(data.get("output_dir_container", "/results")),
-        output_file=str(data.get("output_file", "")),
+def environment(value, name: str) -> dict[str, str]:
+    result = {}
+    for key, item in table(value, name).items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key):
+            raise ValueError(f"Invalid {name} variable: {key}")
+        result[key] = text(item, f"{name}.{key}", empty=True)
+    return result
+
+
+def _runner(name: str, value: dict) -> Runner:
+    prefix = f"runners.{name}"
+    value = table(value, prefix, set(Runner.__dataclass_fields__))
+    kind = text(value.get("kind"), f"{prefix}.kind")
+    if kind not in ("native", "wsl", "docker"):
+        raise ValueError(f"Unsupported runner kind: {kind}; use native, wsl or docker")
+    python = text(value.get("python"), f"{prefix}.python")
+    allowed = {"kind", "python"}
+    if kind == "wsl":
+        allowed.add("distro")
+    if kind == "docker":
+        allowed.update(("image", "context", "network"))
+    if set(value) - allowed:
+        raise ValueError(f"Settings do not apply to {kind} runner: {sorted(set(value) - allowed)}")
+    distro = text(value.get("distro", ""), f"{prefix}.distro", empty=kind != "wsl")
+    image = text(value.get("image", ""), f"{prefix}.image", empty=kind != "docker")
+    context = text(value.get("context", ""), f"{prefix}.context", empty=kind != "docker")
+    if distro.casefold() in ("docker-desktop", "docker-desktop-data"):
+        raise ValueError("Use a development WSL distro, not Docker Desktop's internal distro")
+    return Runner(kind, python, distro, image, context,
+                  boolean(value.get("network", False), f"{prefix}.network"))
+
+
+def _input(name: str, value: dict) -> InputConfig:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+        raise ValueError("Input names must be valid environment variable identifiers")
+    prefix = f"inputs.{name}"
+    value = table(value, prefix, set(InputConfig.__dataclass_fields__))
+    pin = text(value.get("sha256", ""), f"{prefix}.sha256", empty=True)
+    if pin and not re.fullmatch("[0-9a-fA-F]{64}", pin):
+        raise ValueError(f"{prefix}.sha256 must be a SHA-256 hex digest")
+    assurance = value.get("assurance", "checked" if pin else "declared")
+    if assurance not in ("declared", "checked", "stable-consumption", "unmanaged"):
+        raise ValueError(f"Unknown {prefix}.assurance")
+    if assurance == "checked" and not pin:
+        raise ValueError(f"{prefix}: checked assurance requires sha256")
+    return InputConfig(
+        path=text(value.get("path"), f"{prefix}.path"),
+        identity=text(value.get("identity", ""), f"{prefix}.identity", empty=True),
+        sha256=pin.lower(),
+        wsl_path=text(value.get("wsl_path", ""), f"{prefix}.wsl_path", empty=True),
+        prompt_access=boolean(value.get("prompt_access", False), f"{prefix}.prompt_access"),
+        assurance=assurance,
+        verification_bytes=integer(value.get("verification_bytes", 64 * 1024 * 1024),
+                                   f"{prefix}.verification_bytes"),
     )
 
 
-def _parse_cluster(name: str, data: dict) -> ClusterConfig:
-    """Parse a [clusters.X] section."""
-    slurm_data = data.get("slurm", {})
-    return ClusterConfig(
-        name=name,
-        hostname=data.get("hostname", name),
-        username=data["username"],
-        project_path=data["project_path"],
-        scratch_path=data["scratch_path"],
-        image_path=data.get("image_path", ""),
-        sbatch_template=data.get("sbatch_template", "slurm_partition_template.sbatch"),
-        slurm=_parse_slurm(slurm_data),
+def parse_config(raw: dict, path: str | Path) -> XGeniusConfig:
+    raw = table(raw, "configuration")
+    require_version(raw.get("schema_version"), CONFIG_VERSION, "configuration")
+    table(raw, "configuration", {"schema_version", "project", "execution", "runners",
+                                "campaign", "agent", "storage", "inputs", "dashboard"})
+    path = Path(path).resolve()
+    project = table(raw.get("project", {}), "project", {"name", "research_goal"})
+    goal = text(project.get("research_goal", "research_goal.md"), "project.research_goal")
+    if not (path.parent / goal).resolve().is_relative_to(path.parent):
+        raise ValueError("project.research_goal must be inside the project")
+    project_config = ProjectConfig(text(project.get("name", path.parent.name), "project.name"), goal)
+    execution = table(raw.get("execution", {}), "execution",
+                      {"default_runner", "source_files", "environment"})
+    runners = {text(name, "runner name"): _runner(name, value)
+               for name, value in table(raw.get("runners", {}), "runners").items()}
+    default = text(execution.get("default_runner"), "execution.default_runner")
+    if default not in runners:
+        raise ValueError(f"Default runner {default!r} is not defined")
+    execution_config = ExecutionConfig(
+        default, strings(execution.get("source_files", []), "execution.source_files", empty=True),
+        environment(execution.get("environment", {}), "execution.environment"))
+    campaign = table(raw.get("campaign", {}), "campaign",
+                     {"cpus", "memory_mb", "gpus", "max_jobs", "max_gpu_hours",
+                      "max_seconds", "max_invocations"})
+    resources = Resources.parse({k: v for k, v in campaign.items() if k in ("cpus", "memory_mb", "gpus")})
+    campaign_config = CampaignConfig(
+        resources,
+        integer(campaign.get("max_jobs"), "campaign.max_jobs"),
+        number(campaign.get("max_gpu_hours"), "campaign.max_gpu_hours", zero=True),
+        Limit(number(campaign.get("max_seconds"), "campaign.max_seconds", zero=True)),
+        Limit(integer(campaign.get("max_invocations"), "campaign.max_invocations", zero=True)),
     )
-
-
-def load_config(path: str = "xgenius.toml") -> XGeniusConfig:
-    """Load and validate an xgenius.toml configuration file.
-
-    Args:
-        path: Path to the TOML config file. Defaults to 'xgenius.toml' in cwd.
-
-    Returns:
-        Validated XGeniusConfig.
-
-    Raises:
-        FileNotFoundError: If config file doesn't exist.
-        ValueError: If required fields are missing.
-    """
-    if not os.path.isabs(path):
-        path = os.path.join(os.getcwd(), path)
-
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Config file not found: {path}")
-
-    with open(path, "rb") as f:
-        raw = tomllib.load(f)
-
-    # Parse project section
-    proj_data = raw.get("project", {})
-    project = ProjectConfig(
-        name=proj_data.get("name", "my-research"),
-        research_goal=proj_data.get("research_goal", "research_goal.md"),
-        container_image=proj_data.get("container_image", ""),
-        dockerfile=proj_data.get("dockerfile", "Dockerfile"),
+    agent = table(raw.get("agent", {}), "agent",
+                  {"provider", "command", "resources", "timeout_seconds", "retries",
+                   "model", "reasoning_effort", "sandbox", "copilot_home"})
+    provider = text(agent.get("provider", "claude"), "agent.provider")
+    if provider not in AGENT_COMMANDS:
+        raise ValueError("agent.provider must be claude or copilot")
+    command = argv(agent.get("command", AGENT_COMMANDS[provider]), "agent.command")
+    agent_resources = Resources.parse(agent.get("resources", {}))
+    if agent_resources.gpus:
+        raise ValueError("Managed provider resources do not support GPU allocation")
+    if agent_resources.cpus > resources.cpus or agent_resources.memory_mb > resources.memory_mb:
+        raise ValueError("Agent resource request exceeds the campaign envelope")
+    sandbox = boolean(agent.get("sandbox", False), "agent.sandbox")
+    home = text(agent.get("copilot_home", ""), "agent.copilot_home", empty=True)
+    if sandbox:
+        if provider != "copilot" or not home:
+            raise ValueError("Sandbox requires Copilot and an explicitly provisioned copilot_home")
+        if not (path.parent / home).resolve().is_relative_to(path.parent / ".xgenius"):
+            raise ValueError("Sandbox profile must be under this campaign's .xgenius directory")
+    agent_config = AgentConfig(
+        provider, command, agent_resources,
+        number(agent.get("timeout_seconds", 600), "agent.timeout_seconds"),
+        integer(agent.get("retries", 1), "agent.retries", zero=True),
+        text(agent.get("model", ""), "agent.model", empty=True),
+        text(agent.get("reasoning_effort", ""), "agent.reasoning_effort", empty=True),
+        sandbox, home,
     )
-
-    # Parse safety section
-    safety_data = raw.get("safety", {})
-    safety = SafetyConfig(
-        max_gpus_per_job=safety_data.get("max_gpus_per_job", 1),
-        max_cpus_per_job=safety_data.get("max_cpus_per_job", 16),
-        max_memory_per_job=safety_data.get("max_memory_per_job", "64G"),
-        max_walltime=safety_data.get("max_walltime", "24:00:00"),
-        max_concurrent_jobs=safety_data.get("max_concurrent_jobs", 10),
-        max_total_gpu_hours=safety_data.get("max_total_gpu_hours", 500),
-        allowed_command_prefixes=safety_data.get("allowed_command_prefixes", ["python"]),
-        forbidden_patterns=safety_data.get("forbidden_patterns", SafetyConfig().forbidden_patterns),
-        require_singularity=safety_data.get("require_singularity", True),
-    )
-
-    # Parse watcher section
-    watcher_data = raw.get("watcher", {})
-    watcher = WatcherConfig(
-        poll_interval_seconds=watcher_data.get("poll_interval_seconds", 60),
-        trigger_command=watcher_data.get("trigger_command", AGENT_COMMANDS["claude"]),
-    )
-
-    # Parse clusters
-    clusters = {}
-    for cluster_name, cluster_data in raw.get("clusters", {}).items():
-        clusters[cluster_name] = _parse_cluster(cluster_name, cluster_data)
-
-    config = XGeniusConfig(
-        project=project,
-        safety=safety,
-        watcher=watcher,
-        clusters=clusters,
-        config_path=path,
-        local=parse_local(raw),
-    )
-
-    _validate_config(config)
-    return config
+    storage = table(raw.get("storage", {}), "storage", set(StorageConfig.__dataclass_fields__))
+    defaults = StorageConfig()
+    limits = {name: integer(storage.get(name, getattr(defaults, name)), f"storage.{name}")
+              for name in ("log_bytes", "tail_bytes", "snapshot_bytes", "capture_bytes", "metrics_bytes")}
+    if limits["metrics_bytes"] > limits["capture_bytes"]:
+        raise ValueError("storage.metrics_bytes cannot exceed capture_bytes")
+    volumes = {}
+    for name, value in table(storage.get("volumes", {}), "storage.volumes").items():
+        volume = table(value, f"storage.volumes.{name}", {"path", "min_free_mb"})
+        volumes[text(name, "volume name")] = Watermark(
+            str((path.parent / text(volume.get("path"), "volume.path")).resolve()),
+            integer(volume.get("min_free_mb"), "volume.min_free_mb"))
+    inputs = {name: _input(name, value)
+              for name, value in table(raw.get("inputs", {}), "inputs").items()}
+    dashboard = table(raw.get("dashboard", {}), "dashboard", {"chat"})
+    return XGeniusConfig(project_config, execution_config, runners, campaign_config,
+                        agent_config, StorageConfig(**limits, volumes=volumes), inputs,
+                        str(path), fingerprint(raw), parse_chat_settings(dashboard.get("chat", {})))
 
 
-def _validate_config(config: XGeniusConfig) -> None:
-    """Validate configuration for required fields and consistency."""
-    config.watcher.command_args()
-    if not config.clusters:
-        return  # Empty clusters is valid during init
+def load_config(path: str | Path = "xgenius.toml") -> XGeniusConfig:
+    path = Path(path).resolve()
+    from xgenius.evidence import read_bytes
+    return parse_config(tomllib.loads(read_bytes(path, 64 * 1024).decode("utf-8")), path)
 
-    for name, cluster in config.clusters.items():
-        if not cluster.username:
-            raise ValueError(f"Cluster '{name}' missing required field: username")
-        if not cluster.project_path:
-            raise ValueError(f"Cluster '{name}' missing required field: project_path")
-        if not cluster.scratch_path:
-            raise ValueError(f"Cluster '{name}' missing required field: scratch_path")
-        if not posixpath.isabs(cluster.project_path):
-            raise ValueError(f"Cluster '{name}' project_path must be absolute: {cluster.project_path}")
-        if not posixpath.isabs(cluster.scratch_path):
-            raise ValueError(f"Cluster '{name}' scratch_path must be absolute: {cluster.scratch_path}")
+
+def initial_config(name: str, provider: str = "claude", python: str | None = None) -> dict:
+    if provider not in AGENT_COMMANDS:
+        raise ValueError("Provider must be claude or copilot")
+    return {
+        "schema_version": CONFIG_VERSION,
+        "project": {"name": name, "research_goal": "research_goal.md"},
+        "execution": {"default_runner": "native", "source_files": []},
+        "runners": {"native": {"kind": "native", "python": python or sys.executable}},
+        "campaign": {"cpus": 2, "memory_mb": 4096, "gpus": [], "max_jobs": 1,
+                     "max_gpu_hours": 0, "max_seconds": 3600, "max_invocations": 10},
+        "agent": {"provider": provider, "command": list(AGENT_COMMANDS[provider]),
+                  "resources": {"cpus": 1, "memory_mb": 2048},
+                  "timeout_seconds": 600, "retries": 1, "sandbox": False},
+    }
 
 
 def get_project_dir(config: XGeniusConfig) -> str:
-    """Get the project directory (where xgenius.toml lives)."""
-    return os.path.dirname(config.config_path)
+    return str(config.root)
 
 
 def get_xgenius_dir(config: XGeniusConfig) -> str:
-    """Get the .xgenius state directory path."""
-    return os.path.join(get_project_dir(config), ".xgenius")
-
-
-def get_run_id(config: XGeniusConfig) -> str:
-    """Get the current run ID. Stored in .xgenius/run_id."""
-    xgenius_dir = get_xgenius_dir(config)
-    run_id_path = os.path.join(xgenius_dir, "run_id")
-    if os.path.exists(run_id_path):
-        with open(run_id_path) as f:
-            return f.read().strip()
-    return ""
-
-
-def create_run_id() -> str:
-    """Generate a new short run ID like 'xg-a3f9'."""
-    import hashlib
-    import time as _time
-    raw = f"{_time.time()}-{os.getpid()}"
-    return "xg-" + hashlib.sha256(raw.encode()).hexdigest()[:6]
-
-
-def ensure_xgenius_dir(config: XGeniusConfig) -> str:
-    """Create .xgenius directory and all standard files. Returns the path."""
-    xgenius_dir = get_xgenius_dir(config)
-    os.makedirs(xgenius_dir, exist_ok=True)
-    os.makedirs(os.path.join(xgenius_dir, "markers"), exist_ok=True)
-    os.makedirs(os.path.join(xgenius_dir, "batches"), exist_ok=True)
-
-    # Create run ID if missing
-    run_id_path = os.path.join(xgenius_dir, "run_id")
-    if not os.path.exists(run_id_path):
-        with open(run_id_path, "w") as f:
-            f.write(create_run_id())
-
-    # Create standard files if missing
-    for fname in ["journal.md"]:
-        fpath = os.path.join(xgenius_dir, fname)
-        if not os.path.exists(fpath):
-            with open(fpath, "w") as f:
-                pass
-
-    # Create DEBUG.md in .xgenius/
-    debug_path = os.path.join(xgenius_dir, "DEBUG.md")
-    if not os.path.exists(debug_path):
-        with open(debug_path, "w") as f:
-            f.write("# Debug Log\n\nErrors and issues encountered during autonomous research.\n")
-
-    return xgenius_dir
-
-
-def parse_memory_string(mem_str: str) -> int:
-    """Parse memory string like '64G' into megabytes."""
-    mem_str = mem_str.strip().upper()
-    if mem_str.endswith("G"):
-        return int(float(mem_str[:-1]) * 1024)
-    elif mem_str.endswith("M"):
-        return int(float(mem_str[:-1]))
-    elif mem_str.endswith("T"):
-        return int(float(mem_str[:-1]) * 1024 * 1024)
-    else:
-        return int(mem_str)
-
-
-def parse_walltime(walltime: str) -> int:
-    """Parse walltime string like '24:00:00' into seconds."""
-    parts = walltime.strip().split(":")
-    if len(parts) == 3:
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-    elif len(parts) == 2:
-        return int(parts[0]) * 60 + int(parts[1])
-    else:
-        return int(parts[0])
+    return str(config.state_dir)

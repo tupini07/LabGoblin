@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from xgenius import processes
-from xgenius.backends import launch_independent
 from xgenius.payload import WindowsPayload
+from xgenius.protocol import identifier
 
 
 WINDOW_PROBE = (
@@ -54,7 +54,10 @@ def test_background_process_and_unmodified_child_have_no_console_window(tmp_path
     )
     argv = [sys.executable, "-c", code]
     if launcher == "supervisor":
-        process = launch_independent(argv, tmp_path)
+        with (tmp_path / "supervisor.stdout.log").open("wb") as out, (
+                tmp_path / "supervisor.stderr.log").open("wb") as err:
+            process = subprocess.Popen(argv, cwd=tmp_path, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                       **processes.background_options(independent=True))
         try:
             assert process.wait(timeout=15) == 0, (tmp_path / "supervisor.stderr.log").read_text()
         finally:
@@ -65,7 +68,7 @@ def test_background_process_and_unmodified_child_have_no_console_window(tmp_path
     else:
         with (tmp_path / "stdout.log").open("wb") as out, (tmp_path / "stderr.log").open("wb") as err:
             process = WindowsPayload(argv, str(tmp_path), os.environ.copy(), out, err,
-                                     {"cpus": 1, "memory_mb": 256})
+                                     {"cpus": 1, "memory_mb": 256, "token": identifier()})
             try:
                 deadline = time.monotonic() + 15
                 while process.poll() is None:
@@ -80,19 +83,25 @@ def test_background_process_and_unmodified_child_have_no_console_window(tmp_path
     assert rows[0]["pid"] != rows[1]["pid"]
     assert all(not row["window"] and not row["visible"] and row["console_codepage"] for row in rows)
 
-
-def test_legacy_agent_keeps_inherited_output(tmp_path):
-    code = (
-        "import os,sys;from xgenius.agent import run_agent;"
-        "from xgenius.config import WatcherConfig,XGeniusConfig;"
-        "command='\"'+sys.executable+'\" -c \"import sys;print(123);print(456,file=sys.stderr)\"';"
-        "config=XGeniusConfig(config_path=os.path.abspath('xgenius.toml'),"
-        "watcher=WatcherConfig(trigger_command=command));"
-        "sys.exit(run_agent(config,'fixture').returncode)"
-    )
-    result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path,
-                            capture_output=True, text=True, timeout=15,
-                            **processes.background_options())
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "123"
-    assert result.stderr.strip() == "456"
+def test_temporary_cleanup_retries_only_transient_windows_sharing(monkeypatch):
+    from xgenius import processes
+    calls = []
+    class Directory:
+        name = "owned"
+        def cleanup(self):
+            calls.append("cleanup")
+            if len(calls) == 1:
+                error = PermissionError("working directory handle not released yet")
+                error.winerror = 32
+                raise error
+    monkeypatch.setattr(processes.tempfile, "TemporaryDirectory", lambda **kwargs: Directory())
+    monkeypatch.setattr(processes.time, "sleep", lambda delay: None)
+    with processes.temporary_directory(prefix="test-") as name:
+        assert name == "owned"
+    assert calls == ["cleanup", "cleanup"]
+    def denied(self):
+        raise PermissionError("Not a sharing violation")
+    monkeypatch.setattr(Directory, "cleanup", denied)
+    with pytest.raises(PermissionError, match="Not a sharing violation"):
+        with processes.temporary_directory(prefix="test-"):
+            pass

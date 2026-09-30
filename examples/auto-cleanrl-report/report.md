@@ -1,5 +1,8 @@
 # Autonomous Deep RL Research Report: Atari Game Playing
 
+> Historical xgenius v1 report. Original methods and results are preserved;
+> this is not an onboarding example for the schema-3 local runtime.
+
 **Generated:** 2026-03-24
 **Research Period:** 2026-03-18 to 2026-03-24 (7 days)
 **Infrastructure:** 4 SLURM clusters (rorqual, narval, nibi, fir) with H100 and A100 GPUs

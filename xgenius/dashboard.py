@@ -1,4 +1,4 @@
-"""Read-only, loopback research dashboard with locally rendered Markdown."""
+"""Read-only loopback views of retained research records and owned evidence."""
 
 from datetime import datetime, timezone
 import html
@@ -6,21 +6,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 from pathlib import Path
-import re
-import shutil
 import secrets
 import sqlite3
-import time
 import urllib.parse
 
 from markdown_it import MarkdownIt
 
-from xgenius.config import get_xgenius_dir, load_config
-from xgenius.db import ACTIVE_STATUSES, hypothesis_statement
-from xgenius.dashboard_data import index_journal, query as _query, read_text as _read_text
+from xgenius import journal, reporting
+from xgenius.config import ChatSettings
 from xgenius.dashboard_chat import ChatError, ObserverService, load_chat_settings
-from xgenius.scheduler import ledger_path
-from xgenius.workspace import contained
+from xgenius.dashboard_data import RESEARCH_SOURCES, query as _query, read_text as _read_text
+from xgenius.evidence import observation, tail
+from xgenius.protocol import ACTIVE
+from xgenius.processes import CampaignLease
+from xgenius.scheduler import ResourceLedger
+from xgenius.state import State
+from xgenius.worker import launch_directory
 
 
 PAGE_SIZE = 50
@@ -29,77 +30,57 @@ DOCUMENT_LIMIT = 128 * 1024
 JOURNAL_PAGE_SIZE = 20
 JOURNAL_PREVIEW_LIMIT = 16 * 1024
 STATIC = Path(__file__).with_name("static")
-FAILED = ("failed", "timed_out", "timeout", "oom", "interrupted", "disappeared")
+FAILED = ("failed", "timed_out", "interrupted", "not_started")
 NAV = (
     ("/", "Overview"), ("/jobs", "Experiments"), ("/hypotheses", "Hypotheses"),
-    ("/activity", "Agent activity"), ("/artifacts", "Artifacts"),
-    ("/resources", "Resources"), ("/goal", "Research goal"),
-    ("/journal", "Journal"), ("/debug", "Debug log"),
+    ("/activity", "Agent activity"), ("/artifacts", "Artifacts"), ("/reports", "Reports"),
+    ("/resources", "Resources"), ("/goal", "Research goal"), ("/journal", "Journal"), ("/debug", "Recovery"),
 )
 CSP = ("default-src 'none'; style-src 'self'; script-src 'self'; "
        "img-src 'self'; connect-src 'self'; base-uri 'none'; "
        "frame-ancestors 'none'; form-action 'self'")
 
 
-def _escape(value) -> str:
+def _escape(value):
     return html.escape(str(value)) if value is not None else ""
 
 
-def _url(path: str, **params) -> str:
-    query = urllib.parse.urlencode({k: v for k, v in params.items() if v not in ("", None)})
-    return path + ("?" + query if query else "")
+def _url(path, **params):
+    value = urllib.parse.urlencode({k: v for k, v in params.items() if v not in ("", None)})
+    return path + ("?" + value if value else "")
 
 
-def _link(path: str, label, **params) -> str:
+def _link(path, label, **params):
     return f'<a href="{_escape(_url(path, **params))}">{_escape(label)}</a>'
 
 
-def _badge(status: str) -> str:
-    tone = "neutral"
-    if status in ("completed", "promising", "accepted"):
-        tone = "success"
-    elif status in (*FAILED, "recovery_required", "blocked"):
-        tone = "danger"
-    elif status in ("running", "open", "maintenance"):
-        tone = "accent"
-    elif status in ("queued", "starting", "pending", "submitted", "waiting", "paused", "proposed"):
-        tone = "warning"
+def _badge(status):
+    tone = ("success" if status in ("completed", "accepted", "assessed", "valid") else
+            "danger" if status in (*FAILED, "recovery_required", "blocked", "invalid", "incomplete") else
+            "accent" if status in ("running", "open", "executing") else
+            "warning" if status in ("queued", "starting", "pending", "wait", "paused", "unassessed") else "neutral")
     return f'<span class="badge {tone}">{_escape(status.replace("_", " "))}</span>'
 
 
-def _duration(seconds) -> str:
+def _duration(seconds):
     if seconds is None:
         return "Not recorded"
     seconds = max(0, int(seconds))
     days, seconds = divmod(seconds, 86400)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
-    if days:
-        return f"{days}d {hours}h {minutes}m"
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {seconds}s"
-    return f"{seconds}s"
+    return (f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m" if hours else
+            f"{minutes}m {seconds}s" if minutes else f"{seconds}s")
 
 
-def _timestamp(value) -> str:
-    if value in (None, ""):
+def _timestamp(value):
+    if value is None or value == "":
         return '<span class="muted">Not recorded</span>'
-    if isinstance(value, (float, int)):
-        date = datetime.fromtimestamp(value, timezone.utc)
-    else:
-        try:
-            date = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return _escape(value)
-        if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
-        date = date.astimezone(timezone.utc)
+    date = datetime.fromtimestamp(value, timezone.utc)
     return f'<time datetime="{date.isoformat()}">{date:%Y-%m-%d %H:%M:%S} UTC</time>'
 
 
-def _size(value) -> str:
+def _size(value):
     if value is None:
         return "Not recorded"
     for unit in ("B", "KiB", "MiB", "GiB"):
@@ -108,88 +89,100 @@ def _size(value) -> str:
         value /= 1024
 
 
-def _markdown(text: str) -> str:
-    # No raw HTML or automatic remote image requests from research content.
-    return MarkdownIt("commonmark", {"html": False}).enable("table").render(text)
+def _markdown(text):
+    return MarkdownIt("commonmark", {"html": False}).enable("table").disable("image").render(text)
 
 
-def _chat_markdown(text: str) -> str:
+def _chat_markdown(text):
     parser = MarkdownIt("commonmark", {"html": False}).enable("table").disable("image")
     tokens = parser.parse(text)
+    allowed = {path for path, _ in NAV} | {"/job", "/hypothesis", "/turn", "/view", "/observation"}
     for block in tokens:
         for token in block.children or []:
             if token.type == "link_open":
                 target = urllib.parse.urlsplit(token.attrGet("href") or "")
-                if target.scheme or target.netloc or target.path not in {
-                        "/", "/jobs", "/job", "/hypotheses", "/hypothesis", "/activity",
-                        "/turn", "/artifacts", "/resources", "/goal", "/journal", "/debug"}:
+                if target.scheme or target.netloc or target.path not in allowed:
                     token.attrSet("href", "#")
                     token.attrSet("title", "Only dashboard evidence links are enabled in chat")
     return parser.renderer.render(tokens, parser.options, {})
 
 
-def _empty(title: str, description: str) -> str:
+def _empty(title, description):
     return f'<div class="empty"><h3>{_escape(title)}</h3><p>{_escape(description)}</p></div>'
 
 
-def _panel(title: str, body: str, action: str = "") -> str:
-    return (f'<section class="panel"><div class="section-heading"><h2>{_escape(title)}</h2>'
-            f'{action}</div>{body}</section>')
+def _panel(title, body, action=""):
+    return f'<section class="panel"><div class="section-heading"><h2>{_escape(title)}</h2>{action}</div>{body}</section>'
 
 
-def _table(headers: list[str], rows: list[list[str]]) -> str:
+def _table(headers, rows):
     if not rows:
         return _empty("Nothing here yet", "New records will appear as the research progresses.")
     return ('<div class="table-scroll" tabindex="0"><table><thead><tr>'
-            + "".join(f"<th scope=\"col\">{_escape(h)}</th>" for h in headers)
-            + "</tr></thead><tbody>"
+            + "".join(f'<th scope="col">{_escape(h)}</th>' for h in headers) + "</tr></thead><tbody>"
             + "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
             + "</tbody></table></div>")
 
 
-def _facts(items: list[tuple[str, str]]) -> str:
+def _facts(items):
     return '<dl class="facts">' + "".join(
         f"<div><dt>{_escape(label)}</dt><dd>{value}</dd></div>" for label, value in items) + "</dl>"
 
 
-def _meter(label: str, used: float, limit: float, detail: str) -> str:
-    progress = (f'<meter min="0" max="{limit}" value="{min(used, limit)}" '
-                f'aria-label="{_escape(label)}"></meter>') if limit > 0 else ""
-    return (f'<div class="budget"><div><strong>{_escape(label)}</strong>'
-            f'<span>{_escape(detail)}</span></div>{progress}</div>')
+def _meter(label, used, limit, detail):
+    progress = (f'<meter min="0" max="{limit}" value="{min(used, limit)}" aria-label="{_escape(label)}"></meter>'
+                if limit > 0 else "")
+    return f'<div class="budget"><div><strong>{_escape(label)}</strong><span>{_escape(detail)}</span></div>{progress}</div>'
 
 
 class DashboardError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status, message):
         self.status = status
         super().__init__(message)
 
 
 class DashboardServer(ThreadingHTTPServer):
-    def __init__(self, address, config_path: str, *, chat: bool = False, observer=None):
+    def __init__(self, address, config_path, *, chat=False, observer=None):
+        if address[0] not in ("127.0.0.1", "localhost"):
+            raise ValueError("The dashboard must bind to loopback")
         self.config_path = str(Path(config_path).resolve())
+        self.state = State.open(Path(self.config_path).parent / ".xgenius")
         self.chat_token = secrets.token_urlsafe(32)
-        self.observer = observer or ObserverService(self.config_path, load_chat_settings(self.config_path, enabled=chat))
-        super().__init__(address, DashboardHandler)
+        self.configuration_error = ""
+        try:
+            settings = load_chat_settings(self.config_path, enabled=chat)
+        except (OSError, ValueError) as error:
+            self.configuration_error = str(error)
+            settings = ChatSettings()
+        self.observer = observer or ObserverService(self.config_path, settings)
+        self.reader_lease = CampaignLease(self.state.root).__enter__()
+        try:
+            super().__init__(address, DashboardHandler)
+        except BaseException:
+            self.reader_lease.close()
+            self.observer.close()
+            raise
 
     def server_close(self):
         try:
             self.observer.close()
         finally:
-            super().server_close()
+            try:
+                super().server_close()
+            finally:
+                self.reader_lease.close()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def _check_host(self):
         host = self.headers.get("Host", "").lower()
-        allowed_hosts = {"localhost", "127.0.0.1",
-                         f"localhost:{self.server.server_port}", f"127.0.0.1:{self.server.server_port}"}
-        if host not in allowed_hosts:
+        allowed = {"localhost", "127.0.0.1", f"localhost:{self.server.server_port}", f"127.0.0.1:{self.server.server_port}"}
+        if host not in allowed:
             raise DashboardError(403, "Use the dashboard's loopback address.")
         return host
 
     def do_GET(self):
-        self.config = None
+        self.settings = {}
         parsed = urllib.parse.urlsplit(self.path)
         self.path_name = parsed.path
         self.params = {k: values[0] for k, values in urllib.parse.parse_qs(parsed.query).items()}
@@ -206,23 +199,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     data["conversation"] = self._chat_snapshot(self.params["conversation_id"])
                 self._json(data)
                 return
-            self.config = load_config(self.server.config_path)
-            self.root = Path(get_xgenius_dir(self.config))
-            self.db = self.root / "xgenius.db"
+            self.state = self.server.state
+            self.root, self.db = self.state.root, self.state.path
+            self.settings = json.loads(self._rows(
+                "SELECT content FROM configs WHERE id=(SELECT config_revision FROM campaign)")[0]["content"])
             routes = {
                 "/": ("Overview", self._overview), "/jobs": ("Experiments", self._jobs),
-                "/job": ("Experiment details", self._job),
-                "/hypotheses": ("Hypotheses", self._hypotheses),
-                "/hypothesis": ("Hypothesis details", self._hypothesis),
-                "/activity": ("Agent activity", self._activity),
-                "/turn": ("Agent turn", self._turn),
-                "/artifacts": ("Artifacts", self._artifacts),
-                "/resources": ("Resources", self._resources),
-                "/journal": ("Research journal", self._journal),
-                "/goal": ("Research goal", self._goal),
-                "/debug": ("Debug log", self._debug),
+                "/job": ("Experiment details", self._job), "/hypotheses": ("Hypotheses", self._hypotheses),
+                "/hypothesis": ("Hypothesis details", self._hypothesis), "/activity": ("Agent activity", self._activity),
+                "/turn": ("Agent turn", self._turn), "/artifacts": ("Artifacts", self._artifacts),
+                "/observation": ("Evidence revision", self._observation), "/reports": ("Reports", self._reports),
+                "/view": ("Historical source view", self._view), "/resources": ("Resources", self._resources),
+                "/journal": ("Research journal", self._journal), "/goal": ("Research goal", self._goal),
+                "/debug": ("Recovery", self._debug),
             }
-            if self.path_name == "/artifact" and self.config.local:
+            if self.path_name == "/artifact":
                 self._download()
                 return
             if self.path_name not in routes:
@@ -232,25 +223,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (DashboardError, ChatError) as error:
             if self.path_name.startswith("/chat/"):
                 self._json({"error": str(error)}, status=error.status)
-                return
-            self._send(self._page(str(error.status), _empty("Page unavailable", str(error))).encode("utf-8"),
-                       status=error.status)
+            else:
+                self._send(self._page(str(error.status), _empty("Page unavailable", str(error))).encode(), status=error.status)
         except ConnectionError as error:
             logging.getLogger(__name__).debug("Dashboard client disconnected: %s", error)
         except (OSError, sqlite3.Error, ValueError) as error:
             logging.getLogger(__name__).exception("Unable to read dashboard data")
-            content = _empty("Dashboard data unavailable", str(error))
-            content += '<p>Check the configuration and database. The dashboard has not changed campaign state.</p>'
-            self._send(self._page("Data unavailable", content).encode("utf-8"), status=503)
+            self._send(self._page("Data unavailable", _empty("Dashboard data unavailable", str(error))).encode(), status=503)
 
     def _chat_snapshot(self, conversation_id):
-        result = self.server.observer.snapshot(conversation_id)
-        for message in result["messages"]:
+        value = self.server.observer.snapshot(conversation_id)
+        for message in value["messages"]:
             message["html"] = _chat_markdown(message["answer"])
-        return result
+        return value
 
-    def _json(self, data: dict, *, status: int = 200):
-        self._send(json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status)
+    def _json(self, data, *, status=200):
+        self._send(json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8", status=status)
 
     def do_POST(self):
         try:
@@ -278,15 +266,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             allowed = {"conversation_id", "request_id", "message"} if path == "/chat/message" else {"conversation_id"}
             if set(data) - allowed or not isinstance(data.get("conversation_id", ""), str):
                 raise DashboardError(400, "Invalid chat request fields.")
-            conversation = data.get("conversation_id", "")
+            cid = data.get("conversation_id", "")
             if path == "/chat/message":
-                state = self.server.observer.send(conversation, data.get("request_id"), data.get("message"))
-                self._json(self._chat_snapshot(state["conversation_id"]), status=202)
+                result = self.server.observer.send(cid, data.get("request_id"), data.get("message"))
+                self._json(self._chat_snapshot(result["conversation_id"]), status=202)
             elif path == "/chat/cancel":
-                self.server.observer.cancel(conversation)
-                self._json(self._chat_snapshot(conversation))
+                self.server.observer.cancel(cid)
+                self._json(self._chat_snapshot(cid))
             else:
-                self.server.observer.clear(conversation)
+                self.server.observer.clear(cid)
                 self._json({"cleared": True})
         except (DashboardError, ChatError) as error:
             self._json({"error": str(error)}, status=error.status)
@@ -295,16 +283,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError, TimeoutError) as error:
             self._json({"error": f"Invalid chat request: {error}"}, status=400)
 
-    def _headers(self, status: int, mime: str, length: int):
+    def _headers(self, status, mime, length):
         self.send_response(status)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(length))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", CSP)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        for name, value in (("Content-Type", mime), ("Content-Length", str(length)), ("Cache-Control", "no-store"),
+                            ("Content-Security-Policy", CSP), ("X-Content-Type-Options", "nosniff"),
+                            ("Referrer-Policy", "no-referrer")):
+            self.send_header(name, value)
 
-    def _send(self, body: bytes, mime: str = "text/html; charset=utf-8", *, status: int = 200):
+    def _send(self, body, mime="text/html; charset=utf-8", *, status=200):
         self._headers(status, mime, len(body))
         self.end_headers()
         self.wfile.write(body)
@@ -312,21 +298,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def _rows(self, sql: str, params: tuple = ()) -> list[dict]:
+    def _rows(self, sql, params=()):
         return _query(self.db, sql, params)
 
-    def _page(self, title: str, content: str) -> str:
-        local = bool(self.config and self.config.local)
-        project = self.config.project.name if self.config else "Research dashboard"
-        active = {"/job": "/jobs", "/hypothesis": "/hypotheses", "/turn": "/activity"}.get(
-            self.path_name, self.path_name)
-        nav = "".join(
-            f'<a href="{path}"' + (' aria-current="page"' if active == path else "")
-            + f">{label}</a>" for path, label in NAV
-            if local or path not in ("/activity", "/artifacts", "/resources"))
-        live = self.path_name in ("/", "/jobs", "/activity", "/artifacts", "/resources")
-        refresh = ('<label class="live-toggle"><input id="live-refresh" type="checkbox"> '
-                   'Auto-refresh (15s)</label>') if live else ""
+    def _page(self, title, content):
+        project = self.settings.get("project", {}).get("name", "Research dashboard")
+        active = {"/job": "/jobs", "/hypothesis": "/hypotheses", "/turn": "/activity",
+                  "/observation": "/artifacts", "/view": "/reports"}.get(self.path_name, self.path_name)
+        nav = "".join(f'<a href="{path}"' + (' aria-current="page"' if active == path else "")
+                      + f">{label}</a>" for path, label in NAV)
+        refresh = ('<label class="live-toggle"><input id="live-refresh" type="checkbox"> Auto-refresh (15s)</label>'
+                   if self.path_name in ("/", "/jobs", "/activity", "/artifacts", "/resources") else "")
+        if self.server.configuration_error:
+            content = ('<div class="notice danger">Current configuration unavailable; showing retained records. '
+                       + _escape(self.server.configuration_error) + "</div>" + content)
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -337,8 +322,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 <body><a class="skip-link" href="#main">Skip to content</a>
 <aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">x</span>xgenius</a>
 <div class="project-label">RESEARCH WORKSPACE</div><div class="project-name">{_escape(project)}</div>
-<span class="mode">{'Local campaign' if local else 'SLURM research'}</span>
-<nav aria-label="Main navigation">{nav}</nav>
+<span class="mode">Local campaign</span><nav aria-label="Main navigation">{nav}</nav>
 <div class="sidebar-note"><span class="status-dot"></span> Read-only dashboard<br>
 <span>Local evidence. No remote assets.</span></div></aside>
 <div class="workspace"><header class="topbar"><div><span class="eyebrow">RESEARCH OBSERVATORY</span>
@@ -346,8 +330,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 <button id="chat-open" type="button" aria-controls="chat-panel" aria-expanded="false">Ask Copilot</button>
 <button id="refresh" type="button">Refresh</button></div></header>
 <div class="refresh-status" id="refresh-status" role="status" aria-live="polite">Updated
-{datetime.now(timezone.utc):%H:%M:%S} UTC</div>
-<main id="main" tabindex="-1">{content}</main>
+{datetime.now(timezone.utc):%H:%M:%S} UTC</div><main id="main" tabindex="-1">{content}</main>
 <footer>Times in UTC &middot; Recorded state, not a live process probe &middot;
 Manage campaigns through the CLI</footer></div>
 <aside id="chat-panel" class="chat-panel" role="dialog" aria-modal="false" aria-labelledby="chat-title" hidden>
@@ -366,551 +349,377 @@ Which conclusions have experimental support?</p></div></div>
 <button type="button" id="chat-clear">New chat</button></div></form></aside>
 <script src="/static/dashboard-chat.js" defer></script></body></html>"""
 
-    def _local_only(self):
-        if not self.config.local:
-            raise DashboardError(404, "This view is available for local campaigns.")
-
-    def _pagination(self, count: int, *, page_size: int = PAGE_SIZE) -> tuple[int, str]:
+    def _int(self, name, default=0):
         try:
-            page = int(self.params.get("page", "1"))
+            value = int(self.params.get(name, default))
         except ValueError:
-            raise DashboardError(400, "Page must be a positive integer.") from None
-        if page < 1 or page > 1_000_000:
-            raise DashboardError(400, "Page must be between 1 and 1000000.")
+            raise DashboardError(400, f"{name} must be an integer") from None
+        if not 0 <= value <= 1_000_000_000:
+            raise DashboardError(400, f"{name} is outside its supported range")
+        return value
+
+    def _pagination(self, count, *, page_size=PAGE_SIZE):
+        page = self._int("page", 1)
+        if page < 1:
+            raise DashboardError(400, "Page must be positive")
         pages = max(1, (count + page_size - 1) // page_size)
         if page > pages:
             raise DashboardError(404, "This results page does not exist.")
-        journal = self.path_name == "/journal"
-        unit = ("entry" if count == 1 else "entries") if journal else "records"
-        controls = f'<span>{count:,} {unit} &middot; Page {page} of {pages}</span>'
+        unit = "entries" if self.path_name == "/journal" else "records"
+        controls = f"<span>{count:,} {unit} &middot; Page {page} of {pages}</span>"
         params = {k: v for k, v in self.params.items() if k not in ("page", "entry")}
-        if page > 1:
-            controls += _link(self.path_name, "Newer entries" if journal else "Previous", **params, page=page - 1)
-        if page < pages:
-            controls += _link(self.path_name, "Older entries" if journal else "Next", **params, page=page + 1)
+        for other, label in ((page - 1, "Previous"), (page + 1, "Next")):
+            if 1 <= other <= pages:
+                controls += _link(self.path_name, label, **params, page=other)
         return (page - 1) * page_size, f'<nav class="pagination" aria-label="Results pages">{controls}</nav>'
 
-    def _campaign(self) -> dict:
-        rows = self._rows("SELECT * FROM campaign")
-        if not rows:
-            raise DashboardError(503, "No local campaign record is available.")
-        return rows[0]
-
-    def _overview(self) -> str:
-        counts = {row["status"]: row["n"] for row in self._rows(
-            "SELECT status,COUNT(*) AS n FROM jobs GROUP BY status")}
-        total = sum(counts.values())
-        active = sum(counts.get(s, 0) for s in ACTIVE_STATUSES)
-        attention = self._rows(
-            "SELECT COUNT(*) AS n FROM jobs WHERE status IN (?,?,?,?,?,?,?) OR error_message!=''",
-            (*FAILED, "recovery_required"))[0]["n"]
-        hypotheses = self._rows("SELECT COUNT(*) AS n FROM hypotheses")[0]["n"]
-        content = ""
-        if self.config.local:
-            campaign = self._campaign()
-            pending = self._rows("SELECT COUNT(*) AS n FROM events WHERE acknowledged_by IS NULL")[0]["n"]
-            explanations = {
-                "ready": "Ready for its first research turn.",
-                "running": "The campaign is scheduled to make progress.",
-                "waiting": "Waiting for experiment results or new events.",
-                "paused": "New dispatch and agent turns are paused.",
-                "blocked": "An external constraint or recovery issue needs attention.",
-                "completed": "The agent declared the research scope complete.",
-                "stopped": "The campaign has stopped; history is preserved.",
-                "stopping": "Draining admitted work before stopping.",
-                "finishing": "Draining admitted work before completion.",
-            }
-            content += (f'<section class="campaign-banner"><div><span class="eyebrow">CAMPAIGN</span>'
-                        f'<h2>{_badge(campaign["state"])}</h2><p>'
-                        f'{_escape(campaign["reason"] or explanations.get(campaign["state"], ""))}</p>'
-                        f'<code class="identifier">{_escape(campaign["id"])}</code></div>'
-                        '<div class="campaign-signals">'
-                        f'<span>{pending} unacknowledged events</span>'
-                        f'<span>Controller {"registered" if campaign["controller"] else "not registered"}</span>'
-                        f'{_link("/activity", "Inspect agent activity")}</div></section>')
-        else:
-            content += '<p class="intro">Cluster experiments and research evidence in one place.</p>'
+    def _overview(self):
+        current, budget = self.state.campaign(), self.state.budget()
+        counts = {r["status"]: r["n"] for r in self._rows("SELECT status,COUNT(*) n FROM attempts GROUP BY status")}
+        pending = self._rows("SELECT COUNT(*) n FROM events WHERE acknowledged_by IS NULL")[0]["n"]
+        content = (f'<section class="campaign-banner"><div><span class="eyebrow">GENERATION {current["generation"]}</span>'
+                   f'<h2>{_badge(current["state"])}</h2><p>{_escape(current["reason"])}</p>'
+                   f'<code class="identifier">{current["id"]}</code></div><div class="campaign-signals">'
+                   f'<span>{pending} unacknowledged events</span>'
+                   f'<span>Controller {"registered" if current["controller"] else "not registered"}</span></div></section>')
+        content += _panel("Independent lifecycle facts", _facts([
+            ("Operator intent", _badge(current["operator_mode"])), ("Research progression", _badge(current["progress"])),
+            ("Research outcome", _badge(current["research_outcome"])), ("Recovery blockers", str(len(current["blockers"]))),
+            ("Assessment scope", "Later authority changed; historical assessment is stale" if current["assessment_scope_stale"] else "No later authority change recorded"),
+        ]) + '<p class="muted">Only an owned assessed closure plus operational quiescence is completed research.</p>')
         content += '<div class="stat-grid">' + "".join(
-            f'<a class="stat-card" href="{url}"><span>{label}</span><strong>{value:,}</strong>'
-            f'<small>{hint}</small></a>' for label, value, hint, url in [
-                ("Experiments", total, "All recorded attempts", "/jobs"),
-                ("In flight", active, "Queued, active or recovery required", "/jobs?status=active"),
-                ("Needs attention", attention, "Failures or validation/recovery errors", "/jobs?status=attention"),
-                ("Hypotheses", hypotheses, "Tracked research questions", "/hypotheses")]) + "</div>"
-        if self.config.local:
-            local = self.config.local
-            used_turns = self._rows("SELECT COUNT(*) AS n FROM turns")[0]["n"]
-            elapsed = max(0, time.time() - campaign["started"]) if campaign["started"] else 0
-            budgets = _meter("Campaign elapsed", elapsed, local.max_seconds,
-                             f"{_duration(elapsed)} / {_duration(local.max_seconds)}")
-            budgets += _meter("Agent turns", used_turns, local.max_turns,
-                              f"{used_turns:,} / {local.max_turns:,}")
-            budgets += (f'<p class="muted">Elapsed time includes pauses and completed intervals. '
-                        f'Research, report and compact sessions share the turn budget. '
-                        f'Per-turn deadline: {_duration(local.turn_timeout)}. Limits reflect the file; '
-                        'a running controller may have loaded earlier values.</p>')
-            turns = self._rows("SELECT * FROM turns ORDER BY started DESC LIMIT 1")
-            latest = self._turn_summary(turns[0]) if turns else _empty(
-                "No agent turns yet", "The first turn starts when you run the campaign.")
-            content += '<div class="two-column">' + _panel("Campaign limits", budgets, _link(
-                "/resources", "Resources")) + _panel("Latest agent turn", latest, _link(
-                    "/activity", "All activity")) + "</div>"
-        distribution = "".join(
-            f'<div class="distribution-row">{_badge(status)}<meter min="0" max="{max(total, 1)}" '
-            f'value="{n}" aria-label="{_escape(status)} jobs"></meter><strong>{n:,}</strong></div>'
-            for status, n in sorted(counts.items(), key=lambda item: (-item[1], item[0])))
-        recent = self._rows("""SELECT job_id,experiment_id,cluster,status,walltime_seconds,
-            submitted_at,error_message FROM jobs ORDER BY submitted_at DESC,job_id DESC LIMIT 8""")
-        content += _panel("Experiment outcomes", distribution or _empty(
-            "No experiments yet", "Submit an experiment through xgenius to start collecting evidence."))
-        content += _panel("Recent experiments", self._job_table(recent), _link("/jobs", "All experiments"))
-        return content
+            f'<a class="stat-card" href="{url}"><span>{label}</span><strong>{n}</strong><small>{hint}</small></a>'
+            for label, n, hint, url in [
+                ("Experiments", sum(counts.values()), "All recorded attempts", "/jobs"),
+                ("In flight", sum(counts.get(s, 0) for s in ACTIVE), "Includes unknown ownership", "/jobs?status=active"),
+                ("Needs attention", sum(counts.get(s, 0) for s in (*FAILED, "recovery_required")), "Execution, not scientific acceptance", "/jobs?status=attention"),
+                ("Hypotheses", self._rows("SELECT COUNT(*) n FROM hypotheses")[0]["n"], "Immutable evaluated claims", "/hypotheses"),
+            ]) + "</div>"
+        meters = ""
+        for name, label in (("elapsed_admission_seconds", "Elapsed admission horizon"), ("managed_invocations", "Provider invocations")):
+            item = budget[name]
+            limit = item["configured"]
+            meters += _meter(label, item["used"], limit, f'{item["used"]:,.1f} / {"Unlimited" if item["unlimited"] else limit}')
+        meters += '<p class="muted">Last admitted limits; pauses/restarts count. Armed uncertainty remains charged. Observer usage is separate.</p>'
+        turns = self._rows("SELECT * FROM turns ORDER BY created DESC LIMIT 1")
+        latest = self._turn_summary(turns[0]) if turns else _empty("No agent turns yet", "Run starts eligible research.")
+        content += '<div class="two-column">' + _panel("Campaign limits", meters) + _panel("Latest agent turn", latest) + "</div>"
+        if current["closure"]:
+            content += _panel("Closure coverage", f'<pre>{_escape(json.dumps(current["closure"], indent=2))}</pre>')
+        return content + _panel("Recent experiments", self._job_table(
+            self._rows("SELECT * FROM attempts ORDER BY created DESC,id DESC LIMIT 8")))
 
-    def _job_table(self, jobs: list[dict]) -> str:
-        return _table(["Experiment", "Runner / cluster", "Status", "Recorded runtime", "Submitted"], [
-            [_link("/job", job["experiment_id"], id=job["job_id"])
-             + f'<code class="identifier">{_escape(job["job_id"])}</code>',
-             _escape(job["cluster"]),
-             _badge(job["status"]) + ('<span class="validation-warning">Review recorded error</span>'
-                                      if job["error_message"] else ""),
-             ("Pending completion" if job["status"] in ACTIVE_STATUSES and not job["walltime_seconds"]
-              else _duration(job["walltime_seconds"])),
-             _timestamp(job["submitted_at"])] for job in jobs])
+    def _job_table(self, rows):
+        return _table(["Experiment", "Execution", "Collection / validation", "Runtime", "Submitted"], [
+            [_link("/job", r["experiment_id"], id=r["id"]) + f'<code class="identifier">{_escape(r["id"])}</code>',
+             _badge(r["status"]), _badge(r["collection"]) + " " + _badge(r["validation"]),
+             _duration(r["elapsed"]), _timestamp(r["created"])] for r in rows])
 
-    def _jobs(self) -> str:
+    def _jobs(self):
         where, args = ["1=1"], []
-        status = self.params.get("status", "")
+        status, query = self.params.get("status", ""), self.params.get("q", "")
         if status in ("active", "attention"):
-            states = ACTIVE_STATUSES if status == "active" else (*FAILED, "recovery_required")
-            clause = "status IN (" + ",".join("?" for _ in states) + ")"
-            where.append("(" + clause + (" OR error_message!='')" if status == "attention" else ")"))
-            args.extend(states)
+            choices = ACTIVE if status == "active" else (*FAILED, "recovery_required")
+            where.append("(status IN (" + ",".join("?" for _ in choices) + ")"
+                         + (" OR validation='invalid' OR collection='failed')" if status == "attention" else ")"))
+            args.extend(choices)
         elif status:
             where.append("status=?")
             args.append(status)
         if self.params.get("hypothesis_id"):
             where.append("hypothesis_id=?")
             args.append(self.params["hypothesis_id"])
-        query = self.params.get("q", "")
         if query:
-            where.append("(instr(lower(experiment_id),lower(?))>0 OR instr(lower(job_id),lower(?))>0)")
-            args.extend([query, query])
+            where.append("(instr(lower(experiment_id),lower(?))>0 OR instr(lower(id),lower(?))>0)")
+            args.extend((query, query))
         condition = " AND ".join(where)
-        count = self._rows(f"SELECT COUNT(*) AS n FROM jobs WHERE {condition}", tuple(args))[0]["n"]
+        count = self._rows(f"SELECT COUNT(*) n FROM attempts WHERE {condition}", tuple(args))[0]["n"]
         offset, paging = self._pagination(count)
-        jobs = self._rows(f"""SELECT job_id,experiment_id,cluster,status,walltime_seconds,
-            submitted_at,error_message FROM jobs WHERE {condition}
-            ORDER BY submitted_at DESC,job_id DESC LIMIT ? OFFSET ?""", (*args, PAGE_SIZE, offset))
-        statuses = ["", "active", "attention"] + [r["status"] for r in self._rows(
-            "SELECT DISTINCT status FROM jobs ORDER BY status")]
-        if status not in statuses:
-            statuses.append(status)
-        options = "".join(f'<option value="{_escape(s)}"'
-                          + (' selected' if status == s else "")
-                          + f'>{_escape(s.replace("_", " ") if s else "All statuses")}</option>'
-                          for s in statuses)
-        filters = (f'<form class="filters" action="/jobs" method="get">'
-                   f'<label>Search experiments<input type="search" name="q" value="{_escape(query)}" '
-                   'placeholder="Name or attempt ID"></label>'
-                   f'<label>Status<select name="status">{options}</select></label>'
-                   f'<label>Hypothesis<input name="hypothesis_id" '
-                   f'value="{_escape(self.params.get("hypothesis_id", ""))}" placeholder="Any hypothesis"></label>'
-                   '<button type="submit" class="primary">Filter</button>'
-                   '<a href="/jobs">Clear</a></form>')
-        return filters + _panel("Experiment history", self._job_table(jobs)) + paging
+        rows = self._rows(f"SELECT * FROM attempts WHERE {condition} ORDER BY created DESC,id DESC LIMIT ? OFFSET ?",
+                          (*args, PAGE_SIZE, offset))
+        statuses = ["", "active", "attention"] + [r["status"] for r in self._rows("SELECT DISTINCT status FROM attempts ORDER BY status")]
+        options = "".join(f'<option value="{_escape(s)}"' + (" selected" if s == status else "")
+                          + f'>{_escape(s or "All statuses")}</option>' for s in statuses)
+        filters = (f'<form class="filters" action="/jobs"><label>Search experiments<input type="search" name="q" value="{_escape(query)}"></label>'
+                   f'<label>Status<select name="status">{options}</select></label><label>Hypothesis<input name="hypothesis_id" '
+                   f'value="{_escape(self.params.get("hypothesis_id", ""))}"></label><button type="submit">Filter</button></form>')
+        return filters + _panel("Experiment history", self._job_table(rows)) + paging
 
-    def _job(self) -> str:
-        rows = self._rows("SELECT * FROM jobs WHERE job_id=?", (self.params.get("id", ""),))
+    def _job(self):
+        rows = self._rows("SELECT * FROM attempts WHERE id=?", (self.params.get("id", ""),))
         if not rows:
             raise DashboardError(404, "Unknown experiment.")
-        job = rows[0]
-        content = '<div class="detail-heading"><h2>' + _escape(job["experiment_id"]) + "</h2>" + _badge(
-            job["status"]) + "</div>"
-        if job["error_message"]:
-            content += f'<div class="notice danger"><strong>Recorded error</strong><p>{_escape(job["error_message"])}</p></div>'
-        content += _panel("Execution", _facts([
-            ("Attempt ID", f'<code>{_escape(job["job_id"])}</code>'),
-            ("Runner / cluster", _escape(job["cluster"])),
-            ("Hypothesis", _link("/hypothesis", job["hypothesis_id"], id=job["hypothesis_id"])
-             if job["hypothesis_id"] else "Unassigned"),
-            ("Submitted", _timestamp(job["submitted_at"])),
-            ("Completed", _timestamp(job["completed_at"])),
-            ("Recorded runtime", _duration(job["walltime_seconds"])),
-            ("Recorded GPU-hours", _escape(job["gpu_hours"])),
-            ("Exit code", _escape(job["exit_code"]) if job["exit_code"] is not None else "Not recorded"),
-            ("Resources", f'{job["cpus"]} CPUs / {_escape(job["memory"])} / {job["gpus"]} GPUs'),
-        ]) + f'<h3>Command</h3><pre>{_escape(job["command"])}</pre>'
-            f'<details><summary>Full operational record</summary>'
-            f'<pre>{_escape(json.dumps(job, indent=2))}</pre></details>')
-        if self.config.local:
-            attempts = self._rows("SELECT spec,started,ended FROM attempts WHERE id=?", (job["job_id"],))
-            if attempts:
-                attempt = attempts[0]
-                spec = json.loads(attempt["spec"])
-                content += _panel("Reproducibility", _facts([
-                    ("Idempotency key", _escape(spec["key"])),
-                    ("Started", _timestamp(attempt["started"])),
-                    ("Deadline", _duration(spec["seconds"])),
-                    ("Output directory", f'<code>{_escape(spec["output"])}</code>'),
-                ]) + "<h3>Frozen source files</h3>" + _table(["File", "SHA-256"], [
-                    [_escape(name), f'<code>{_escape(digest)}</code>']
-                    for name, digest in spec["source_hashes"].items()]))
-                content += _panel("Registered evidence", self._artifact_table(self._rows(
-                    "SELECT a.*,j.experiment_id FROM artifacts a JOIN jobs j ON a.attempt_id=j.job_id "
-                    "WHERE a.attempt_id=? ORDER BY a.path", (job["job_id"],))))
-                content += self._logs(contained(self.root, f'attempts/{job["job_id"]}'),
-                                      ("stdout.log", "stderr.log", "backend.stderr.log"))
-        return content
+        row = rows[0]
+        spec = json.loads(row.pop("spec"))
+        content = _panel(row["experiment_id"], _facts([
+            ("Execution", _badge(row["status"])), ("Validation", _badge(row["validation"])),
+            ("Collection", _badge(row["collection"])), ("Runtime", _duration(row["elapsed"])),
+            ("Exit code", _escape(row["exit_code"])), ("Reason", _escape(row["reason"])),
+            ("Collection reason", _escape(row["collection_reason"])), ("Generation", str(row["generation"])),
+            ("Hypothesis", _link("/hypothesis", row["hypothesis_id"], id=row["hypothesis_id"]) if row["hypothesis_id"] else "Support work"),
+        ]))
+        content += _panel("Frozen provenance", f'<pre>{_escape(json.dumps({k: v for k, v in spec.items() if k not in ("environment", "inputs")}, indent=2))}</pre>')
+        content += _panel("Registered evidence", self._artifact_table(self._observations("WHERE o.attempt_id=?", (row["id"],))))
+        return content + self._work_logs(row["id"])
 
-    def _hypotheses(self) -> str:
-        count = self._rows("SELECT COUNT(*) AS n FROM hypotheses")[0]["n"]
+    def _hypotheses(self):
+        count = self._rows("SELECT COUNT(*) n FROM hypotheses")[0]["n"]
         offset, paging = self._pagination(count)
-        rows = self._rows("""SELECT h.*,COUNT(j.job_id) AS attempts,
-            SUM(CASE WHEN j.status='completed' THEN 1 ELSE 0 END) AS completed
-            FROM hypotheses h LEFT JOIN jobs j ON h.hypothesis_id=j.hypothesis_id
-            GROUP BY h.hypothesis_id ORDER BY h.created_at DESC,h.hypothesis_id LIMIT ? OFFSET ?""",
-                          (PAGE_SIZE, offset))
-        table_rows = []
-        for h in rows:
-            statement = hypothesis_statement(h)
-            label = statement[:240] + ("..." if len(statement) > 240 else "") if statement else h["hypothesis_id"]
-            title = _link("/hypothesis", label, id=h["hypothesis_id"])
-            if statement:
-                title += f'<code class="identifier">{_escape(h["hypothesis_id"])}</code>'
-            else:
-                title += '<span class="validation-warning">Hypothesis statement not recorded</span>'
-            table_rows.append([title, _badge(h["status"]), str(h["attempts"]), str(h["completed"]),
-                               _timestamp(h["updated_at"])])
-        intro = '<p class="intro">Statements describe what is being tested; IDs only identify it. '
-        intro += 'Open a hypothesis for its rationale, outcomes, and related journal context.</p>'
-        return intro + _panel("Research questions", _table(
-            ["Hypothesis statement", "Status", "Experiments", "Completed", "Updated"], table_rows)) + paging
+        rows = self._rows("""SELECT h.*,COUNT(a.id) attempts FROM hypotheses h LEFT JOIN attempts a ON a.hypothesis_id=h.id
+            GROUP BY h.id ORDER BY h.created DESC,h.id LIMIT ? OFFSET ?""", (PAGE_SIZE, offset))
+        return _panel("Research questions", _table(["Hypothesis statement", "Status", "Evaluated", "Experiments", "Updated"], [
+            [_link("/hypothesis", r["statement"][:240], id=r["id"]) + f'<code class="identifier">{_escape(r["id"])}</code>',
+             _badge(r["status"]), "Frozen" if r["frozen"] else "Not yet admitted", str(r["attempts"]), _timestamp(r["updated"])]
+            for r in rows])) + paging
 
-    def _hypothesis(self) -> str:
+    def _hypothesis(self):
         hid = self.params.get("id", "")
-        rows = self._rows("SELECT * FROM hypotheses WHERE hypothesis_id=?", (hid,))
+        rows = self._rows("SELECT * FROM hypotheses WHERE id=?", (hid,))
         if not rows:
             raise DashboardError(404, "Unknown hypothesis.")
-        h = rows[0]
-        content = f'<div class="detail-heading"><h2>Hypothesis</h2>{_badge(h["status"])}</div>'
-        content += _facts([("Hypothesis ID", f'<code>{_escape(hid)}</code>'),
-                           ("Created", _timestamp(h["created_at"])), ("Updated", _timestamp(h["updated_at"]))])
-        statement = hypothesis_statement(h)
-        if statement:
-            content += _panel("Hypothesis statement", '<div class="markdown">' + _markdown(statement) + "</div>")
-        else:
-            content += ('<div class="notice"><strong>Hypothesis statement not recorded</strong>'
-                        '<p>This record contains only an identifier or an automatic submission placeholder, '
-                        'not a description of the claim being tested. Related journal excerpts below provide '
-                        'recorded context, not an inferred definition.</p></div>')
-        for name in ("motivation", "expected_outcome", "conclusion", "comment"):
-            if h[name]:
-                content += _panel(name.replace("_", " ").capitalize(),
-                                  '<div class="markdown">' + _markdown(h[name]) + "</div>")
-        content += self._hypothesis_context(hid)
-        jobs = self._rows("SELECT * FROM jobs WHERE hypothesis_id=? ORDER BY submitted_at DESC LIMIT 10", (hid,))
-        return content + _panel("Recent experiments", self._job_table(jobs),
-                                _link("/jobs", "All experiments", hypothesis_id=hid))
+        row = rows[0]
+        content = _panel("Hypothesis statement", f'<div class="markdown">{_markdown(row["statement"])}</div>' + _facts([
+            ("Hypothesis ID", _escape(hid)), ("Status", _badge(row["status"])),
+            ("Evaluated claim", "Frozen; changed claims require a new ID" if row["frozen"] else "Not yet admitted"),
+            ("Supersedes", _link("/hypothesis", row["supersedes"], id=row["supersedes"]) if row["supersedes"] else "None"),
+        ]))
+        if row["conclusion"]:
+            content += _panel("Recorded conclusion", f'<div class="markdown">{_markdown(row["conclusion"])}</div>')
+        metadata = json.loads(row["metadata"])
+        if metadata:
+            content += _panel("Claim context", f'<pre>{_escape(json.dumps(metadata, indent=2))}</pre>')
+        matches = journal.search(self.state.db, hid, result_limit=6)
+        content += _panel("Related journal context", self._search_results(matches))
+        return content + _panel("Recent experiments", self._job_table(self._rows(
+            "SELECT * FROM attempts WHERE hypothesis_id=? ORDER BY created DESC LIMIT 10", (hid,))),
+            _link("/jobs", "All experiments", hypothesis_id=hid))
 
-    def _hypothesis_context(self, hid: str) -> str:
-        path = self.root / "journal.md"
-        matches = []
-        truncated = False
-        if path.is_file():
-            text, truncated = _read_text(path, DOCUMENT_LIMIT, tail=True)
-            jobs = self._rows("SELECT job_id,experiment_id FROM jobs WHERE hypothesis_id=? "
-                              "ORDER BY submitted_at DESC,job_id DESC LIMIT 200", (hid,))
-            references = {hid}
-            for job in jobs:
-                references.update((job["job_id"], job["experiment_id"], "completion-" + job["job_id"]))
-            pattern = re.compile(r"(?<![\w-])(?:" + "|".join(re.escape(ref) for ref in sorted(references) if ref)
-                                 + r")(?![\w-])")
-            heading = "Journal excerpt"
-            for paragraph in re.split(r"\r?\n\s*\r?\n", text):
-                paragraph = paragraph.strip()
-                if re.match(r"^#{1,6}\s", paragraph):
-                    heading = paragraph.splitlines()[0].lstrip("# ").strip()
-                if pattern.search(paragraph):
-                    matches.append((heading, paragraph))
-        body = ('<p class="muted">Exact journal excerpts mentioning this ID or one of its latest 200 experiments. '
-                'These are research notes, not a replacement for a recorded hypothesis statement.</p>')
-        if truncated:
-            body += '<p class="muted">Searched only the latest 128 KiB of the journal; older context may be omitted.</p>'
-        if matches:
-            selected = matches if len(matches) <= 6 else matches[:3] + matches[-3:]
-            if len(matches) > 6:
-                body += f'<p class="muted">Showing the first three and latest three of {len(matches)} matching excerpts.</p>'
-            for index, (heading, paragraph) in enumerate(selected):
-                excerpt = paragraph[:3000]
-                note = '<p class="muted">Excerpt truncated; read the journal for the full text.</p>' if len(paragraph) > 3000 else ""
-                body += (f'<details{" open" if index == 0 else ""}><summary>{_escape(heading)}</summary>'
-                         f'<div class="markdown">{_markdown(excerpt)}</div>{note}</details>')
-        else:
-            body += _empty("No matching journal context", "No exact reference was found in the searched journal portion.")
-        return _panel("Related journal context", body, _link("/journal", "Read journal"))
+    def _turn_summary(self, turn):
+        result = json.loads(turn["result"] or "{}")
+        return (_badge(turn["state"]) + f'<p>{_escape(result.get("reason") or turn["reason"] or "No decision recorded yet.")}</p>'
+                + _facts([("Prepared", _timestamp(turn["created"])), ("Ended", _timestamp(turn["ended"])),
+                          ("Disposition", _escape(result.get("disposition", "Not recorded")))])
+                + _link("/turn", "Inspect turn and logs", id=turn["id"]))
 
-    def _turn_summary(self, turn: dict) -> str:
-        result = json.loads(turn["result"]) if turn["result"] else {}
-        summary = '<div class="detail-heading">' + _badge(turn["state"]) + f'<strong>{_escape(turn["kind"])}</strong></div>'
-        summary += f'<p>{_escape(result.get("reason", "No decision recorded yet."))}</p>'
-        summary += _facts([
-            ("Started", _timestamp(turn["started"])),
-            ("Duration", _duration((turn["ended"] or time.time()) - turn["started"])),
-            ("Disposition", _escape(result.get("disposition", "Not recorded"))),
-        ])
-        return summary + _link("/turn", "Inspect turn and logs", id=turn["id"])
-
-    def _activity(self) -> str:
-        self._local_only()
-        count = self._rows("SELECT COUNT(*) AS n FROM turns")[0]["n"]
+    def _activity(self):
+        count = self._rows("SELECT COUNT(*) n FROM turns")[0]["n"]
         offset, paging = self._pagination(count)
-        turns = self._rows("SELECT * FROM turns ORDER BY started DESC,id DESC LIMIT ? OFFSET ?", (PAGE_SIZE, offset))
-        table = _table(["Turn", "State", "Decision", "Started", "Duration"], [
-            [_link("/turn", turn["kind"], id=turn["id"])
-             + f'<code class="identifier">{_escape(turn["id"])}</code>',
-             _badge(turn["state"]),
-             _escape(json.loads(turn["result"]).get("disposition", "")) if turn["result"] else "Pending",
-             _timestamp(turn["started"]),
-             _duration((turn["ended"] or time.time()) - turn["started"])] for turn in turns])
-        events = self._rows("SELECT * FROM events ORDER BY created DESC,id DESC LIMIT 30")
-        timeline = '<ol class="timeline">' + "".join(
-            f'<li><div class="timeline-heading"><strong>{_escape(event["kind"].replace("_", " "))}</strong>'
-            + (_badge("accepted") if event["acknowledged_by"] else _badge("pending"))
-            + f'</div>{_timestamp(event["created"])}'
-            + (f'<p>Handled by {_link("/turn", event["acknowledged_by"], id=event["acknowledged_by"])}</p>'
-               if event["acknowledged_by"] else "<p>Awaiting acknowledgement by an agent turn.</p>")
-            + f'<details><summary>Event payload</summary><pre>{_escape(json.dumps(json.loads(event["payload"]), indent=2))}</pre></details></li>'
-            for event in events) + "</ol>"
-        return _panel("Agent turns", table) + paging + _panel("Latest 30 events", timeline)
+        rows = self._rows("SELECT * FROM turns ORDER BY created DESC LIMIT ? OFFSET ?", (PAGE_SIZE, offset))
+        content = _panel("Agent turns", _table(["Turn", "State", "Prepared", "Ended"], [
+            [_link("/turn", r["kind"], id=r["id"]), _badge(r["state"]), _timestamp(r["created"]), _timestamp(r["ended"])] for r in rows]))
+        events = self._rows("SELECT id,seq,kind,created,acknowledged_by FROM events ORDER BY seq DESC LIMIT 30")
+        return content + paging + _panel("Latest 30 event headers", _table(["Sequence", "Kind", "Recorded", "Acknowledged"], [
+            [str(r["seq"]), _escape(r["kind"]), _timestamp(r["created"]),
+             _link("/turn", r["acknowledged_by"], id=r["acknowledged_by"]) if r["acknowledged_by"] else "Awaiting acknowledgement"] for r in events]))
 
-    def _turn(self) -> str:
-        self._local_only()
+    def _turn(self):
         rows = self._rows("SELECT * FROM turns WHERE id=?", (self.params.get("id", ""),))
         if not rows:
             raise DashboardError(404, "Unknown agent turn.")
         turn = rows[0]
+        invocations = self._rows("SELECT * FROM invocations WHERE turn_id=? ORDER BY bundle_position", (turn["id"],))
         content = _panel("Turn decision", self._turn_summary(turn))
-        content += _panel("Turn record", _facts([
-            ("Turn ID", f'<code>{_escape(turn["id"])}</code>'),
-            ("Assigned events", str(len(json.loads(turn["events"])))),
-            ("Provider usage", _escape(turn["usage"]) if turn["usage"] else "Not reported (not zero)"),
-        ]))
-        return content + self._logs(contained(self.root, f'turns/{turn["id"]}'), ("stdout.log", "stderr.log"))
+        content += _panel("Invocation accounting", _table(["Kind", "State", "Usage", "Reason"], [
+            [_escape(r["kind"]), _badge(r["state"]), _escape(r["usage"] or "Not reported (not zero)"), _escape(r["reason"])]
+            for r in invocations]))
+        handoffs = self._rows("SELECT source_id FROM handoffs WHERE turn_id=?", (turn["id"],))
+        if handoffs:
+            content += self._source_article(handoffs[0]["source_id"], focused=True)
+        for row in invocations:
+            content += self._work_logs(row["id"])
+        return content
 
-    def _logs(self, directory: Path, names: tuple[str, ...]) -> str:
+    def _work_logs(self, work_id):
+        from xgenius.protocol import LaunchEnvelope
+        launches = self._rows("SELECT envelope FROM launches WHERE work_id=? ORDER BY created DESC LIMIT 1", (work_id,))
+        if not launches:
+            return ""
+        envelope = LaunchEnvelope.parse(json.loads(launches[0]["envelope"]))
+        directory = launch_directory(envelope)
         content = ""
-        for name in names:
-            path = contained(directory, name)
-            if not path.is_file():
-                content += f'<p class="muted">{_escape(name)}: not present.</p>'
-                continue
-            text, truncated = _read_text(path, LOG_LIMIT, tail=True)
-            note = '<p class="muted">Showing the last 64 KiB; earlier output is omitted.</p>' if truncated else ""
-            content += (f'<details data-key="{_escape(name)}"><summary>{_escape(name)}'
-                        f' ({_size(path.stat().st_size)})</summary>{note}<pre>{_escape(text) if text else "(empty)"}</pre></details>')
-        return _panel("Captured logs", content)
+        for name in ("stdout", "stderr"):
+            path = directory / "main" / f"{name}.log"
+            if path.exists():
+                value = tail(path, limit=LOG_LIMIT)
+                content += f'<details><summary>{name}</summary><p class="muted">Bounded retained tail; earlier output may be omitted.</p><pre>{_escape(value["text"])}</pre></details>'
+        return _panel("Captured logs", content or '<p class="muted">No retained main streams yet.</p>')
 
-    def _artifact_table(self, artifacts: list[dict]) -> str:
-        rows = []
-        for artifact in artifacts:
-            metadata = json.loads(artifact["metadata"])
-            metrics = metadata.get("metrics", {})
-            evidence = '<dl class="metrics">' + "".join(
-                f'<div><dt>{_escape(name)}</dt><dd>{_escape(value)}</dd></div>'
-                for name, value in metrics.items()) + "</dl>" if metrics else '<span class="muted">No numeric metrics</span>'
-            rows.append([
-                _link("/artifact", artifact["path"], id=artifact["id"])
-                + f'<details><summary>SHA-256</summary><code>{_escape(metadata.get("sha256", "Not recorded"))}</code></details>',
-                _link("/job", artifact["experiment_id"], id=artifact["attempt_id"]),
-                _size(metadata.get("bytes")), evidence,
-            ])
-        return _table(["Artifact / download", "Experiment", "Size", "Recorded metrics"], rows)
+    def _observations(self, where="", params=(), limit=PAGE_SIZE, offset=0):
+        return self._rows(f"""SELECT o.id,o.attempt_id,o.path,o.kind,o.size,o.digest,o.assurance,o.created,
+            o.assurance='captured' AS captured,a.experiment_id FROM observations o JOIN attempts a ON a.id=o.attempt_id
+            {where} ORDER BY o.created DESC,o.id DESC LIMIT ? OFFSET ?""", (*params, limit, offset))
 
-    def _artifacts(self) -> str:
-        self._local_only()
-        query = self.params.get("q", "")
-        condition = "(instr(lower(a.path),lower(?))>0 OR instr(lower(j.experiment_id),lower(?))>0)"
-        count = self._rows("SELECT COUNT(*) AS n FROM artifacts a JOIN jobs j ON a.attempt_id=j.job_id "
-                           f"WHERE {condition}", (query, query))[0]["n"]
+    def _artifact_table(self, rows):
+        return _table(["Evidence revision", "Experiment", "Size", "Assurance", "Exact bytes"], [
+            [_link("/observation", r["path"], id=r["id"]) + f'<code class="identifier">{r["id"]}</code>',
+             _link("/job", r["experiment_id"], id=r["attempt_id"]), _size(r["size"]), _escape(r["assurance"]),
+             _link("/artifact", "Captured download", id=r["id"]) if r["captured"] else "Mutable external artifact; not served as exact"]
+            for r in rows])
+
+    def _artifacts(self):
+        needle = self.params.get("q", "")
+        condition = "WHERE instr(lower(o.path),lower(?))>0 OR instr(lower(a.experiment_id),lower(?))>0"
+        params = (needle, needle)
+        count = self._rows(f"SELECT COUNT(*) n FROM observations o JOIN attempts a ON a.id=o.attempt_id {condition}", params)[0]["n"]
         offset, paging = self._pagination(count)
-        rows = self._rows(
-            "SELECT a.*,j.experiment_id FROM artifacts a JOIN jobs j ON a.attempt_id=j.job_id "
-            f"WHERE {condition} ORDER BY a.rowid DESC LIMIT ? OFFSET ?", (query, query, PAGE_SIZE, offset))
-        filters = (f'<form class="filters" action="/artifacts"><label>Find evidence'
-                   f'<input type="search" name="q" value="{_escape(query)}" placeholder="Path or experiment"></label>'
-                   '<button class="primary" type="submit">Search</button><a href="/artifacts">Clear</a></form>')
-        return ('<p class="intro">Registered outputs and measurements. Successful execution and registered '
-                'artifacts do not establish scientific validity. Files download rather than execute in this dashboard.</p>'
-                + filters + _panel("Evidence bank", self._artifact_table(rows)) + paging)
+        filters = f'<form class="filters"><label>Find evidence<input name="q" value="{_escape(needle)}"></label><button>Search</button></form>'
+        return filters + _panel("Evidence bank", self._artifact_table(self._observations(condition, params, offset=offset))) + paging
 
-    def _resources(self) -> str:
-        self._local_only()
-        local = self.config.local
-        content = _panel("Campaign envelope", _facts([
-            ("Experiment CPUs", str(local.cpus)), ("Experiment memory", f"{local.memory_mb:,} MiB"),
-            ("Concurrent jobs", str(local.max_jobs)), ("Assigned GPUs", _escape(", ".join(local.gpus) or "None (CPU only)")),
-            ("GPU-hour limit", str(local.max_gpu_hours)), ("Agent-turn limit", str(local.max_turns)),
-            ("Campaign elapsed limit", _duration(local.max_seconds)), ("Agent turn deadline", _duration(local.turn_timeout)),
-        ]) + '<p class="muted">Values reflect the current configuration file. An already-running controller '
-             'may have loaded earlier limits. Reservations are not measured desktop utilization.</p>')
-        path = ledger_path()
-        if not path.is_file():
-            return content + _panel("Shared machine capacity", _empty(
-                "Not configured", "Use xgenius machine configure before running experiments."))
-        capacities = _query(path, "SELECT * FROM capacity WHERE id=1")
-        reservations = _query(path, "SELECT * FROM reservations WHERE state!='released' ORDER BY created,id")
-        if capacities:
-            capacity = capacities[0]
-            specs = [json.loads(r["spec"]) for r in reservations if r["state"] in ("reserved", "running")]
-            body = _meter("Reserved CPUs", sum(s["cpus"] for s in specs), capacity["cpus"],
-                          f'{sum(s["cpus"] for s in specs)} / {capacity["cpus"]}')
-            body += _meter("Reserved memory (MiB)", sum(s["memory_mb"] for s in specs), capacity["memory_mb"],
-                           f'{sum(s["memory_mb"] for s in specs):,} / {capacity["memory_mb"]:,}')
-            body += _facts([
-                ("Host RAM headroom", f'{capacity["headroom_mb"]:,} MiB'),
-                ("Configured GPUs", _escape(", ".join(json.loads(capacity["gpus"])) or "None")),
-            ])
-            body += '<p class="muted">Shared across this Windows/OS user\'s campaigns. External applications are not included.</p>'
-        else:
-            body = _empty("Not configured", "Use xgenius machine configure before running experiments.")
-        content += _panel("Shared machine capacity", body)
-        own = self._campaign()["id"]
-        rows = []
-        for reservation in reservations:
-            spec = json.loads(reservation["spec"])
-            rows.append([
-                _link("/job", reservation["id"], id=reservation["id"]) if reservation["campaign"] == own else _escape(reservation["id"]),
-                "This campaign" if reservation["campaign"] == own else _escape(reservation["campaign"]),
-                _badge(reservation["state"]), f'{spec["cpus"]} / {spec["memory_mb"]:,} MiB / {len(spec["gpus"])}',
-                _timestamp(reservation["created"]),
-                _escape(reservation["reason"]) or "No queue reason recorded",
-            ])
-        return content + _panel("Unreleased reservations", _table(
-            ["Attempt", "Campaign", "State", "CPUs / RAM / GPUs", "Requested", "Queue / recovery reason"], rows))
-
-    def _document(self, path: Path, empty: str, *, tail: bool = False) -> str:
-        if not path.is_file():
-            return _empty(empty, "This document has not been written yet.")
-        text, truncated = _read_text(path, DOCUMENT_LIMIT, tail=tail)
-        if not text.strip() and not truncated:
-            return _empty(empty, "This document has not been written yet.")
-        note = ('<div class="notice">This document is larger than 128 KiB. Showing '
-                + ("the latest portion" if tail else "the beginning") + "; the full file remains on disk.</div>") if truncated else ""
-        return (f'<div class="document-meta"><span>{_size(path.stat().st_size)}</span>'
-                f'<span>Updated {_timestamp(path.stat().st_mtime)}</span></div>{note}'
-                f'<article class="panel markdown">{_markdown(text)}</article>'
-                f'<details class="raw-source"><summary>View Markdown source</summary><pre>{_escape(text)}</pre></details>')
-
-    def _journal(self) -> str:
-        path = self.root / "journal.md"
-        if not path.is_file():
-            return _empty("The research journal is empty", "New research entries will appear here.")
-        query = self.params.get("q", "").strip()
-        if len(query) > 200:
-            raise DashboardError(400, "Journal search must be at most 200 characters.")
-        index = index_journal(path, query)
-        entries = [entry for entry in reversed(index.entries) if entry.matches]
-        focused = self.params.get("entry", "")
-        if focused:
-            position = next((i for i, entry in enumerate(entries) if entry.key == focused), None)
-            if position is None:
-                raise DashboardError(404, "Journal entry not found in this search. It may have been compacted or replaced.")
-            self.params["page"] = str(position // JOURNAL_PAGE_SIZE + 1)
-        offset, paging = self._pagination(len(entries), page_size=JOURNAL_PAGE_SIZE)
-        content = (f'<div class="document-meta"><span>{len(index.entries):,} recorded '
-                   f'{"entry" if len(index.entries) == 1 else "entries"}</span>'
-                   f'<span>{_size(index.size)}</span><span>Updated {_timestamp(index.modified)}</span></div>'
-                   '<p class="intro">Newest entries first. Open a headline to read it; search the whole journal '
-                   'or browse older entries. Nothing refreshes automatically while you read.</p>')
-        content += (f'<section class="journal-toolbar" aria-label="Journal controls">'
-                    f'<form class="filters" action="/journal" method="get"><label for="journal-search">Search journal'
-                    f'<input id="journal-search" name="q" value="{_escape(query)}" maxlength="200" '
-                    'type="search" placeholder="Find a decision, experiment, or phrase"></label>'
-                    '<button type="submit">Search</button></form><div class="journal-controls">'
-                    + _link("/journal", "Jump to latest")
-                    + '<div class="journal-fold-controls" hidden><button type="button" data-journal-action="expand">'
-                    'Expand page</button><button type="button" data-journal-action="collapse">Collapse page</button>'
-                    '</div></div></section>')
-        content += paging
-        if not entries:
-            content += _empty("No journal entries match this search" if query else "The research journal is empty",
-                              "Try another phrase or jump to the latest entries." if query else "New research entries will appear here.")
-        for position, entry in enumerate(entries[offset:offset + JOURNAL_PAGE_SIZE], offset):
-            is_focused = entry.key == focused
-            limit = DOCUMENT_LIMIT if is_focused or not entry.timestamp else JOURNAL_PREVIEW_LIMIT
-            text, truncated = _read_text(path, limit, tail=not entry.timestamp, start=entry.start, end=entry.end)
-            open_entry = is_focused or (not focused and position == offset)
-            destination = _url("/journal", entry=entry.key) + f"#entry-{entry.key}"
-            note = ""
-            if truncated:
-                portion = "the latest portion" if not entry.timestamp else "the beginning"
-                note = f'<div class="notice">Showing {portion} of this long entry ({limit // 1024} KiB). '
-                note += (_link("/journal", "Open this entry for a larger excerpt", entry=entry.key, q=query)
-                         if limit < DOCUMENT_LIMIT else "The full entry remains in the journal file on disk.")
-                note += "</div>"
-            if query and query.casefold() not in text.casefold():
-                note += '<p class="muted">The search matches entry metadata or text outside this excerpt.</p>'
-            rendered = _markdown(text) if text.strip() else '<p class="muted">No entry text recorded yet.</p>'
-            steps = []
-            for adjacent, label in ((position - 1, "Newer entry"), (position + 1, "Older entry")):
-                if 0 <= adjacent < len(entries):
-                    target = entries[adjacent]
-                    url = _url("/journal", entry=target.key, q=query) + f"#entry-{target.key}"
-                    steps.append(f'<a href="{_escape(url)}">{label}</a>')
-            content += (
-                f'<details class="journal-entry" id="entry-{entry.key}" data-key="journal-{entry.key}"'
-                + (" open" if open_entry else "") + ">"
-                f'<summary><span><span class="journal-entry-meta">Entry {entry.number} &middot; '
-                f'{_escape(entry.timestamp or "Untimestamped notes")}</span>'
-                f'<strong class="journal-entry-title">{_escape(entry.title)}</strong></span></summary>'
-                f'<div class="journal-entry-body">{note}<article class="markdown">{rendered}</article>'
-                f'<details class="raw-source" data-key="journal-source-{entry.key}">'
-                f'<summary>View Markdown source</summary><pre>{_escape(text)}</pre></details>'
-                f'<div class="journal-entry-links"><a href="{_escape(destination)}">Link to this entry</a>'
-                + "".join(steps) + "</div></div></details>")
-        index.verify(path)
-        return content + paging
-
-    def _goal(self) -> str:
-        return self._document(Path(self.config.config_path).parent / self.config.project.research_goal,
-                              "No research goal yet")
-
-    def _debug(self) -> str:
-        return self._document(self.root / "DEBUG.md", "No errors logged", tail=True)
+    def _observation(self):
+        rows = self._observations("WHERE o.id=?", (self.params.get("id", ""),))
+        if not rows:
+            raise DashboardError(404, "Unknown evidence revision.")
+        row = rows[0]
+        metadata = json.loads(self._rows("SELECT metadata FROM observations WHERE id=?", (row["id"],))[0]["metadata"])
+        metrics = metadata.get("metrics", {})
+        content = self._artifact_table(rows) + _facts([("SHA-256", _escape(row["digest"])), ("Recorded", _timestamp(row["created"]))])
+        content += _panel("Recorded numeric metrics", _table(["Metric", "Value"], [
+            [_escape(k[:512]), _escape(v)] for k, v in list(metrics.items())[:32]]))
+        return content + f'<p class="muted">Showing {min(len(metrics), 32)} of {len(metrics)} metrics. Downloads serve the retained bytes, not current files.</p>'
 
     def _download(self):
-        rows = self._rows(
-            "SELECT a.path,t.spec FROM artifacts a JOIN attempts t ON t.id=a.attempt_id WHERE a.id=?",
-            (self.params.get("id", ""),))
+        oid = self.params.get("id", "")
+        rows = self._rows("SELECT assurance='captured' AS captured,size FROM observations WHERE id=?", (oid,))
         if not rows:
-            raise DashboardError(404, "Unknown artifact.")
-        spec = json.loads(rows[0]["spec"])
-        try:
-            artifact = contained(Path(spec["output"]), rows[0]["path"])
-        except ValueError:
-            raise DashboardError(403, "Artifact path escapes its output directory.") from None
-        if not artifact.is_file():
-            raise DashboardError(404, "Artifact no longer present.")
-        with artifact.open("rb") as stream:
-            length = stream.seek(0, 2)
-            stream.seek(0)
-            self._headers(200, "application/octet-stream", length)
-            self.send_header("Content-Disposition", "attachment")
-            self.end_headers()
-            shutil.copyfileobj(stream, self.wfile)
+            raise DashboardError(404, "Unknown evidence revision.")
+        if not rows[0]["captured"] or rows[0]["size"] > 1024 * 1024:
+            raise DashboardError(409, "No bounded exact capture is available. A mutable current file is not a historical download.")
+        value = observation(self.state.db, oid)
+        body = value["body"]
+        self._headers(200, "application/octet-stream", len(body))
+        self.send_header("Content-Disposition", "attachment")
+        self.send_header("X-Content-SHA256", value["digest"])
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _resources(self):
+        budget = self.state.budget()
+        content = _panel("Campaign envelope", f'<pre>{_escape(json.dumps(budget, indent=2))}</pre>'
+                         '<p class="muted">Includes managed reasoning and experiments. CPU affinity is placement, not a native CPU-time quota.</p>')
+        path, identity = self.state.ledger_identity()
+        if not path.exists():
+            return content + _panel("Shared machine capacity", _empty("Not configured", "Recorded ledger is missing; it has not been created."))
+        ledger = ResourceLedger(path, expected_id=identity or None)
+        capacity, rows = ledger.capacity(), ledger.rows()
+        active = [r for r in rows if r["state"] == "granted"]
+        content += _panel("Shared machine capacity", _meter("Reserved CPUs", sum(r["cpus"] for r in active), capacity["cpus"],
+                          f'{sum(r["cpus"] for r in active)} / {capacity["cpus"]}')
+                          + _meter("Reserved memory (MiB)", sum(r["memory_mb"] for r in active), capacity["memory_mb"],
+                                   f'{sum(r["memory_mb"] for r in active)} / {capacity["memory_mb"]}')
+                          + _facts([("Headroom", f'{capacity["headroom_mb"]} MiB'), ("Capacity revision", str(capacity["revision"]))]))
+        content += _panel("Unreleased grants (first 100)", _table(["Work", "Consumer", "State", "CPU / RAM", "Placement", "Queue reason"], [
+            [_escape(r["work_id"]), _escape(r["kind"]), _badge(r["state"]), f'{r["cpus"]} / {r["memory_mb"]} MiB',
+             _escape(r["native_cpus"]), _escape(r["reason"])] for r in rows]))
+        content += _panel("Configured storage watermarks", f'<pre>{_escape(json.dumps(self.settings["storage"], indent=2))}</pre>'
+                          '<p class="muted">Soft monitoring, not a hard disk quota. Use storage inventory for owned sizes and reference reachability.</p>')
+        return content
+
+    def _source_article(self, source_id, *, focused=False):
+        rows = self._rows("SELECT id,seq,kind,created,length(body) bytes FROM sources WHERE id=?", (source_id,))
+        if not rows or rows[0]["kind"] not in RESEARCH_SOURCES:
+            raise DashboardError(404, "Exact retained research source is unavailable.")
+        row = rows[0]
+        limit = DOCUMENT_LIMIT if focused else JOURNAL_PREVIEW_LIMIT
+        if row["bytes"] <= limit:
+            value = journal.entry(self.state.db, source_id, limit=limit)
+            text = value["markdown"]
+            more = ""
+        else:
+            value = journal.entry_page(self.state.db, source_id, offset=self._int("byte_offset") if focused else 0, limit=16384)
+            text = value["text"]
+            more = '<div class="notice">Bounded byte-page preview; the full original remains retained.</div>'
+            if value["has_more"]:
+                more += _link("/journal", "Next byte page", entry=source_id, byte_offset=value["offset"] + value["returned_bytes"])
+        title = text.splitlines()[0].lstrip("# ")[:160] if text else row["kind"]
+        return (f'<details class="journal-entry" id="entry-{source_id}" data-key="journal-{source_id}"'
+                + (" open" if focused else "") + f'><summary><span><span class="journal-entry-meta">Entry {row["seq"]} &middot; '
+                f'{_timestamp(row["created"])}</span><strong class="journal-entry-title">{_escape(title)}</strong></span></summary>'
+                f'<div class="journal-entry-body">{more}<article class="markdown">{_markdown(text)}</article>'
+                f'<details class="raw-source"><summary>View Markdown source</summary><pre>{_escape(text)}</pre></details>'
+                f'<p class="muted">Revision {_escape(source_id)} &middot; {_escape(value["digest"])}</p>'
+                '<div class="journal-entry-links">' + _link("/journal", "Link to this entry", entry=source_id) + "</div></div></details>")
+
+    def _search_results(self, value):
+        content = f'<p class="muted">{_escape(value["coverage"])}. Cutoff {value["cutoff"]}; searched {len(value["searched"])} source prefixes.</p>'
+        for row in value["matches"]:
+            content += _panel(row["kind"], f'<div class="markdown">{_markdown(row["snippet"])}</div>',
+                              _link("/journal", "Exact retained entry", entry=row["id"]))
+        if not value["matches"]:
+            content += _empty("No matches in this searched scope", "This is not evidence that the archive has no relevant finding.")
+        if value["has_more"]:
+            content += _link("/journal", "Search next retained scope", q=value["query"], after=value["next_after"], cutoff=value["cutoff"])
+        return content
+
+    def _journal(self):
+        query = self.params.get("q", "").strip()
+        if len(query.encode()) > 256:
+            raise DashboardError(400, "Journal search is limited to 256 bytes.")
+        toolbar = (f'<section class="journal-toolbar" aria-label="Journal controls"><form class="filters" action="/journal">'
+                   f'<label for="journal-search">Search journal<input id="journal-search" name="q" value="{_escape(query)}" type="search"></label>'
+                   '<button type="submit">Search</button></form><div class="journal-controls">'
+                   + _link("/journal", "Jump to latest") + '<div class="journal-fold-controls" hidden>'
+                   '<button type="button" data-journal-action="expand">Expand page</button>'
+                   '<button type="button" data-journal-action="collapse">Collapse page</button></div></div></section>')
+        if self.params.get("entry"):
+            source_id = self.params["entry"]
+            article = self._source_article(source_id, focused=True)
+            sequence = self._rows("SELECT seq FROM sources WHERE id=?", (source_id,))[0]["seq"]
+            for operator, order, label in ((">", "ASC", "Newer entry"), ("<", "DESC", "Older entry")):
+                rows = self._rows(f"SELECT id FROM sources WHERE seq{operator}? AND kind IN ('handoff','journal_import','summary','directive') ORDER BY seq {order} LIMIT 1", (sequence,))
+                if rows:
+                    article += _link("/journal", label, entry=rows[0]["id"])
+            return toolbar + article
+        cutoff = self._int("cutoff") if "cutoff" in self.params else None
+        if query:
+            return toolbar + self._search_results(journal.search(self.state.db, query, after=self._int("after"), cutoff=cutoff))
+        page = journal.page(self.state.db, limit=1, cutoff=cutoff)
+        self.params["cutoff"] = str(page["cutoff"])
+        offset, paging = self._pagination(page["total"], page_size=JOURNAL_PAGE_SIZE)
+        page = journal.page(self.state.db, limit=JOURNAL_PAGE_SIZE, offset=offset, cutoff=page["cutoff"])
+        intro = f'<p class="intro">Newest retained entries first. Stable source cutoff {page["cutoff"]}. Folding does not hide entries from the archive.</p>'
+        if not page["entries"]:
+            return toolbar + _empty("The research journal is empty", "Accepted handoffs and imported notes appear here.")
+        return toolbar + intro + paging + "".join(
+            self._source_article(row["id"], focused=index == 0) for index, row in enumerate(page["entries"])) + paging
+
+    def _goal(self):
+        rows = self._rows("SELECT source_id FROM source_heads WHERE name='goal'")
+        return self._source_article(rows[0]["source_id"], focused=True) if rows else _empty("No research goal yet", "No retained goal revision exists.")
+
+    def _debug(self):
+        current = self.state.campaign()
+        content = _panel("Unresolved recovery blockers", _table(["Category", "Work", "Detail", "Recorded"], [
+            [_escape(r["category"]), _escape(r["work_id"]), _escape(r["detail"]), _timestamp(r["created"])] for r in current["blockers"]]))
+        rows = self._rows("SELECT token,kind,state,reason FROM allocations WHERE state!='released' ORDER BY created LIMIT 100")
+        return content + _panel("Pending allocation effects", _table(["Token", "Kind", "State", "Reason"], [
+            [_escape(r["token"]), _escape(r["kind"]), _badge(r["state"]), _escape(r["reason"])] for r in rows]))
+
+    def _reports(self):
+        rows = self._rows("SELECT id,view_id,created,outputs FROM reports ORDER BY created DESC LIMIT 50")
+        return _panel("Historical reports (latest 50)", _table(["Report", "Sources", "Published", "Retained outputs"], [
+            [_escape(r["id"]), _link("/view", "Immutable source inventory", id=r["view_id"]), _timestamp(r["created"]),
+             f'<pre>{_escape(json.dumps(json.loads(r["outputs"]), indent=2))}</pre>'] for r in rows]))
+
+    def _view(self):
+        value = reporting.page(self.state.db, self.params.get("id", ""), offset=self._int("offset"), limit=20)
+        coverage = value["coverage"]
+        content = _panel("Pinned source scope", f'<pre>{_escape(json.dumps({k: v for k, v in value.items() if k != "attempts"}, indent=2))}</pre>')
+        content += _table(["Attempt", "Selected", "Admitted", "Execution", "Validation", "Observation denominator"], [
+            [_link("/job", r["experiment_id"], id=r["id"]), str(r["selected"]), str(r["admitted"]),
+             _badge(r["status"]), _badge(r["validation"]), str(r["observation_count"])] for r in value["attempts"]])
+        if coverage["has_more"]:
+            content += _link("/view", "Next inventory page", id=value["id"], offset=coverage["end"])
+        return content
 
 
-def run_dashboard(config_path: str = "xgenius.toml", port: int = 8765, *, chat: bool = False) -> None:
-    """Start the read-only dashboard on the loopback interface."""
-    config = load_config(config_path)
+def run_dashboard(config_path="xgenius.toml", port=8765, *, chat=False, open_browser=False, json_output=False):
     with DashboardServer(("127.0.0.1", port), config_path, chat=chat) as server:
         url = f"http://127.0.0.1:{server.server_port}"
-        print(f"xgenius dashboard: {url}")
-        print(f"DB: {Path(get_xgenius_dir(config)) / 'xgenius.db'}")
-        print("Read-only. Press Ctrl+C to stop.")
-        import webbrowser
-        webbrowser.open(url)
+        print(json.dumps({"url": url, "read_only": True}) if json_output else f"xgenius dashboard: {url}", flush=True)
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            print("\nDashboard stopped.")
+            return

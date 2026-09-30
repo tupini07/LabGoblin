@@ -15,12 +15,10 @@ import uuid
 
 import pytest
 
-from tests.test_dashboard import campaign, get, job, serve
+from tests.test_dashboard import campaign, complete_job, get, job, notes, serve
 from xgenius.dashboard import _chat_markdown
-from xgenius.dashboard_chat import ChatError, ChatSettings, ObserverService, SDKObserver, TOOLS, load_chat_settings
+from xgenius.dashboard_chat import ChatError, ChatSettings, ObserverService, SDKObserver, _SDKSession, TOOLS, load_chat_settings
 from xgenius.dashboard_data import EvidenceReader
-from xgenius.db import _connect
-from xgenius.workspace import collect_artifacts
 
 
 class FakeObserver:
@@ -41,7 +39,7 @@ class FakeObserver:
             await asyncio.sleep(self.delay)
             if self.error:
                 raise self.error
-            state = result["data"]["campaign"][0]["state"]
+            state = result["data"]["campaign"]["state"]
             answer = self.response if self.response is not None else f"**Recorded state:** {state}. [Evidence](/activity)"
             emit("message", {"id": "reply", "text": answer})
             emit("usage", {"id": "usage-1", "model": "test-model", "input_tokens": 30, "output_tokens": 10})
@@ -101,23 +99,24 @@ def test_settings_are_opt_in_and_validated(campaign):
 def test_reader_only_exposes_curated_evidence(campaign):
     attempt = job(campaign, environment={"SECRET_TOKEN": "do-not-expose"}, argv=["python", "-c", "SECRET_COMMAND"])
     spec = json.loads(campaign.state.attempt(attempt)["spec"])
-    (Path(spec["root"]) / "stdout.log").write_text("PRIVATE_LOG_BODY", encoding="utf-8")
+    Path(spec["output"]).mkdir(parents=True, exist_ok=True)
+    (Path(spec["output"]) / "stdout.log").write_text("PRIVATE_LOG_BODY", encoding="utf-8")
     (Path(spec["output"]) / "private-target.json").write_text("PRIVATE_TARGET_BODY", encoding="utf-8")
     (Path(spec["output"]) / "metrics.json").write_text('{"score":42}', encoding="utf-8")
-    collect_artifacts(campaign.state, spec)
+    complete_job(campaign, attempt)
+    notes(campaign, "# Current finding\n\nContinue measuring.")
     reader = EvidenceReader(campaign.config.config_path)
-    with _connect(campaign.state.path) as db:
+    with campaign.state.db.read() as db:
         before = list(db.iterdump())
     result = reader.read("get_experiment", {"id": attempt})
     text = json.dumps(result)
     for forbidden in ("do-not-expose", "SECRET_COMMAND", "PRIVATE_LOG_BODY", "PRIVATE_TARGET_BODY", "SECRET_TOKEN"):
         assert forbidden not in text
-    assert result["data"]["artifacts"][0]["metrics"] == {"score": 42}
+    assert result["data"]["experiments"][0]["metrics"] == {"score": 42}
     assert result["observed_at"] and result["sources"]
     assert "campaign" in reader.read("campaign_status", {})["data"]
     assert reader.read("agent_activity", {})["data"]["events"]
-    (campaign.state.root / "journal.md").write_text("# Current finding\n\nContinue measuring.", encoding="utf-8")
-    assert "Current finding" in reader.read("research_document", {"document": "journal"})["data"]["content"]
+    assert "Current finding" in reader.read("research_document", {"document": "journal"})["data"]["entries"][0]["preview"]
     for name, arguments in (
         ("steer", {}), ("get_experiment", {"id": attempt, "path": "private-target.json"}),
         ("get_experiment", {"id": "../private"}), ("research_document", {"document": "../secret"}),
@@ -125,19 +124,16 @@ def test_reader_only_exposes_curated_evidence(campaign):
     ):
         with pytest.raises(ValueError):
             reader.read(name, arguments)
-    with _connect(campaign.state.path) as db:
+    with campaign.state.db.read() as db:
         assert list(db.iterdump()) == before
 
 
-def test_observer_does_not_mistake_placeholder_ids_for_hypothesis_statements(campaign):
-    campaign.state.db.add_hypothesis("h001", "h001")
-    campaign.state.db.add_hypothesis("h002", "Constraints improve coverage.")
+def test_observer_presents_explicit_statements_not_inferred_claims(campaign):
+    campaign.state.hypothesis("h002", "Constraints improve coverage.")
     reader = EvidenceReader(campaign.config.config_path)
-    hypotheses = {row["hypothesis_id"]: row for row in reader.read("campaign_status", {})["data"]["hypotheses"]}
-    assert hypotheses["h001"]["description"] == "" and hypotheses["h001"]["statement_recorded"] is False
-    assert hypotheses["h002"]["description"] == "Constraints improve coverage."
-    assert hypotheses["h002"]["statement_recorded"] is True
-    assert campaign.state.db.get_hypothesis("h001")["description"] == "h001"
+    hypotheses = {row["id"]: row for row in reader.read("campaign_status", {})["data"]["hypotheses"]}
+    assert hypotheses["h002"]["statement"] == "Constraints improve coverage."
+    assert hypotheses["h002"]["frozen"] == 0
 
 
 def test_conversation_freshness_idempotency_and_separate_accounting(campaign):
@@ -151,14 +147,14 @@ def test_conversation_freshness_idempotency_and_separate_accounting(campaign):
         assert done["messages"][-1]["state"] == "completed"
         assert len(driver.calls) == 1 and done["messages"][-1]["tools_used"] == ["campaign_status"]
         assert done["messages"][-1]["usage"][0]["input_tokens"] == 30
-        campaign.state.set_campaign("paused", "Paused externally")
+        campaign.state.control("pause", uuid.uuid4().hex, 0)
         observer.send(first["conversation_id"], uuid.uuid4().hex, "And now?")
         second = finished(observer, first["conversation_id"])
         assert "paused" in second["messages"][-1]["answer"]
         assert "What is happening?" in driver.calls[-1]
-        with _connect(campaign.state.path) as db:
+        with campaign.state.db.read() as db:
             assert db.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 0
-            assert db.execute("SELECT COUNT(*) FROM events WHERE acknowledged_by IS NULL").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM events WHERE acknowledged_by IS NULL").fetchone()[0] >= 1
         observer.clear(first["conversation_id"])
         with pytest.raises(ChatError, match="not found"):
             observer.snapshot(first["conversation_id"])
@@ -319,7 +315,8 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
 
     driver = FakeObserver(delay=1)
     observer = service(campaign, driver)
-    campaign.state.set_campaign("waiting", "Measuring the next controlled comparison")
+    with campaign.state.db.write() as db:
+        db.execute("UPDATE campaign SET progress='wait',reason='Measuring the next controlled comparison'")
     job(campaign)
     with serve(campaign.config.config_path, observer=observer) as base, sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, executable_path=os.environ.get("XGENIUS_BROWSER_EXECUTABLE"))
@@ -335,7 +332,7 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
             page.locator("#chat-question").press("Enter")
             expect(page.locator(".chat-answer")).to_contain_text("Recorded state:")
             expect(page.locator("#chat-send")).to_be_enabled()
-            expect(page.locator(".chat-answer")).to_contain_text("waiting")
+            expect(page.locator(".chat-answer")).to_contain_text("wait")
             expect(page.locator(".chat-usage")).to_contain_text("30 in / 10 out")
             assert page.locator(".chat-sources a").first.get_attribute("target") == "_blank"
             page.screenshot(path=str(tmp_path / "chat-desktop.png"), full_page=True)
@@ -365,7 +362,7 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
             expect(page.locator("#chat-panel")).to_be_hidden()
             page.get_by_role("button", name="Refresh", exact=True).click()
             page.get_by_role("button", name="Ask Copilot").click()
-            expect(page.locator(".chat-answer")).to_contain_text("waiting")
+            expect(page.locator(".chat-answer")).to_contain_text("wait")
             driver.delay = 30
             page.get_by_label("Ask about this campaign").fill("Please explain more")
             page.locator("#chat-send").click()
@@ -407,7 +404,7 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
             expect(page.locator("#chat-status")).to_contain_text("reuses its request ID")
             count = len(driver.calls)
             page.locator("#chat-send").click()
-            expect(page.locator(".chat-answer")).to_contain_text("waiting")
+            expect(page.locator(".chat-answer")).to_contain_text("wait")
             expect(page.locator("#chat-send")).to_be_enabled()
             assert len(driver.calls) == count
             assert len(observer.conversations) == 1 and cid not in observer.conversations
@@ -612,7 +609,7 @@ def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
     events = []
     if failure:
         with pytest.raises(RuntimeError):
-            asyncio.run(SDKObserver().answer(
+            asyncio.run(_SDKSession().answer(
                 ChatSettings(cli_path=sys.executable), EvidenceReader(campaign.config.config_path),
                 "Why?", lambda *args: None))
         assert captures["stopped"]
@@ -621,7 +618,7 @@ def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
         if failure == "stop":
             assert captures["forced"]
         return
-    result = asyncio.run(SDKObserver().answer(
+    result = asyncio.run(_SDKSession().answer(
         ChatSettings(cli_path=sys.executable), EvidenceReader(campaign.config.config_path), "Why?",
         lambda kind, value: events.append((kind, value))))
     json.dumps(events)
@@ -641,63 +638,3 @@ def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
     assert guard({"toolName": "powershell"}, {})["permissionDecision"] == "deny"
     assert guard({"toolName": "campaign_status"}, {})["permissionDecision"] == "allow"
     assert captures["disconnected"] and captures["deleted"] == Session.session_id and captures["stopped"]
-
-
-@pytest.mark.skipif(os.environ.get("XGENIUS_LIVE_CHAT") != "1", reason="Opt in to one real, billable SDK observer request")
-def test_live_sdk_observer_reads_only_synthetic_evidence(campaign, monkeypatch):
-    import copilot
-
-    processes, sessions = [], []
-
-    class TrackingClient(copilot.CopilotClient):
-        async def start(self):
-            await super().start()
-            if self._cli_process not in processes:
-                processes.append(self._cli_process)
-
-        async def create_session(self, **kwargs):
-            result = await super().create_session(**kwargs)
-            sessions.append(result.session_id)
-            return result
-
-    monkeypatch.setattr(copilot, "CopilotClient", TrackingClient)
-    attempt = job(campaign, key="observer-synthetic-proof")
-    spec = json.loads(campaign.state.attempt(attempt)["spec"])
-    (Path(spec["output"]) / "metrics.json").write_text('{"observer_proof":731}', encoding="utf-8")
-    collect_artifacts(campaign.state, spec)
-    observer = ObserverService(campaign.config.config_path, ChatSettings(enabled=True, timeout_seconds=120))
-    with _connect(campaign.state.path) as db:
-        before = list(db.iterdump())
-    try:
-        state = observer.send("", uuid.uuid4().hex,
-                              f"Inspect experiment {attempt}. What is the exact observer_proof metric? "
-                              "Fetch the experiment evidence, cite its dashboard link, and say whether you can steer this campaign.")
-        deadline = time.monotonic() + 160
-        while observer.snapshot(state["conversation_id"])["busy"] and time.monotonic() < deadline:
-            time.sleep(0.2)
-        result = observer.snapshot(state["conversation_id"])
-        assert not result["busy"], result
-        message = result["messages"][-1]
-        assert message["state"] == "completed", message
-        assert "731" in message["answer"] and "get_experiment" in message["tools_used"], message
-        assert any(source["url"] == "/job?id=" + attempt for source in message["sources"])
-        print(json.dumps({"answer": message["answer"], "tools_used": message["tools_used"], "usage": message["usage"]}))
-        observer.send(state["conversation_id"], uuid.uuid4().hex, "Inspect the evidence again and explain the result.")
-        deadline = time.monotonic() + 30
-        while len(sessions) < 2 and observer.snapshot(state["conversation_id"])["busy"] and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert len(sessions) == 2, "Second SDK session did not start"
-        observer.cancel(state["conversation_id"])
-        deadline = time.monotonic() + 40
-        while observer.snapshot(state["conversation_id"])["busy"] and time.monotonic() < deadline:
-            time.sleep(0.1)
-        cancelled = observer.snapshot(state["conversation_id"])
-        assert not cancelled["busy"]
-        assert cancelled["messages"][-1]["state"] == "cancelled", cancelled
-    finally:
-        observer.close()
-        assert processes and all(process.poll() is not None for process in processes)
-        profile = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
-        assert sessions and all(not (profile / "session-state" / sid).exists() for sid in sessions)
-    with _connect(campaign.state.path) as db:
-        assert list(db.iterdump()) == before

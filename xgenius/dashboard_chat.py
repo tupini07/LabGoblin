@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import importlib.metadata
 import json
 import logging
@@ -11,13 +11,21 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import tomllib
+from types import SimpleNamespace
 import uuid
 
-from xgenius.dashboard_data import EvidenceReader, TOOLS, observed_at
-from xgenius.local_config import positive
+from xgenius.config import ChatSettings, parse_chat_settings
+from xgenius.dashboard_data import EvidenceReader, TOOLS, TOOL_REQUIRED, observed_at
+from xgenius.evidence import atomic_json, publish_bytes, read_bytes, read_json
+from xgenius.processes import background_options, own_handle, unlink_file
+from xgenius.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, UncertainExecution, canonical, fingerprint
+from xgenius.scheduler import ResourceLedger
 
 
 SDK_VERSION = "1.0.15"
@@ -39,42 +47,21 @@ load skills, launch subagents, or access arbitrary files, raw datasets or privat
 Raw logs, artifact bodies, credentials and execution environments are deliberately unavailable.
 Explain these boundaries when relevant; link to the human dashboard detail page instead.
 Only answer; do not propose to take control. Keep answers concise, factual and useful.
+Older answers are source hints, not independent evidence. Resolve historical citations
+using exact source IDs. Lexical zero matches mean no matches in the searched prefixes,
+not no evidence. Report coverage, cutoffs and truncation when they limit your answer.
 """
 
 
-@dataclass
-class ChatSettings:
-    enabled: bool = False
-    model: str = "auto"
-    reasoning_effort: str = ""
-    timeout_seconds: float = 120
-    cli_path: str = ""
-
-
 def load_chat_settings(config_path: str, *, enabled: bool = False) -> ChatSettings:
-    with open(config_path, "rb") as stream:
-        dashboard = tomllib.load(stream).get("dashboard", {})
+    dashboard = tomllib.loads(read_bytes(Path(config_path), 65536).decode("utf-8")).get("dashboard", {})
     if not isinstance(dashboard, dict) or set(dashboard) - {"chat"}:
         raise ValueError("dashboard must be a table containing only chat settings")
     raw = dashboard.get("chat", {})
     if not isinstance(raw, dict) or set(raw) - set(ChatSettings.__dataclass_fields__):
         raise ValueError("Unknown or invalid dashboard.chat settings")
-    settings = ChatSettings(**raw)
-    if type(settings.enabled) is not bool:
-        raise ValueError("dashboard.chat.enabled must be boolean")
-    for name in ("model", "reasoning_effort", "cli_path"):
-        value = getattr(settings, name)
-        if not isinstance(value, str) or "\0" in value or len(value) > 1024:
-            raise ValueError(f"dashboard.chat.{name} must be a string")
-    if not settings.model.strip():
-        raise ValueError("dashboard.chat.model must name a model or auto")
-    if settings.reasoning_effort not in ("", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
-        raise ValueError("Unsupported dashboard.chat.reasoning_effort")
-    positive(settings.timeout_seconds, "dashboard.chat.timeout_seconds")
-    if not 5 <= settings.timeout_seconds <= 600:
-        raise ValueError("dashboard.chat.timeout_seconds must be between 5 and 600")
-    settings.enabled = settings.enabled or enabled
-    return settings
+    settings = parse_chat_settings(raw)
+    return replace(settings, enabled=settings.enabled or enabled)
 
 
 def _safe_error(error: BaseException) -> str:
@@ -89,7 +76,7 @@ class ChatError(Exception):
         super().__init__(message)
 
 
-class SDKObserver:
+class _SDKSession:
     async def answer(self, settings, reader, prompt, emit):
         from copilot import CopilotClient, RuntimeConnection, Tool, ToolResult, ToolSet
         from copilot.generated.rpc import PermissionDecisionDeniedByRules
@@ -112,7 +99,7 @@ class SDKObserver:
                 return ToolResult(result_type="failure", error=_safe_error(error),
                                   text_result_for_llm=_safe_error(error))
             encoded = json.dumps(result, ensure_ascii=False)
-            if len(encoded) > 48000:
+            if len(encoded.encode("utf-8")) > 48000:
                 return ToolResult(result_type="failure", error="Evidence response too large",
                                   text_result_for_llm="Evidence exceeds the response limit; narrow the query.")
             emit("sources", result["sources"])
@@ -125,7 +112,7 @@ class SDKObserver:
 
         tools, allowed = [], ToolSet()
         for name, (description, properties) in TOOLS.items():
-            required = ["id"] if name == "get_experiment" else ["document"] if name == "research_document" else []
+            required = TOOL_REQUIRED.get(name, [])
             tools.append(Tool(name=name, description=description, handler=read, skip_permission=True, defer="never",
                               parameters={"type": "object", "properties": properties,
                                           "required": required, "additionalProperties": False}))
@@ -198,6 +185,175 @@ class SDKObserver:
                                            + _safe_error(error)) from error
 
 
+class SDKObserver:
+    """Run the SDK inside an owned native payload, never in the HTTP server."""
+
+    def __init__(self):
+        self.id = uuid.uuid4().hex
+        self.ledger = None
+
+    def connect(self, reader):
+        path, identity = reader.state.ledger_identity()
+        self.ledger = ResourceLedger(path, expected_id=identity or None)
+        self.ledger.capacity()
+        return self.ledger
+
+    def usage(self):
+        return self.ledger.observer_usage(self.id) if self.ledger else {"committed": 0, "phases": {}}
+
+    async def answer(self, settings, reader, prompt, emit):
+        from xgenius.worker import prepare_runtime
+        ledger = self.connect(reader)
+        token = uuid.uuid4().hex
+        owner = {"kind": "observer", "handle": own_handle(self.id),
+                 "campaign_id": reader.state.id, "state_dir": str(reader.state.root)}
+        resources = Resources(settings.cpus, settings.memory_mb)
+        directory = ledger.path.parent / "observers" / self.id / token
+        envelope = None
+        offset, pending = 0, b""
+
+        def events():
+            nonlocal offset, pending
+            path = directory / "events.jsonl"
+            if not path.exists():
+                return
+            with path.open("rb") as stream:
+                stream.seek(offset)
+                block = stream.read(65536)
+            offset += len(block)
+            pending += block
+            if len(pending) > 256 * 1024:
+                raise ValueError("Observer event frame exceeded its bound")
+            while b"\n" in pending:
+                raw, pending = pending.split(b"\n", 1)
+                event = json.loads(raw)
+                emit(event["kind"], event["value"])
+
+        def terminal():
+            row = ledger.consumer_run(token)
+            if row and row["phase"] == "quiescent":
+                return LaunchReceipt.parse(json.loads(row["receipt"]))
+            return None
+
+        try:
+            ledger.request(token, self.id, token, "observer", resources, owner, native=True)
+            while True:
+                grant = await asyncio.to_thread(ledger.reserve, token)
+                if grant["state"] == "granted":
+                    break
+                if grant["state"] != "pending":
+                    raise RuntimeError("Observer admission failed: " + grant["reason"])
+                emit("status", {"text": grant["reason"] or "Waiting for machine capacity"})
+                await asyncio.sleep(0.25)
+            directory.mkdir(parents=True, exist_ok=False)
+            publish_bytes(directory / "request.json", canonical({
+                "settings": asdict(settings), "config_path": reader.config_path, "prompt": prompt}))
+            envelope = LaunchEnvelope(
+                LaunchKey(self.id, 1, token, token, token), "observer", (sys.executable,),
+                str(directory), str(directory), str(reader.state.path), str(ledger.path), ledger.id,
+                settings.timeout_seconds, resources, fingerprint(asdict(settings)),
+                metadata={"cpu_ids": json.loads(grant["native_cpus"]), "sdk_version": SDK_VERSION})
+            envelope = prepare_runtime(reader.state, envelope, root=directory.parent)
+            bootstrap = Path(envelope.metadata["runtime"]["root"]) / "bootstrap.py"
+            envelope = replace(envelope, argv=(sys.executable, "-I", "-B", str(bootstrap),
+                                              "--observer-sdk", str(directory / "request.json")))
+            publish_bytes(directory / "envelope.json", canonical(asdict(envelope)))
+            ledger.arm_consumer(envelope, max_invocations=settings.max_invocations)
+            emit("status", {"text": "Starting owned read-only Copilot runtime"})
+            try:
+                with (directory / "supervisor.stdout.log").open("xb") as out, (
+                        directory / "supervisor.stderr.log").open("xb") as err:
+                    subprocess.Popen(
+                        [sys.executable, "-I", "-B", str(bootstrap), "--observer-supervisor",
+                         str(directory / "envelope.json")],
+                        cwd=directory, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                        **background_options(independent=True))
+            except (OSError, ValueError) as error:
+                ledger.finish_consumer(LaunchReceipt(envelope.key, envelope.digest, "not_started", True, 0,
+                    executed=False, reason=_safe_error(error)))
+                raise
+            while (receipt := terminal()) is None:
+                events()
+                await asyncio.sleep(0.1)
+            while (directory / "events.jsonl").exists() and offset < (directory / "events.jsonl").stat().st_size:
+                events()
+            result = read_json(directory / "result.json", 256 * 1024) if (directory / "result.json").exists() else {}
+            if receipt.status != "completed" or result.get("error"):
+                raise RuntimeError(result.get("error") or receipt.reason or f"Observer {receipt.status}")
+            answer = result.get("answer")
+            if not isinstance(answer, str) or not answer:
+                raise RuntimeError("Observer completed without a retained answer")
+            return answer
+        finally:
+            run = ledger.consumer_run(token)
+            if run is None:
+                ledger.release(token, owner_id=self.id)
+            elif run["phase"] != "quiescent":
+                atomic_json(directory / "cancel.json", {"token": token})
+                until = time.monotonic() + 20
+                while terminal() is None and time.monotonic() < until:
+                    await asyncio.sleep(0.1)
+                if terminal() is None:
+                    raise UncertainExecution(
+                        f"Observer quiescence is unverified; grant {token} retained. Use machine reconcile for matching receipts.")
+            for name in ("request.json", "result.json", "events.jsonl"):
+                unlink_file(directory / name, missing_ok=True)
+
+
+def worker_main(mode, path):
+    """Internal frozen-helper entry points; only the supervisor can release capacity."""
+    if mode == "--observer-sdk":
+        request_path = Path(path)
+        directory = request_path.parent
+        total = 0
+        with (directory / "events.jsonl").open("xb", buffering=0) as stream:
+            def emit(kind, value):
+                nonlocal total
+                line = canonical({"kind": kind, "value": value}) + b"\n"
+                total += len(line)
+                if total > 2 * 1024 * 1024:
+                    raise RuntimeError("Observer event transport exceeds 2 MiB")
+                stream.write(line)
+
+            try:
+                request = read_json(request_path, 128 * 1024)
+                if importlib.metadata.version("github-copilot-sdk") != SDK_VERSION:
+                    raise RuntimeError("Observer SDK version differs from the frozen adapter")
+                result = asyncio.run(_SDKSession().answer(
+                    parse_chat_settings(request["settings"]), EvidenceReader(request["config_path"]), request["prompt"], emit))
+                atomic_json(directory / "result.json", {"answer": result})
+                return 0
+            except (OSError, ValueError, RuntimeError, ImportError, asyncio.TimeoutError) as error:
+                atomic_json(directory / "result.json", {"error": _safe_error(error)})
+                return 1
+    from xgenius.payload import execute_spec
+    from xgenius.worker import verify_runtime
+    envelope = LaunchEnvelope.parse(read_json(Path(path)))
+    ledger = ResourceLedger(envelope.ledger_path, expected_id=envelope.ledger_id)
+    if not ledger.claim_consumer(envelope, own_handle(envelope.key.nonce)):
+        return 0
+    entered = False
+    try:
+        verify_runtime(SimpleNamespace(root=Path(envelope.root).parent), envelope)
+        entered = True
+        receipt = execute_spec({
+            "envelope": asdict(envelope), "envelope_digest": envelope.digest,
+            "argv": list(envelope.argv), "cwd": envelope.cwd, "root": envelope.root,
+            "token": envelope.key.nonce, "cancel_path": str(Path(envelope.root) / "cancel.json"),
+            "cpus": envelope.resources.cpus, "memory_mb": envelope.resources.memory_mb,
+            "gpus": [], "seconds": envelope.timeout_seconds, "log_bytes": 65536,
+            "cpu_ids": envelope.metadata["cpu_ids"], "provider": "copilot"})
+        ledger.finish_consumer(receipt)
+        return 0 if receipt.status == "completed" else 1
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        if not entered:
+            ledger.finish_consumer(LaunchReceipt(envelope.key, envelope.digest, "not_started", True, 0,
+                                                 reason=_safe_error(error), executed=False))
+        else:
+            atomic_json(Path(envelope.root) / "diagnostic.json", {"error": _safe_error(error)})
+        return 1
+
+
 @dataclass
 class Conversation:
     id: str
@@ -230,9 +386,21 @@ class ObserverService:
             reason = f"Install the dashboard-chat extra (github-copilot-sdk=={SDK_VERSION})."
         elif not (self.settings.cli_path or shutil.which("copilot")):
             reason = "Install and authenticate Copilot CLI first."
+        elif isinstance(self.driver, SDKObserver):
+            try:
+                ledger = self.driver.connect(self.reader)
+                capacity = ledger.capacity()
+                if self.settings.cpus > capacity["cpus"] or self.settings.memory_mb > capacity["memory_mb"]:
+                    reason = "Observer resource allowance exceeds the configured machine capacity."
+                elif self.driver.usage()["committed"] >= self.settings.max_invocations:
+                    reason = "This dashboard's observer invocation allowance is exhausted."
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                reason = "Observer machine admission is unavailable: " + _safe_error(error)
         return {"enabled": self.settings.enabled, "ready": not reason, "reason": reason,
                 "model": self.settings.model, "reasoning_effort": self.settings.reasoning_effort,
                 "timeout_seconds": self.settings.timeout_seconds, "max_questions": MAX_QUESTIONS,
+                "max_invocations": self.settings.max_invocations,
+                "usage": self.driver.usage() if isinstance(self.driver, SDKObserver) else {"committed": 0},
                 "notice": "On demand; uses your Copilot service. Shares operational summaries and journal/goal text, "
                           "not raw logs, datasets or artifact bodies. No steering or campaign edits. "
                           "Chat usage is separate from research turns; it is not free or a hard spending cap."}
@@ -244,9 +412,6 @@ class ObserverService:
             raise ChatError(400, "A valid request ID is required.")
         if not isinstance(conversation_id, str):
             raise ChatError(400, "Invalid conversation ID.")
-        available = self.availability()
-        if not available["ready"]:
-            raise ChatError(503, available["reason"])
         with self.lock:
             if self.closed:
                 raise ChatError(503, "Dashboard chat is shutting down.")
@@ -256,6 +421,9 @@ class ObserverService:
                         if entry["question"] != message or (conversation_id and conversation_id != conversation.id):
                             raise ChatError(409, "Request ID already used for another question.")
                         return self.snapshot(conversation.id)
+            available = self.availability()
+            if not available["ready"]:
+                raise ChatError(503, available["reason"])
             if self.active is not None:
                 raise ChatError(409, "Another dashboard answer is running. Wait or cancel it before sending another.")
             if conversation_id:
@@ -333,6 +501,8 @@ class ObserverService:
                     elif kind == "tool":
                         entry["tools_used"].append(value["name"])
                         entry["status"] = "Reading " + value["name"].replace("_", " ")
+                    elif kind == "status":
+                        entry["status"] = value["text"]
                     elif kind == "limit":
                         entry["error"] = value["error"]
                         self.cancel_event.set()

@@ -1,343 +1,495 @@
-"""Local campaign queue, recovery, and bounded agent-driven research loop."""
+"""Recovery-first, nonblocking orchestration for the local research runtime."""
 
 from dataclasses import asdict
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
+import sqlite3
 import time
 
-import psutil
-
-from xgenius.backends import alive, inspect_payload, launch_independent, own_handle, validate_runner
-from xgenius.agent_policy import AgentSession, start_session
-from xgenius.db import _connect
+from xgenius import agent, agent_worker, backends, briefing, journal, reporting, worker, workspace
+from xgenius.config import load_config
+from xgenius.evidence import atomic_json, require_space
+from xgenius.processes import own_handle, process_state
+from xgenius.protocol import (
+    AdmissionClosed, AdmissionWait, BudgetExhausted, LaunchEnvelope,
+    Resources, UncertainExecution, canonical, identifier,
+)
 from xgenius.scheduler import ResourceLedger
-from xgenius.state import ACTIVE, TERMINAL, LocalState, identifier
-from xgenius.workspace import atomic_json, collect_artifacts, digest, prepare_spec, read_json, validate_inputs
+from xgenius.state import State
+
+
+ERRORS = (OSError, ValueError, RuntimeError, sqlite3.Error)
 
 
 class Campaign:
-    def __init__(self, config):
-        if config.local is None:
-            raise ValueError("This command requires schema_version = 2 local configuration")
+    def __init__(self, config=None, *, state=None, ledger=None):
+        if state is None and config is None:
+            raise ValueError("Open existing state or supply a project configuration")
+        self.state = state or State.open(config.state_dir)
         self.config = config
-        self.local = config.local
-        self.state = LocalState(config)
-        self.ledger = ResourceLedger()
-        self.project = Path(config.config_path).parent
+        self.fixed_config = config is not None
+        self.ledger = ledger
+        self.handle = None
+        self.adapter = None
+        self.adapter_revision = None
+        self.clock_anchor = None
 
-    def submit(self, request: dict) -> str:
-        if not isinstance(request, dict):
-            raise ValueError("Job manifest must be a JSON object")
-        # Replay before creating snapshots or reserving resources.
-        with _connect(self.state.path) as c:
-            row = c.execute("SELECT id,spec FROM attempts WHERE idempotency_key=?",
-                            (request.get("key"),)).fetchone()
-        if row:
-            if json.loads(row["spec"])["request"] != request:
-                raise ValueError("Idempotency key already used for a different request")
-            return row["id"]
-        if self.state.campaign()["state"] in ("stopping", "stopped", "completed", "finishing"):
-            raise ValueError("Campaign is stopped/completed; resume before submitting work")
-        spec = prepare_spec(self.config, request)
-        validate_runner(spec["runner"], spec["gpus"])
-        self.ledger.validate(spec)
-        return self.state.enqueue(spec)
+    def acquire(self):
+        if self.handle is not None:
+            return self
+        existing = self.state.campaign()["controller"]
+        if existing:
+            liveness = process_state(json.loads(existing))
+            if liveness != "dead":
+                raise UncertainExecution(f"Existing controller is {liveness}; ownership was not replaced")
+        handle = own_handle(identifier())
+        self.state.controller(handle, expected=existing)
+        self.handle = handle
+        return self
 
-    def budget(self) -> dict:
-        attempts = self.state.attempts()
-        used = sum(a["gpu_hours"] or 0 for a in attempts if a["status"] in TERMINAL)
-        reserved = sum(
-            len(json.loads(a["spec"])["gpus"]) * json.loads(a["spec"])["seconds"] / 3600
-            for a in attempts if a["status"] in ("starting", "running", "recovery_required"))
-        return {"gpu_hours_used": used, "gpu_hours_reserved": reserved,
-                "gpu_hours_limit": self.local.max_gpu_hours,
-                "running_gpu_hours_estimate": sum(
-                    max(0, time.time() - a["started"]) * len(json.loads(a["spec"])["gpus"]) / 3600
-                    for a in attempts if a["started"] and a["status"] in ACTIVE),
-                "provider_usage": None,
-                "active_jobs": sum(a["status"] in ACTIVE for a in attempts)}
+    def close(self):
+        if self.handle is not None:
+            self.state.controller(None, expected=canonical(self.handle).decode())
+            self.handle = None
 
-    def dispatch(self):
-        if self.state.campaign()["state"] not in ("ready", "running", "waiting"):
-            return
-        with self.ledger.connect() as c:
-            c.execute("UPDATE reservations SET state='paused' WHERE campaign=? AND state='queued'",
-                      (self.state.id,))
-        for attempt in self.state.attempts():
-            if attempt["status"] != "queued":
-                continue
-            spec = json.loads(attempt["spec"])
-            running = [json.loads(a["spec"]) for a in self.state.attempts()
-                       if a["status"] in ("starting", "running", "recovery_required")]
-            if (len(running) >= self.local.max_jobs
-                    or sum(s["cpus"] for s in running) + spec["cpus"] > self.local.cpus
-                    or sum(s["memory_mb"] for s in running) + spec["memory_mb"] > self.local.memory_mb):
-                continue
-            budget = self.budget()
-            estimate = len(spec["gpus"]) * spec["seconds"] / 3600
-            if budget["gpu_hours_used"] + budget["gpu_hours_reserved"] + estimate > self.local.max_gpu_hours:
-                self.state.set_campaign("blocked", "GPU-hour admission budget exhausted")
-                return
-            self.ledger.register(self.state, spec)
-            if not self.ledger.reserve(attempt["id"]):
-                continue
-            if not self.state.claim(attempt["id"]):
-                if self.state.attempt(attempt["id"])["status"] in (*TERMINAL, "queued"):
-                    self.ledger.finish(attempt["id"])
-                continue
-            root = Path(spec["root"])
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *args):
+        self.close()
+
+    def _error(self, errors, key, category, error, work_id=None):
+        detail = f"{type(error).__name__}: {str(error)[:4000]}"
+        self.state.blocker(key, category, detail, work_id)
+        errors.append({"category": category, "work_id": work_id, "error": detail})
+
+    def _turn(self):
+        with self.state.db.read() as conn:
+            row = conn.execute("SELECT * FROM turns WHERE state IN ('prepared','running') LIMIT 1").fetchone()
+            return dict(row) if row else None
+
+    def _invocations(self, turn_id):
+        with self.state.db.read() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM invocations WHERE turn_id=? ORDER BY bundle_position", (turn_id,))]
+
+    def _cancel_requests(self, errors):
+        with self.state.db.read() as conn:
+            rows = list(conn.execute("""SELECT id,nonce,cancel_requested FROM attempts
+                WHERE status IN ('starting','running','recovery_required') AND cancel_requested IS NOT NULL"""))
+        for row in rows:
             try:
-                process = launch_independent(
-                    [sys.executable, "-m", "xgenius.worker", str(root / "spec.json")], root)
-                handle = {"pid": process.pid, "created": psutil.Process(process.pid).create_time(),
-                          "token": attempt["id"]}
-                self.state.transition(attempt["id"], "starting", handle=handle)
-            except Exception as e:
-                self.state.transition(attempt["id"], "recovery_required",
-                                      reason=f"Supervisor launch outcome uncertain: {e}")
+                launch = self.state.launch(row["nonce"])
+                envelope = LaunchEnvelope.parse(json.loads(launch["envelope"]))
+                atomic_json(worker.launch_directory(envelope) / "cancel",
+                            {"nonce": row["nonce"], "requested_at": row["cancel_requested"]})
+                self.state.resolve_blocker(f"cancel-{row['id']}")
+            except ERRORS as error:
+                self._error(errors, f"cancel-{row['id']}", "cancel", error, row["id"])
 
-    def reconcile(self):
-        for attempt in self.state.attempts():
-            if attempt["status"] in TERMINAL:
-                self.ledger.finish(attempt["id"])
-                continue
-            if attempt["status"] == "queued":
-                continue
-            spec = json.loads(attempt["spec"])
-            root = Path(spec["root"])
-            receipt = root / "completion.json"
-            handle_file = root / "supervisor.json"
-            handle = (read_json(handle_file) if handle_file.exists() else
-                      json.loads(attempt["handle"]) if attempt["handle"] else None)
-            if handle and handle.get("token") != attempt["id"]:
-                raise ValueError("Supervisor ownership mismatch")
-            if alive(handle):
-                continue
-            if receipt.exists():
-                data = read_json(receipt)
-                if data.get("token") != attempt["id"]:
-                    raise ValueError("Completion receipt ownership mismatch")
-                reason = data["reason"]
-                if data["status"] == "completed":
-                    try:
-                        if data.get("validation_errors"):
-                            raise ValueError("; ".join(data["validation_errors"]))
-                        collect_artifacts(self.state, spec)
-                    except (ValueError, OSError) as e:
-                        reason = f"Artifact validation failed: {e}"
-                        self.state.event("validation_failed", {"attempt_id": spec["id"], "reason": reason},
-                                         f'validation-{spec["id"]}')
-                self.state.transition(attempt["id"], data["status"], reason=reason, receipt=data)
-                self.ledger.finish(attempt["id"])
-            elif inspect_payload(spec) == "dead":
-                self.state.transition(attempt["id"], "interrupted",
-                                      reason="Supervisor and payload exited without a completion receipt")
-                self.ledger.finish(attempt["id"])
-            else:
-                self.state.transition(attempt["id"], "recovery_required",
-                                      reason="Supervisor unavailable; payload liveness unresolved; reservation retained")
+    def reconcile(self) -> dict:
+        errors = []
+        self._cancel_requests(errors)
+        recovered = {"recovered": [], "unresolved": []}
+        try:
+            recovered = worker.reconcile(self.state, backends.inspect_payload)
+            self.state.resolve_blocker("resource-recovery")
+        except ERRORS as error:
+            self._error(errors, "resource-recovery", "recovery", error)
+        self._finish_turn(errors)
+        self._retire_pending_turn(no_agent=False)
+        self._flush(errors)
+        self.state.converge_stop()
+        with self.state.db.read() as conn:
+            rows = list(conn.execute("""SELECT id FROM attempts WHERE collection='pending'
+                AND status IN ('completed','failed','cancelled','timed_out','interrupted','not_started')
+                ORDER BY created,id LIMIT 100"""))
+        collected = []
+        for row in rows:
+            try:
+                collected.append(workspace.collect_artifacts(self.state, row["id"]))
+                self.state.resolve_blocker(f"collection-{row['id']}")
+            except ERRORS as error:
+                self._error(errors, f"collection-{row['id']}", "collection", error, row["id"])
+        if self.state.campaign()["operator_mode"] in ("stopping", "stopped"):
+            self._advance_closure(errors, no_agent=True, admit=False)
+        return {**recovered, "collected": collected, "errors": errors}
 
-    def cancel(self, attempt_id: str):
-        if self.state.transition(attempt_id, "cancelled", reason="Cancelled before dispatch", expected="queued"):
-            self.ledger.finish(attempt_id)
+    def _finish_turn(self, errors):
+        turn = self._turn()
+        if not turn:
             return
-        attempt = self.state.attempt(attempt_id)
-        if attempt["status"] not in TERMINAL:
-            spec = json.loads(attempt["spec"])
-            (Path(spec["root"]) / "cancel").touch()
-            if attempt["status"] == "recovery_required":
-                raise RuntimeError("Cancellation recorded; backend recovery still required before releasing capacity")
-
-    def control(self, action: str):
-        if action == "pause":
-            self.state.set_campaign("paused", "Paused by user")
-        elif action == "stop":
-            self.state.set_campaign("stopping", "Graceful stop requested")
-            for a in self.state.attempts():
-                if a["status"] == "queued":
-                    self.cancel(a["id"])
-        elif action == "resume":
-            self.state.set_campaign("running", "Resumed by user")
-        else:
-            raise ValueError(f"Unknown campaign control: {action}")
-        if action in ("pause", "stop"):
-            with self.ledger.connect() as c:
-                c.execute("UPDATE reservations SET state='paused' WHERE campaign=? AND state='queued'",
-                          (self.state.id,))
-
-    def doctor(self, *, sandbox: bool = True) -> dict:
-        capacity = self.ledger.capacity()
-        inputs = validate_inputs(self.config)
-        for runner in self.local.runners.values():
-            validate_runner(asdict(runner), self.local.gpus)
-        if sandbox and self.local.sandbox:
-            if not self.local.copilot_home:
-                raise ValueError("Sandbox mode requires an explicitly provisioned isolated agent.copilot_home")
-            from xgenius.agent_policy import sandbox_preflight
-            sandbox_preflight(self.config)
-        return {"status": "ready", "mode": "sandbox" if self.local.sandbox else "trusted",
-                "runners": list(self.local.runners),
-                "inputs": list(inputs), "capacity": capacity,
-                "warning": "Trusted execution is not a sandbox; shared inputs are not OS-protected"}
-
-    def _begin_turn(self):
-        events = self.state.pending_events()
-        turn_id = identifier()
-        directory = self.state.root / "turns" / turn_id
-        directory.mkdir(parents=True)
-        result_path = directory / "result.json"
-        journal = self.state.root / "journal.md"
-        with _connect(self.state.path) as c:
-            c.execute("BEGIN IMMEDIATE")
-            if c.execute("SELECT 1 FROM turns WHERE state IN ('starting','running','maintenance')").fetchone():
-                return None
-            maintenance = c.execute("SELECT agent FROM campaign WHERE id=?", (self.state.id,)).fetchone()[0]
-            if maintenance and alive(json.loads(maintenance)):
-                return None
-            c.execute("INSERT INTO turns(id,events,started,state,journal_before) VALUES(?,?,?,'starting',?)",
-                      (turn_id, json.dumps([e["id"] for e in events]), time.time(),
-                       digest(journal) if journal.exists() else None))
-        prompt = f"""You are the research agent for this local xgenius campaign.
-Read CLAUDE.md, {self.config.project.research_goal}, and `xgenius journal read` first.
-Use `xgenius status --json` and `xgenius budget --json` for operational state.
-Submit experiments ONLY through `xgenius submit --spec FILE --json`.
-Job manifests need a stable unique key, argv array, source_files, runner, resource request,
-and declared output artifacts. Reuse the same key when retrying the same submission.
-Do not execute heavyweight experiments directly or start another campaign controller.
-Do not modify shared inputs/environments, push commits, create issues/PRs, upload data,
-or use remote compute. This is trusted local mode, not an OS sandbox.
-Events for this turn:
-{json.dumps(events, indent=2)}
-If events you need to handle arrive after this batch, return "continue" to receive
-them in the next turn. Never acknowledge an event ID outside the batch above.
-When finished, append your findings and next steps with `xgenius journal write`.
-Write a JSON object to {result_path} with exactly these fields:
-turn_id: "{turn_id}"
-acknowledged_events: array of event IDs from the batch you actually handled
-disposition: "continue", "wait" (only with pending jobs), "blocked", or "complete"
-reason: a non-empty explanation.
-journal: ".xgenius/journal.md" (must have been updated during this turn).
-Do not claim scientific success merely because a process exited zero.
-"""
-        atomic_json(directory / "prompt.json", {"prompt": prompt})
-        process = start_session(self.config, prompt, turn_id, directory)
-        with _connect(self.state.path) as c:
-            c.execute("UPDATE turns SET state='running' WHERE id=?", (turn_id,))
-        return turn_id, process, directory
-
-    def _end_turn(self, turn_id, process, directory):
-        try:
-            if process.returncode != 0:
-                raise ValueError(f"Agent exited {process.returncode}; see {directory}")
-            result = read_json(directory / "result.json")
-            self.state.accept_turn(turn_id, result)
-            if self.state.campaign()["state"] not in ("paused", "stopping"):
-                disposition = result["disposition"]
-                has_work = any(a["status"] in ACTIVE for a in self.state.attempts())
-                if disposition == "complete":
-                    for a in self.state.attempts():
-                        if a["status"] == "queued":
-                            self.cancel(a["id"])
-                    has_work = any(a["status"] in ACTIVE for a in self.state.attempts())
-                    target = "finishing" if has_work else "completed"
-                elif disposition == "wait":
-                    target = ("waiting" if has_work else
-                              "running" if self.state.pending_events() else "blocked")
-                elif disposition == "blocked":
-                    target = "blocked"
-                else:
-                    target = "running"
-                    self.state.event("continue", {"reason": result["reason"]})
-                self.state.set_campaign(target, result["reason"])
-        except (ValueError, OSError) as e:
-            with _connect(self.state.path) as c:
-                c.execute("UPDATE turns SET state='failed',ended=?,result=? WHERE id=?",
-                          (time.time(), json.dumps({"error": str(e)}), turn_id))
-                c.execute("UPDATE campaign SET failures=failures+1 WHERE id=?", (self.state.id,))
-            if self.state.campaign()["failures"] > self.local.retries:
-                self.state.set_campaign("blocked", str(e))
-
-    def run(self, *, no_agent: bool = False, once: bool = False):
-        self.doctor(sandbox=False)
-        with _connect(self.state.path) as c:
-            c.execute("BEGIN IMMEDIATE")
-            existing = c.execute("SELECT controller FROM campaign WHERE id=?", (self.state.id,)).fetchone()[0]
-            if existing and alive(json.loads(existing)):
-                raise ValueError("A controller is already running for this campaign")
-            c.execute("UPDATE campaign SET controller=?,started=COALESCE(started,?) WHERE id=?",
-                      (json.dumps(own_handle(self.state.id)), time.time(), self.state.id))
-        turn = None
-        try:
-            self.reconcile()
-            with _connect(self.state.path) as c:
-                old_turns = [dict(r) for r in c.execute(
-                    "SELECT * FROM turns WHERE state IN ('starting','running','maintenance')")]
-            if old_turns:
-                if len(old_turns) == 1 and not old_turns[0]["handle"]:
-                    path = self.state.root / "turns" / old_turns[0]["id"] / "agent-handle.json"
-                    if path.exists():
-                        handle = read_json(path)
-                        if handle.get("token") != old_turns[0]["id"]:
-                            raise ValueError("Agent start receipt ownership mismatch")
-                        old_turns[0]["handle"] = json.dumps(handle)
-                if len(old_turns) != 1 or not old_turns[0]["handle"]:
-                    self.state.set_campaign("blocked", "Previous agent launch has no verified handle; recovery required")
+        invocations = self._invocations(turn["id"])
+        if not invocations or any(i["state"] in ("armed", "running", "uncertain", "reserved") for i in invocations):
+            return
+        completed = next((i for i in invocations if i["kind"] == turn["kind"] and i["state"] == "completed"), None)
+        if completed:
+            try:
+                agent_worker.accept_result(self.state, turn["id"])
+                return
+            except (OSError, sqlite3.Error) as error:
+                if turn["kind"] == "report":
+                    self._error(errors, f"report-publication-{turn['id']}", "report_publication", error, turn["id"])
                     return
-                old = old_turns[0]
-                directory = self.state.root / "turns" / old["id"]
-                process = AgentSession(json.loads(old["handle"]), directory)
-                if old["kind"] == "maintenance":
-                    if process.poll() is None:
-                        raise ValueError("A maintenance session is still active")
-                    with _connect(self.state.path) as c:
-                        c.execute("UPDATE turns SET state='failed',ended=? WHERE id=?",
-                                  (time.time(), old["id"]))
-                    self.state.event("maintenance_interrupted", {"turn_id": old["id"]})
+                reason = f"Owned handoff storage failed: {type(error).__name__}: {str(error)[:4000]}"
+            except ERRORS as error:
+                reason = f"Owned handoff rejected: {type(error).__name__}: {str(error)[:4000]}"
+        else:
+            reason = "; ".join(i["reason"] for i in invocations if i["reason"]) or "Provider operation did not complete"
+        self.state.finish_turn(turn["id"], reason)
+        errors.append({"category": "provider_result", "work_id": turn["id"], "error": reason})
+
+    def _retire_pending_turn(self, *, no_agent):
+        turn = self._turn()
+        if not turn:
+            return
+        if any(i["kind"] == turn["kind"] and i["state"] == "completed" for i in self._invocations(turn["id"])):
+            return
+        current = self.state.campaign()
+        with self.state.db.read() as conn:
+            explicit = conn.execute("SELECT 1 FROM maintenance WHERE turn_id=? AND origin='operator' AND state='running'",
+                                    (turn["id"],)).fetchone()
+        closed = not explicit and (current["generation_state"] != ("sealed" if turn["kind"] == "final_analysis" else "open"))
+        if (no_agent or current["operator_mode"] not in (("ready", "running", "stopped") if explicit else ("ready", "running"))
+                or turn["revision"] != current["revision"] or closed):
+            if not any(i["state"] in ("armed", "running", "uncertain") for i in self._invocations(turn["id"])):
+                self.state.finish_turn(turn["id"], "Pending inference fenced by current control/no-agent policy", cancelled=True)
+
+    def _ledger(self):
+        path, expected = self.state.ledger_identity()
+        if self.ledger is None:
+            self.ledger = ResourceLedger(path, expected_id=expected or None)
+        if self.ledger.path != path or (expected and self.ledger.id != expected):
+            raise ValueError("Controller ledger differs from the recorded campaign identity")
+        if not expected:
+            self.state.bind_ledger(path, self.ledger.id)
+        return self.ledger
+
+    def _grant(self, work_id, kind, resources, *, native):
+        current = self.state.campaign()
+        allocation = self.state.allocation(work_id, kind, {"resources": asdict(resources)}, current["revision"])
+        ledger = self._ledger()
+        try:
+            ledger.request(allocation["token"], self.state.id, work_id, kind, resources,
+                           {"kind": "campaign", "state_dir": str(self.state.root),
+                            "generation": current["generation"], "revision": current["revision"]},
+                           native=native)
+            grant = ledger.reserve(allocation["token"])
+            if grant["state"] == "rejected":
+                raise ValueError(grant["reason"])
+            if grant["state"] == "released":
+                raise AdmissionClosed("Admission token was revoked")
+            if grant["state"] != "granted":
+                raise AdmissionWait(grant["reason"] or "Waiting for machine capacity")
+            if not self.state.granted(grant["token"]):
+                raise AdmissionWait("Concurrent admission filled the campaign envelope")
+            return grant
+        except AdmissionWait:
+            raise
+        except ERRORS:
+            self.state.release_pending(allocation["token"])
+            raise
+
+    def _launch_attempt(self, attempt):
+        resources = Resources(attempt["cpus"], attempt["memory_mb"], tuple(json.loads(attempt["gpus"])))
+        spec = json.loads(self.state.attempt(attempt["id"])["spec"])
+        runner = self.config.runners[spec["runner_name"]]
+        grant = self._grant(attempt["id"], "attempt", resources, native=runner.kind == "native")
+        envelope = workspace.prepare_envelope(self.state, self.config, attempt["id"], grant)
+        return worker.start(self.state, envelope)
+
+    def _launch_turn(self, turn):
+        briefing.publish(self.state, turn["packet_id"])
+        kinds = ("canary", turn["kind"]) if self.config.agent.sandbox else (turn["kind"],)
+        self.state.reserve_invocations(turn["id"], turn["kind"], kinds)
+        invocations = self._invocations(turn["id"])
+        if any(i["state"] in ("armed", "running", "uncertain") for i in invocations):
+            return None
+        invocation = next((i for i in invocations if i["state"] == "reserved"), None)
+        if invocation is None:
+            return None
+        grant = self._grant(turn["id"], turn["kind"], self.config.agent.resources, native=True)
+        if self.adapter_revision != self.config.revision:
+            self.adapter = agent.inspect_provider(self.config.agent)
+            self.adapter_revision = self.config.revision
+        envelope = agent.prepare(self.state, self.config, turn["id"], invocation["id"], grant, adapter=self.adapter)
+        return worker.start(self.state, envelope)
+
+    def _compensate(self, work_id):
+        with self.state.db.read() as conn:
+            rows = list(conn.execute("""SELECT token FROM allocations WHERE work_id=?
+                AND state IN ('requested','granted')""", (work_id,)))
+        for row in rows:
+            self.state.release_pending(row["token"])
+
+    def _flush(self, errors):
+        try:
+            worker.flush_releases(self.state)
+        except ERRORS as error:
+            self._error(errors, "resource-recovery", "recovery", error)
+
+    def _owned_launches(self, work_id, kind):
+        with self.state.db.read() as conn:
+            if kind == "attempt":
+                return list(conn.execute("SELECT nonce FROM launches WHERE work_id=? AND phase IN ('armed','executing')",
+                                         (work_id,)))
+            return list(conn.execute("""SELECT l.nonce FROM launches l JOIN invocations i ON i.nonce=l.nonce
+                WHERE i.turn_id=? AND l.phase IN ('armed','executing')""", (work_id,)))
+
+    def _advance_closure(self, errors, *, no_agent, admit):
+        current = self.state.campaign()
+        if current["generation_state"] == "open" or current["operator_mode"] == "paused" or self._turn():
+            return
+        if current["generation_state"] == "closed" and current["closure"]:
+            return
+        try:
+            decision = current["closure"]
+            if decision and decision["outcome"] in ("assessed", "unassessed", "needs_more_work"):
+                self.state.close_generation(decision["view_id"], decision["outcome"], decision["reason"],
+                                            assessed_turn=decision["assessed_turn"])
+                return
+            view = reporting.seal_view(self.state, kind="closure")
+            with self.state.db.read() as conn:
+                generation = conn.execute("SELECT * FROM generations WHERE id=?", (current["generation"],)).fetchone()
+                final = conn.execute("SELECT * FROM turns WHERE id=?", (generation["final_turn"],)).fetchone()
+                quiescent = self.state._quiescent(conn)
+                covered = reporting.covered_finalize(conn, view["id"]) if view["metadata"]["operationally_ready"] else None
+                settings = json.loads(conn.execute("SELECT content FROM configs WHERE id=?",
+                                                   (current["config_revision"],)).fetchone()[0])
+            if not quiescent or not view["metadata"]["operationally_ready"]:
+                if current["blockers"]:
+                    self.state.close_generation(view["id"], "incomplete", "Owned work or recovery remains unresolved")
+                return
+            if current["operator_mode"] in ("stopping", "stopped"):
+                self.state.close_generation(view["id"], "incomplete", "Operator stop; no automatic final analysis")
+            elif final:
+                result = json.loads(final["result"]) if final["result"] else None
+                if result and result["disposition"] != "finalize":
+                    outcome, reason = "needs_more_work", result["reason"]
+                elif result and result.get("assessment"):
+                    outcome, reason = "assessed", result["reason"]
                 else:
-                    turn = (old["id"], process, directory)
-            if self.local.sandbox and not turn:
-                from xgenius.agent_policy import sandbox_preflight
-                sandbox_preflight(self.config)
-            if self.state.campaign()["state"] in ("ready", "stopped"):
-                self.state.set_campaign("running")
-            while True:
-                self.reconcile()
-                campaign = self.state.campaign()
-                if any(a["status"] == "recovery_required" for a in self.state.attempts()):
-                    self.state.set_campaign("blocked", "Attempt recovery required; reservations retained")
-                    campaign = self.state.campaign()
-                active = any(a["status"] in ACTIVE for a in self.state.attempts())
-                if time.time() - campaign["started"] >= self.local.max_seconds and campaign["state"] not in (
-                        "stopping", "stopped", "completed"):
-                    self.control("stop")
-                    self.state.set_campaign("stopping", "Campaign elapsed budget exhausted")
-                if turn:
-                    tid, process, directory = turn
-                    if process.poll() is not None:
-                        self._end_turn(tid, process, directory)
-                        turn = None
-                campaign = self.state.campaign()
-                if campaign["state"] in ("stopping", "finishing") and not active and not turn:
-                    self.state.set_campaign("stopped" if campaign["state"] == "stopping" else "completed")
+                    outcome, reason = "unassessed", final["reason"] or "Final invocation did not return complete owned inventory coverage"
+                self.state.close_generation(view["id"], outcome, reason,
+                                            assessed_turn=final["id"] if outcome == "assessed" else None)
+            elif covered:
+                self.state.close_generation(view["id"], "assessed", "Finalize turn already assessed the complete sealed inventory",
+                                            assessed_turn=covered)
+            else:
+                budget = self.state.budget()
+                elapsed, calls = budget["elapsed_admission_seconds"], budget["managed_invocations"]
+                no_time = not elapsed["unlimited"] and elapsed["remaining"] == 0
+                no_calls = not calls["unlimited"] and calls["remaining"] < (2 if settings["agent"]["sandbox"] else 1)
+                if no_agent or no_time or no_calls:
+                    reason = "Final analysis disabled by no-agent policy" if no_agent else "No final-analysis admission allowance remains"
+                    self.state.close_generation(view["id"], "unassessed", reason)
+                elif admit:
+                    try:
+                        briefing.prepare(self.state, "final_analysis", view_id=view["id"])
+                    except ERRORS as error:
+                        turn = self._turn()
+                        if turn:
+                            self.state.finish_turn(turn["id"], str(error), cancelled=True)
+                        self.state.close_generation(view["id"], "unassessed", f"Final packet preparation failed: {str(error)[:2000]}")
+                        errors.append({"category": "closure", "error": str(error)[:4000]})
+        except ERRORS as error:
+            self._error(errors, "closure", "closure", error)
+
+    def step(self, *, no_agent=False, admit=True) -> dict:
+        if self.handle is None or self.state.campaign()["controller"] != canonical(self.handle).decode():
+            raise ValueError("Controller step requires its exact acquired ownership")
+        recovery = self.reconcile()
+        errors = list(recovery["errors"])
+        clock = time.monotonic()
+        minimum = self.clock_anchor[1] + clock - self.clock_anchor[0] if self.clock_anchor else None
+        elapsed = self.state.tick(minimum_elapsed=minimum)
+        self.clock_anchor = (clock, elapsed) if self.state.campaign()["started"] is not None else None
+        self._retire_pending_turn(no_agent=no_agent)
+        self._flush(errors)
+        self.state.converge_stop()
+        current = self.state.campaign()
+        if current["operator_mode"] in ("stopping", "stopped"):
+            self._advance_closure(errors, no_agent=True, admit=False)
+        current = self.state.campaign()
+        maintenance = self.state.pending_maintenance()
+        scoped = maintenance is not None or (self._turn() is not None and self._turn()["kind"] in ("compact", "report"))
+        if (current["operator_mode"] not in ("ready", "running", "stopped")
+                or (current["operator_mode"] == "stopped" or current["generation_state"] == "closed") and not scoped):
+            return {"campaign": current, "recovery": recovery, "errors": errors, "started": [], "waiting": []}
+        try:
+            config = self.config if self.fixed_config else load_config(self.state.root.parent / "xgenius.toml")
+            self.state.configure(config)
+            self.state.resolve_blocker("configuration")
+        except ERRORS as error:
+            self._error(errors, "configuration", "configuration", error)
+            self._advance_closure(errors, no_agent=True, admit=False)
+            return {"campaign": self.state.campaign(), "recovery": recovery, "errors": errors, "started": [], "waiting": []}
+        self.config = config
+        try:
+            require_space(config.storage)
+            if current["generation_state"] == "open" and (not no_agent or (config.root / config.project.research_goal).exists()):
+                journal.ingest_goal(self.state, config)
+            if self._turn() is None:
+                journal.ingest_notes(self.state)
+            self.state.resolve_blocker("admission-storage")
+            self.state.resolve_blocker("packet")
+        except ERRORS as error:
+            self._error(errors, "admission-storage", "storage_or_source", error)
+        self._retire_pending_turn(no_agent=no_agent)
+        self.state.converge_stop()
+        budget = self.state.budget()
+        allowance = budget["managed_invocations"]
+        if allowance["unlimited"] or allowance["remaining"] >= 2 * config.agent.invocation_bundle:
+            self.state.resolve_blocker("invocation-budget")
+        if (not budget["elapsed_admission_seconds"]["unlimited"]
+                and budget["elapsed_admission_seconds"]["remaining"] == 0):
+            self.state.close_admission("Elapsed-admission budget exhausted")
+            self._retire_pending_turn(no_agent=no_agent)
+            self.state.converge_stop()
+        current = self.state.campaign()
+        started, waiting = [], []
+        self._advance_closure(errors, no_agent=no_agent, admit=admit)
+        current = self.state.campaign()
+        if admit and not current["blockers"]:
+            turn = self._turn()
+            if not no_agent and turn is None and current["generation_state"] != "sealed":
+                journal.automatic_compaction(self.state)
+                maintenance = self.state.pending_maintenance()
+                if maintenance:
+                    try:
+                        view_id = None
+                        if maintenance["kind"] == "report":
+                            view_id = reporting.seal_view(self.state, maintenance_id=maintenance["id"],
+                                                          **json.loads(maintenance["options"]))["id"]
+                        briefing.prepare(self.state, maintenance["kind"], maintenance_id=maintenance["id"], view_id=view_id)
+                        turn = self._turn()
+                    except AdmissionWait as error:
+                        waiting.append({"work_id": maintenance["id"], "reason": str(error)})
+                    except ERRORS as error:
+                        self.state.fail_maintenance(maintenance["id"], str(error))
+                        errors.append({"category": "maintenance", "work_id": maintenance["id"], "error": str(error)})
+            if not no_agent and turn is None and current["generation_state"] == "open" and self.state.reasoning_due():
+                try:
+                    briefing.prepare(self.state)
+                    turn = self._turn()
+                except ERRORS as error:
+                    self._error(errors, "packet", "packet", error)
+            with self.state.db.read() as conn:
+                attempt = conn.execute("""SELECT id,admission_order,cpus,memory_mb,gpus FROM attempts
+                    WHERE status='queued' ORDER BY admission_order,id LIMIT 1""").fetchone()
+            choices = []
+            if attempt and current["generation_state"] == "open":
+                choices.append((attempt["admission_order"], "attempt", dict(attempt)))
+            if turn and not no_agent:
+                choices.append((turn["admission_order"], "turn", turn))
+            for _, kind, work in sorted(choices, key=lambda item: item[0]):
+                try:
+                    launched = self._launch_attempt(work) if kind == "attempt" else self._launch_turn(work)
+                    if launched:
+                        started.append(launched.key.work_id)
+                except AdmissionWait as error:
+                    waiting.append({"work_id": work["id"], "reason": str(error)})
                     break
-                if campaign["state"] in ("paused", "blocked", "completed", "stopped") and not turn:
+                except BudgetExhausted as error:
+                    self._compensate(work["id"])
+                    if kind == "turn":
+                        self.state.finish_turn(work["id"], str(error), cancelled=True)
+                        if work["kind"] == "final_analysis":
+                            with self.state.db.read() as conn:
+                                view_id = conn.execute("SELECT view_id FROM generations WHERE id=?", (current["generation"],)).fetchone()[0]
+                            self.state.close_generation(view_id, "unassessed", str(error))
+                    if current["generation_state"] == "open" and (error.dimension == "elapsed"
+                            or (error.dimension == "invocations" and self.state.campaign()["invocations"])):
+                        self.state.close_admission(str(error))
+                    elif error.dimension == "gpu_hours":
+                        self.state.fail_unlaunched_attempt(work["id"], str(error))
+                    else:
+                        self._error(errors, "invocation-budget", "budget", error, work["id"])
+                    waiting.append({"work_id": work["id"], "reason": str(error)})
                     break
-                self.dispatch()
-                if not no_agent and not turn and campaign["state"] in ("running", "waiting"):
-                    with _connect(self.state.path) as c:
-                        count = c.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-                    if count >= self.local.max_turns:
-                        self.control("stop")
-                    elif self.state.pending_events():
-                        turn = self._begin_turn()
-                if once or (no_agent and not any(a["status"] in ACTIVE for a in self.state.attempts())):
+                except AdmissionClosed as error:
+                    self._compensate(work["id"])
+                    waiting.append({"work_id": work["id"], "reason": str(error)})
+                    if kind == "turn":
+                        self.state.finish_turn(work["id"], str(error), cancelled=True)
                     break
-                time.sleep(0.25)
-        except KeyboardInterrupt:
-            self.control("pause")
-        finally:
-            with _connect(self.state.path) as c:
-                c.execute("UPDATE campaign SET controller=NULL WHERE id=?", (self.state.id,))
+                except UncertainExecution as error:
+                    errors.append({"category": "uncertain_launch", "work_id": work["id"], "error": str(error)})
+                    break
+                except ERRORS as error:
+                    active = self._owned_launches(work["id"], kind)
+                    if active:
+                        reason = f"Launch has no established durable outcome: {type(error).__name__}: {str(error)[:4000]}"
+                        for row in active:
+                            self.state.launch_problem(row["nonce"], reason)
+                        errors.append({"category": "uncertain_launch", "work_id": work["id"], "error": reason})
+                        break
+                    self._compensate(work["id"])
+                    reason = f"Pre-execution preparation failed: {type(error).__name__}: {str(error)[:4000]}"
+                    if kind == "attempt":
+                        if self.state.attempt(work["id"])["status"] == "queued":
+                            self.state.fail_unlaunched_attempt(work["id"], reason)
+                    else:
+                        self.state.finish_turn(work["id"], reason)
+                        if work["kind"] == "final_analysis":
+                            with self.state.db.read() as conn:
+                                view_id = conn.execute("SELECT view_id FROM generations WHERE id=?", (current["generation"],)).fetchone()[0]
+                            self.state.close_generation(view_id, "unassessed", reason)
+                    errors.append({"category": "preparation", "work_id": work["id"], "error": reason})
+        self._retire_pending_turn(no_agent=no_agent)
+        self._flush(errors)
+        self.state.converge_stop()
+        self._advance_closure(errors, no_agent=no_agent, admit=False)
+        return {"campaign": self.state.campaign(), "recovery": recovery, "errors": errors,
+                "started": started, "waiting": waiting}
+
+    def run(self, *, no_agent=False, once=False, poll_seconds=0.25):
+        with self.state.db.read() as conn:
+            cutoff = conn.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
+        result = self._run_owned(no_agent=no_agent, once=once, poll_seconds=poll_seconds)
+        result["campaign"] = self.state.campaign()
+        if no_agent:
+            with self.state.db.read() as conn:
+                condition = """FROM events e JOIN attempts a ON a.collection_event=e.id
+                    WHERE e.seq>? AND (a.status IN ('failed','timed_out','interrupted','not_started')
+                    OR a.validation='invalid' OR a.collection='failed')"""
+                count = conn.execute("SELECT COUNT(*) " + condition, (cutoff,)).fetchone()[0]
+                failures = [dict(row) for row in conn.execute(
+                    "SELECT a.id,a.status,a.validation,a.reason,a.collection_reason " + condition + " LIMIT 100", (cutoff,))]
+            result.update(failed=count, failed_work=failures)
+        return result
+
+    def _run_owned(self, *, no_agent, once, poll_seconds):
+        from xgenius.protocol import number
+        number(poll_seconds, "poll interval")
+        with self:
+            initial = self.step(no_agent=no_agent, admit=False)
+            current = self.state.campaign()
+            if current["blockers"]:
+                return initial
+            if current["operator_mode"] == "ready" and current["generation_state"] != "closed":
+                self.state.control("run", identifier(), current["revision"])
+            try:
+                while True:
+                    result = self.step(no_agent=no_agent)
+                    if once:
+                        return result
+                    current = self.state.campaign()
+                    with self.state.db.read() as conn:
+                        live = conn.execute("SELECT 1 FROM launches WHERE phase IN ('armed','executing') LIMIT 1").fetchone()
+                        queued = conn.execute("SELECT 1 FROM attempts WHERE status='queued' LIMIT 1").fetchone()
+                        maintenance = conn.execute("SELECT 1 FROM maintenance WHERE state='pending' AND revision=? LIMIT 1",
+                                                   (current["revision"],)).fetchone()
+                        settling = conn.execute("""SELECT 1 FROM attempts WHERE collection='pending'
+                            AND status IN ('completed','failed','cancelled','timed_out','interrupted','not_started') LIMIT 1""").fetchone()
+                        settling = settling or conn.execute("SELECT 1 FROM allocations WHERE state='release_pending' LIMIT 1").fetchone()
+                    if current["blockers"] or (not live and not self._turn() and not settling and (current["operator_mode"] != "running"
+                                     or current["generation_state"] == "closed"
+                                     or (not queued and (no_agent or (not self.state.reasoning_due() and not maintenance))))):
+                        return result
+                    time.sleep(poll_seconds)
+            except KeyboardInterrupt:
+                current = self.state.campaign()
+                if current["operator_mode"] in ("ready", "running"):
+                    self.state.control("pause", identifier(), current["revision"])
+                return {"campaign": self.state.campaign(), "reason": "Controller interrupted; armed work retains its deadline"}

@@ -1,68 +1,48 @@
-"""Independent, deadline-bounded provider session with a durable exit receipt."""
+"""Read only the result belonging to a successfully owned provider invocation."""
 
-import os
+import json
 from pathlib import Path
-import signal
-import subprocess
-import sys
-import time
-import traceback
 
-from xgenius.backends import own_handle
-from xgenius.config import load_config
-from xgenius.payload import WindowsPayload
-from xgenius.workspace import atomic_json, read_json
+from xgenius.evidence import Capture, contained, parse_json
+from xgenius.protocol import HANDOFF_BYTES, Handoff
 
 
-def main(manifest):
-    request = read_json(Path(manifest))
-    root = Path(manifest).parent
-    config = load_config(request["config_path"])
-    local = config.local
-    atomic_json(root / "agent-handle.json", own_handle(request["id"]))
-    command = local.command or config.watcher.command_args()
-    argv = [*command, *(["--experimental", "--sandbox"] if local.sandbox else []),
-            "-p", request["prompt"]]
-    env = os.environ.copy()
-    if Path(command[0]).stem.lower() == "claude":
-        env.pop("ANTHROPIC_API_KEY", None)
-    if local.copilot_home:
-        env["COPILOT_HOME"] = local.copilot_home
-    process = None
-    code, error = 1, None
-    started = time.monotonic()
-    try:
-        with (root / "stdout.log").open("wb") as out, (root / "stderr.log").open("wb") as err:
-            if os.name == "nt":
-                process = WindowsPayload(argv, str(Path(config.config_path).parent), env, out, err,
-                                         {"cpus": local.cpus, "memory_mb": local.memory_mb})
-            else:
-                process = subprocess.Popen(argv, cwd=Path(config.config_path).parent, env=env,
-                                           stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                           start_new_session=True)
-            while process.poll() is None:
-                if time.monotonic() - started >= local.turn_timeout:
-                    raise TimeoutError("Agent walltime limit exceeded")
-                time.sleep(0.1)
-            code = process.poll()
-    except Exception as e:
-        error = f"{type(e).__name__}: {e}"
-        traceback.print_exc()
-    finally:
-        if process is not None:
-            if os.name == "nt":
-                process.close()
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-        atomic_json(root / "agent-completion.json", {
-            "token": request["id"], "returncode": code, "error": error,
-            "elapsed": time.monotonic() - started, "provider_usage": None,
-        })
+def read_result(state, turn_id: str) -> dict:
+    with state.db.read() as conn:
+        turn = conn.execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone()
+        row = conn.execute("""SELECT i.id,l.envelope,l.receipt FROM invocations i
+            JOIN launches l ON l.nonce=i.nonce WHERE i.turn_id=? AND i.kind!='canary'
+            AND i.state='completed' AND l.phase='quiescent' ORDER BY i.bundle_position DESC LIMIT 1""",
+                           (turn_id,)).fetchone()
+    if not turn or not row:
+        raise ValueError("A result requires a successfully completed owned provider invocation")
+    envelope = json.loads(row["envelope"])
+    receipt = json.loads(row["receipt"])
+    owned = receipt.get("metadata", {}).get("result_capture", {})
+    if owned.get("error"):
+        raise ValueError(f"Owned provider result is invalid: {owned['error']}")
+    path = contained(state.root, envelope["metadata"]["result_path"])
+    capture = Capture.read(path, HANDOFF_BYTES)
+    if capture.digest != owned.get("digest") or len(capture.body) != owned.get("bytes"):
+        raise ValueError("Provider result changed after its owned completion")
+    result = parse_json(capture.body)
+    if not isinstance(result, dict) or result.get("turn_id") != turn_id or result.get("packet_id") != turn["packet_id"]:
+        raise ValueError("Provider result does not belong to its exact turn and packet")
+    if turn["kind"] in ("research", "final_analysis"):
+        Handoff.parse(result)
+    return {"content": result, "bytes": capture.body, "digest": capture.digest,
+            "invocation_id": row["id"], "provider_receipt": receipt}
 
 
-if __name__ == "__main__":
-    main(sys.argv[1])
+def accept_result(state, turn_id: str) -> dict:
+    value = read_result(state, turn_id)
+    with state.db.read() as conn:
+        kind = conn.execute("SELECT kind FROM turns WHERE id=?", (turn_id,)).fetchone()[0]
+    if kind == "compact":
+        state.accept_compaction(value["content"], invocation_id=value["invocation_id"])
+    elif kind == "report":
+        from xgenius.reporting import publish_report
+        publish_report(state, value["content"].get("view_id"), value=value["content"], invocation_id=value["invocation_id"])
+    else:
+        state.accept_handoff(Handoff.parse(value["content"]), invocation_id=value["invocation_id"])
+    return value["content"]
