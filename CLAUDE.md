@@ -13,7 +13,8 @@ pip install -e .           # editable install for development
 pip install .              # standard install
 ```
 
-Dependencies: `rich`, `paramiko`, `scp`, `tomli_w`, `psutil`, and Windows-only `pywin32`. Requires Python 3.11+ (`tomllib` in stdlib).
+Dependencies: `rich`, `markdown-it-py`, `paramiko`, `scp`, `tomli_w`, `psutil`, and Windows-only `pywin32`. Requires Python 3.11+ (`tomllib` in stdlib).
+The optional `dashboard-chat` extra installs the pinned Copilot SDK for the read-only dashboard observer; ordinary dashboard use does not require it.
 
 ## Running Tests
 
@@ -49,7 +50,8 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 - `xgenius/container.py` — `ContainerManager`: step-by-step Docker→Singularity build with structured output
 - `xgenius/watcher.py` — Background daemon: polls for `.done` markers, syncs DB from squeue, pulls results + logs, triggers a fresh configured-agent session
 - `xgenius/templates.py` — SBATCH template loading, `{{PLACEHOLDER}}` rendering, trap-based completion epilog
-- `xgenius/dashboard.py` — Web-based DB browser for human inspection
+- `xgenius/dashboard.py`, `static/dashboard.{css,js}` — read-only loopback research dashboard; Markdown rendering disables raw HTML and all assets are packaged locally
+- `xgenius/dashboard_data.py`, `dashboard_chat.py`, `static/dashboard-chat.js` — opt-in, on-demand Copilot observer with curated read-only evidence tools; no research-session control, arbitrary files/commands, or campaign-state writes
 
 **Safety enforcement**: Local resource reservations and owned process supervision do not constrain an unrestricted agent. Legacy SLURM operations use `SafetyValidator`, containerization, and scheduler limits. Remote paths use POSIX semantics even on Windows.
 
@@ -65,6 +67,7 @@ python -m pytest tests/test_safety.py -v      # safety tests only
 ## Key Patterns
 
 - All CLI commands support `--json` for structured output (critical for LLM consumption)
+- Local experiment manifests can record `hypothesis_description` alongside `hypothesis_id`. Use `db.hypothesis_statement()` to distinguish real statements from legacy ID/submission placeholders; dashboard journal context never backfills research records.
 - Safety validation happens before every remote operation in `jobs.py` — the LLM cannot bypass it
 - Job IDs are captured from `sbatch` stdout and tracked in the SQLite DB
 - SBATCH scripts get a trap-based completion epilog that writes `.done` marker files on the cluster

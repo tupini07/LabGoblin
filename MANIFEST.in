@@ -3,4 +3,5 @@ include README.md
 include CITATION.cff
 include CLAUDE.md
 recursive-include xgenius/sbatch_templates *.sbatch
+recursive-include xgenius/static *.css *.js
 recursive-include examples *

@@ -28,6 +28,12 @@ per-attempt snapshot. Write outputs under the XGENIUS_OUTPUT_DIR environment
 variable; read declared inputs through XGENIUS_INPUT_NAME. Metrics may be a
 numeric object in output/metrics.json. Do not run heavy work outside the queue.
 
+When assigning a hypothesis_id, also supply hypothesis_description: a plain-language
+statement of what is being tested, not a copy of the ID. Reuse the same statement
+for experiments testing the same hypothesis. For an existing record, use
+`xgenius db hypothesis-update --id H --description "Statement"` to deliberately
+add or revise its statement, and record rationale and outcomes in the journal.
+
 Keep declared source inputs and shared environments unchanged. New code,
 environments, scratch, artifacts, and reports belong in the campaign workspace.
 No automatic pushes, issue/PR creation, uploads, or remote compute. Do not

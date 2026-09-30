@@ -7,7 +7,7 @@ import sqlite3
 import time
 import uuid
 
-from xgenius.db import XGeniusDB, _connect
+from xgenius.db import XGeniusDB, _connect, hypothesis_statement
 
 
 ACTIVE = ("queued", "starting", "running", "recovery_required")
@@ -146,8 +146,22 @@ class LocalState:
                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                        len(spec["gpus"]), spec["cpus"], f'{spec["memory_mb"]}M',
                        str(spec["seconds"]), spec["output"]))
-        if spec.get("hypothesis_id") and not self.db.get_hypothesis(spec["hypothesis_id"]):
-            self.db.add_hypothesis(spec["hypothesis_id"], spec["hypothesis_id"])
+            hid = spec.get("hypothesis_id", "")
+            if hid:
+                description = spec.get("hypothesis_description", "")
+                hypothesis = c.execute("SELECT * FROM hypotheses WHERE hypothesis_id=?", (hid,)).fetchone()
+                now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                if hypothesis is None:
+                    c.execute("INSERT INTO hypotheses(hypothesis_id,description,created_at,updated_at) VALUES(?,?,?,?)",
+                              (hid, description, now, now))
+                elif description:
+                    existing = hypothesis_statement(dict(hypothesis))
+                    if existing and existing != description:
+                        raise ValueError("Hypothesis already has a different statement; use "
+                                         "xgenius db hypothesis-update --description for an intentional revision")
+                    if not existing:
+                        c.execute("UPDATE hypotheses SET description=?,updated_at=? WHERE hypothesis_id=?",
+                                  (description, now, hid))
         return attempt_id
 
     def transition(self, attempt_id: str, status: str, *, reason: str = "",

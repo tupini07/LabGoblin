@@ -7,6 +7,7 @@ setup(
     include_package_data=True,
     install_requires=[
         'rich',
+        'markdown-it-py>=3.0',
         'paramiko',
         'scp',
         'tomli_w',
@@ -14,7 +15,10 @@ setup(
         'pywin32>=306; sys_platform == "win32"',
     ],
     package_data={
-        'xgenius': ['sbatch_templates/*'],
+        'xgenius': ['sbatch_templates/*', 'static/*.css', 'static/*.js'],
+    },
+    extras_require={
+        'dashboard-chat': ['github-copilot-sdk==1.0.15'],
     },
     entry_points={
         'console_scripts': [

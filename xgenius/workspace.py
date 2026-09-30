@@ -11,6 +11,7 @@ import sys
 import re
 
 from xgenius.local_config import positive, strings
+from xgenius.db import hypothesis_statement
 from xgenius.state import identifier
 
 
@@ -66,7 +67,7 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None) -> dict:
         raise ValueError("Job manifest must be a JSON object")
     unknown = set(request) - {
         "key", "runner", "argv", "cwd", "source_files", "cpus", "memory_mb", "gpus",
-        "seconds", "environment", "experiment_id", "hypothesis_id", "artifacts",
+        "seconds", "environment", "experiment_id", "hypothesis_id", "hypothesis_description", "artifacts",
         "validators", "input_validators", "hard_memory_limit",
     }
     if unknown:
@@ -84,6 +85,14 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None) -> dict:
     for field, default in (("cwd", "."), ("experiment_id", key), ("hypothesis_id", "")):
         if not isinstance(request.get(field, default), str):
             raise ValueError(f"{field} must be a string")
+    if "hypothesis_description" in request:
+        description = request["hypothesis_description"]
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("hypothesis_description must be a non-empty string")
+        if not request.get("hypothesis_id", "").strip():
+            raise ValueError("hypothesis_description requires a hypothesis_id")
+        if not hypothesis_statement({"hypothesis_id": request["hypothesis_id"], "description": description}):
+            raise ValueError("hypothesis_description must describe the claim, not repeat an ID or submission placeholder")
     if type(request.get("hard_memory_limit", False)) is not bool:
         raise ValueError("hard_memory_limit must be boolean")
     cpus = request.get("cpus", 1)
@@ -163,6 +172,7 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None) -> dict:
         "environment": {**local.environment, **env},
         "experiment_id": request.get("experiment_id", key),
         "hypothesis_id": request.get("hypothesis_id", ""),
+        "hypothesis_description": request.get("hypothesis_description", "").strip(),
         "output": str(output), "root": str(root), "artifacts": outputs,
         "validators": validators, "input_validators": input_validators, "host_python": sys.executable,
         "config_path": config.config_path,

@@ -1319,7 +1319,7 @@ def cmd_steer(args):
 def cmd_dashboard(args):
     """Start the web dashboard for inspecting the DB."""
     from xgenius.dashboard import run_dashboard
-    run_dashboard(config_path=args.config, port=args.port)
+    run_dashboard(config_path=args.config, port=args.port, chat=args.chat)
 
 
 # --- Watch ---
@@ -1548,6 +1548,7 @@ def main():
     # dashboard
     p = subparsers.add_parser("dashboard", parents=[parent_parser], help="Open web dashboard to inspect DB")
     p.add_argument("--port", type=int, default=8765, help="Port number")
+    p.add_argument("--chat", action="store_true", help="Enable the read-only Copilot SDK observer (optional dashboard-chat extra)")
     p.set_defaults(func=cmd_dashboard)
 
     # steer

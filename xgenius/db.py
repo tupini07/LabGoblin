@@ -17,6 +17,14 @@ from xgenius.config import XGeniusConfig, get_xgenius_dir, ensure_xgenius_dir
 ACTIVE_STATUSES = ("queued", "starting", "submitted", "pending", "running", "recovery_required")
 ACTIVE_SQL = ",".join(f"'{s}'" for s in ACTIVE_STATUSES)
 
+
+def hypothesis_statement(hypothesis: dict) -> str:
+    description = (hypothesis.get("description") or "").strip()
+    if description == hypothesis["hypothesis_id"] or description.startswith("Auto-created from submit: "):
+        return ""
+    return description
+
+
 @contextmanager
 def _connect(db_path: str):
     """Context manager for SQLite connections with WAL mode."""

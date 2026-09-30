@@ -66,6 +66,53 @@ def test_submit_replay(campaign):
     assert len(campaign.state.attempts()) == 1
 
 
+def test_hypothesis_statement_submission_is_atomic_and_replay_safe(campaign):
+    statement = "Adding constraints reduces invalid arrangements without lowering coverage."
+    spec = request(hypothesis_id="h001", hypothesis_description=statement)
+    first = campaign.submit(spec)
+    assert campaign.submit(spec) == first
+    hypothesis = campaign.state.db.get_hypothesis("h001")
+    assert hypothesis["description"] == statement
+    assert json.loads(campaign.state.attempt(first)["spec"])["hypothesis_description"] == statement
+    campaign.state.db.update_hypothesis("h001", status="testing", comment="Keep this rationale")
+    campaign.submit({**spec, "key": "replication"})
+    campaign.submit(request(key="control", hypothesis_id="h001"))
+    assert campaign.state.db.get_hypothesis("h001")["comment"] == "Keep this rationale"
+    before = campaign.state.db.get_hypothesis("h001")
+    with pytest.raises(ValueError, match="different statement"):
+        campaign.submit({**spec, "key": "conflicting-claim", "hypothesis_description": "An unrelated claim."})
+    assert campaign.state.db.get_hypothesis("h001") == before
+    assert len(campaign.state.attempts()) == 3
+    assert len(campaign.state.db.get_all_jobs()) == 3
+    assert not campaign.ledger.rows()
+
+
+@pytest.mark.parametrize("placeholder", ["", "h001", "Auto-created from submit: baseline"])
+def test_explicit_hypothesis_statement_fills_only_a_placeholder(campaign, placeholder):
+    campaign.state.db.add_hypothesis("h001", placeholder, motivation="Preserve motivation")
+    campaign.state.db.update_hypothesis("h001", status="testing", conclusion="Keep historical result")
+    campaign.submit(request(hypothesis_id="h001", hypothesis_description="A recorded, testable prediction."))
+    hypothesis = campaign.state.db.get_hypothesis("h001")
+    assert hypothesis["description"] == "A recorded, testable prediction."
+    assert hypothesis["status"] == "testing"
+    assert hypothesis["motivation"] == "Preserve motivation"
+    assert hypothesis["conclusion"] == "Keep historical result"
+
+
+@pytest.mark.parametrize("description", ["", "   ", None, 42, [], "h001", "Auto-created from submit: baseline"])
+def test_invalid_hypothesis_statements_are_rejected_before_submission(campaign, description):
+    with pytest.raises(ValueError, match="hypothesis_description"):
+        campaign.submit(request(hypothesis_id="h001", hypothesis_description=description))
+    assert not campaign.state.attempts() and not campaign.state.db.get_all_hypotheses()
+
+
+def test_hypothesis_statement_requires_identity_and_is_optional(campaign):
+    with pytest.raises(ValueError, match="requires a hypothesis_id"):
+        campaign.submit(request(hypothesis_description="A testable prediction."))
+    campaign.submit(request(hypothesis_id="h001"))
+    assert campaign.state.db.get_hypothesis("h001")["description"] == ""
+
+
 @pytest.mark.parametrize("code,expected", [("print('hello')", "completed"),
                                           ("import sys; sys.exit(7)", "failed")])
 def test_real_native_process(campaign, code, expected):
