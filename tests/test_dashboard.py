@@ -100,6 +100,7 @@ def test_all_empty_routes_local_assets_and_broken_current_config_are_read_only(c
     Path(campaign.config.config_path).write_text("broken TOML [", encoding="utf-8")
     with serve(campaign.config.config_path) as base:
         assert get(base)[0] == 200 and b"Current configuration unavailable" in get(base)[2]
+        assert not json.loads(get(base, "/chat/status")[2])["enabled"]
     assert dump(campaign.state) == before
 
 

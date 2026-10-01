@@ -96,7 +96,7 @@ class InputConfig:
 
 @dataclass(frozen=True)
 class ChatSettings:
-    enabled: bool = False
+    enabled: bool = True
     model: str = "auto"
     reasoning_effort: str = ""
     timeout_seconds: float = 120
@@ -299,6 +299,7 @@ def initial_config(name: str, provider: str = "claude", python: str | None = Non
         "campaign": {"cpus": 2, "memory_mb": 4096, "gpus": [], "max_jobs": 1,
                      "max_gpu_hours": 0, "max_seconds": 3600, "max_invocations": 10},
         "agent": {"provider": provider, "command": list(AGENT_COMMANDS[provider]),
+                  "model": "", "reasoning_effort": "",
                   "resources": {"cpus": 1, "memory_mb": 2048},
                   "timeout_seconds": 600, "retries": 1, "sandbox": False},
     }

@@ -8,6 +8,12 @@ preserving unrelated text. `instructions --target copilot` explicitly updates
 the owned section in `.github/copilot-instructions.md` when that file takes
 precedence. Nothing changes global provider settings.
 
+For a project-local Windows virtual environment, use
+`.\.venv\Scripts\xgenius.exe` without changing PATH. To use bare `xgenius`
+instead, activate that environment or prepend its `Scripts` directory to PATH
+in the current terminal. Managed research sessions receive that interpreter's
+scripts directory on PATH automatically; no global PATH edit is required.
+
 Config loading never creates state or migrates old installations. After an
 explicit quiescent `reset --confirm ID`, `init --existing-config` creates fresh
 state without overwriting the existing configuration/goal. Reset archives the
@@ -71,11 +77,11 @@ max_invocations = 10
 [agent]
 provider = "copilot"
 command = ["copilot", "--allow-all"]
+model = ""
+reasoning_effort = ""
 timeout_seconds = 600
 retries = 1
 sandbox = false
-# model = "an explicitly supported installed-provider model"
-# reasoning_effort = "an explicitly supported effort"
 
 [agent.resources]
 cpus = 1
@@ -101,10 +107,14 @@ min_free_mb = 2048
 # assurance = "checked"
 ```
 
-All fields are strict; unknown or inapplicable options fail. Omitted model/effort
-remain the provider default/unknown, not a claimed effective model. Explicit
-choices must be supported by installed provider help. Commands are argv arrays,
-not shell strings. Claude defaults to `claude --dangerously-skip-permissions`
+All fields are strict; unknown or inapplicable options fail. Newly generated
+configs always include editable `model` and `reasoning_effort` fields under
+`[agent]`, for both Claude and Copilot. Empty strings (or omitted fields in a
+handwritten config) preserve the provider default/unknown, not a claimed
+effective model. Set these fields rather than adding model/effort flags to
+`agent.command`. `init --existing-config` preserves the supplied file unchanged.
+Explicit choices must be supported by installed provider help. Commands are
+argv arrays, not shell strings. Claude defaults to `claude --dangerously-skip-permissions`
 and its child environment removes `ANTHROPIC_API_KEY` for subscription auth.
 Windows batch shims must be replaced by a direct executable argv.
 
@@ -272,19 +282,79 @@ uncertain daemon work and its grant; `machine reconcile` ingests only matching
 terminal consumer receipts. There are no automatic retries, pushes, daemon
 restarts, builders with elevated privileges or backend fallback.
 
-## Dashboard Copilot observer
+## Reading the research dashboard
 
-Ordinary `dashboard` needs no SDK. Use `dashboard --chat` plus the
-`dashboard-chat` extra for on-demand questions. It remains a fresh empty-mode
+`xgenius dashboard --open-browser` opens **Brief**, the research-first catch-up
+view. It shows the retained question, latest accepted rationale, qualified next
+step and independent execution/research facts. Recovery blockers are promoted
+when present; a closed generation shows its recorded outcome instead of old
+instructions as though they were current. Missing interpretation, assessment,
+report or action-owner records are stated explicitly.
+
+**Evidence** connects hypothesis statements to explicitly referenced assessments
+and observations. Execution, collection and validation are separate; a completed
+process is not an accepted finding. Choose up to four measurements on one page
+for side-by-side inspection. This is not a paired scientific estimator: values
+keep their recorded keys, and no comparator, unit equivalence or aggregate
+effect is inferred. Invalid measurements remain visible with their reasons.
+
+**Work** separates active work and recorded problems from recovery requiring
+inspection. Counts and their linked lists use the same filters. Recovery cards
+identify work and offer copyable read-only status/log commands, not retry,
+reconcile or release actions. Missing receipts do not prove an owner is dead.
+Limits explain admission time, invocation commitments/reservations, unlimited
+allowances and shared capacity without implying token or monetary budgets.
+Machine requests are paginated; capacity totals include every granted
+reservation, not just the current page.
+
+**History** holds generation outcomes, paginated/folded journal entries,
+registered reports and source-change intervals. Reports open as safe,
+digest-verified Markdown, with bounded byte pages for large outputs and explicit
+errors for missing or changed files. Raw HTML and images are disabled. Historical
+inventory links retain the same frozen attempt and observation context; switching
+to current state is explicit. Failed, invalid, unselected and unperformed work
+stays in the inventory denominator.
+
+**Mark caught up** saves the displayed source/event sequence cutoffs in this
+browser's local storage, scoped by campaign and generation. Navigation, reload
+and server restart retain that preference at the same browser origin; it is not
+a research acknowledgement or a claim about which changes were important.
+**Forget checkpoint** clears it. Change lists show complete interval counts and
+bounded pages, including newly ingested sources with older recorded timestamps.
+
+**Check for updates** checks every 15 seconds while visible and not editing.
+It announces recorded source, event, control, recovery and work-state changes;
+it does not replace the inspected page, advance the checkpoint or probe a live
+process. **Refresh** updates explicitly, retaining journal folds and reading
+position where possible. Read times describe the page's recorded-state snapshot;
+shared-ledger reads are separate. Ordinary browsing does not invoke a provider,
+mutate campaign records, reconcile work or acknowledge events.
+
+### Dashboard Copilot observer
+
+Ordinary dashboard pages need no SDK. Chat is enabled by default and requires
+the optional `dashboard-chat` extra to answer on-demand questions; without it,
+pages remain usable and chat shows an explicit dependency message. Opening a
+page never starts inference. Use `dashboard --no-chat` to disable the observer,
+or set `enabled = false` below. Explicit `--chat`/`--no-chat` flags override the
+configuration. Invalid configuration disables chat while retaining read-only
+pages. It remains a fresh empty-mode
 SDK session per question with curated read-only tools, not the research session.
 Prior answers are hints, not evidence. Tools expose revisions, retrieval times,
 pagination and searched coverage; unavailable historical IDs never redirect
 silently to current summaries. Raw files/logs/datasets and research writes are
 not available.
 
+The context chip names the page you are asking about. Each submitted question
+retains that page's read time and relevant source, observation or historical
+view IDs even after you navigate. Context is an untrusted retrieval hint, not an
+atomic snapshot of later tool calls. The observer must resolve exact references,
+preserve historical validity and distinguish fresh recorded state. Retrying
+the same uncertain request preserves its original question and context.
+
 ```toml
 [dashboard.chat]
-enabled = false
+enabled = true
 model = "auto"
 reasoning_effort = ""
 timeout_seconds = 120

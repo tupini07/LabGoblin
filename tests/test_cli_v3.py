@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 import pytest
 import tomli_w
@@ -18,6 +19,20 @@ def call(capsys, *arguments):
     captured = capsys.readouterr()
     assert not captured.err
     return code, json.loads(captured.out)
+
+
+@pytest.mark.parametrize("provider", [None, "claude", "copilot"])
+def test_init_emits_editable_model_and_effort_with_provider_defaults(tmp_path, capsys, provider):
+    options = ["--agent", provider] if provider else []
+    ledger = tmp_path / "isolated-machine.db"
+    code, _ = call(capsys, "init", "--project", tmp_path, "--ledger", ledger, *options, "--json")
+    assert code == 0
+    raw = tomllib.loads((tmp_path / "xgenius.toml").read_text(encoding="utf-8"))
+    assert raw["agent"]["provider"] == (provider or "claude")
+    assert raw["agent"]["model"] == ""
+    assert raw["agent"]["reasoning_effort"] == ""
+    assert not ledger.exists()
+    assert State.open(tmp_path / ".xgenius").campaign()["invocations"] == 0
 
 
 def test_init_preserves_docs_and_never_initializes_machine_capacity(tmp_path, capsys):
@@ -36,6 +51,16 @@ def test_init_preserves_docs_and_never_initializes_machine_capacity(tmp_path, ca
     assert code == 0 and cli.SECTION_START in copilot.read_text(encoding="utf-8")
     code, data = call(capsys, "init", "--project", tmp_path, "--json")
     assert code == 1 and "already exists" in data["error"]["message"]
+
+
+@pytest.mark.parametrize("flags,override", [([], None), (["--chat"], True), (["--no-chat"], False)])
+def test_dashboard_passes_explicit_chat_override(tmp_path, capsys, monkeypatch, flags, override):
+    calls = []
+    monkeypatch.setattr("xgenius.dashboard.run_dashboard",
+                        lambda path, port, **options: calls.append((path, options)))
+    assert cli.main(["dashboard", "--project", str(tmp_path), *flags]) == 0
+    assert calls[0][1]["chat"] is override
+    assert not capsys.readouterr().err
 
 
 def test_all_json_errors_are_structured_and_do_not_create_state(tmp_path, capsys):

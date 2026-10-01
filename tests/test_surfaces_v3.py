@@ -85,6 +85,7 @@ def test_reset_refuses_live_readers_then_archives_and_fresh_init_is_explicit(tmp
     assert ledger.path.exists() and Path(config.config_path).read_bytes() == before
     code, value = call(capsys, "init", "--project", config.root, "--existing-config", "--ledger", ledger.path, "--json")
     assert code == 0 and value["campaign_id"] != state.id
+    assert Path(config.config_path).read_bytes() == before
     with pytest.raises(ValueError, match="identity changed"):
         state.campaign()
 

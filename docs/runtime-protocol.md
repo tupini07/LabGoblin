@@ -198,6 +198,31 @@ compaction and recollection cannot replace an older report's referenced sources.
 The harness can check identities, accounting and explicit evidence coverage.
 It cannot certify scientific truth, sound interpretation or adequate controls.
 Trusted same-user execution is not a security boundary.
+
+# Dashboard read projections
+
+Brief / Evidence / Work / History are read-only projections, not a second
+journal or task ledger. A page shares one campaign read transaction for its
+state, budget and source/event cutoffs; shared-machine reads are explicitly
+separate. Common attempt filters drive both counts and their destination lists.
+Update checks compare recorded cutoffs and a stable control/work-state token,
+not continuously changing elapsed time. They announce changes without replacing
+the current page. Explicit browser-local checkpoints are campaign/generation
+scoped and never write acknowledgements.
+
+Exact observation views include execution, collection and validation context.
+With a source-view ID, that context and membership come from the digest-verified
+historical member, never today's attempt. Verification streams member bytes in
+64 KiB chunks with a 16 MiB bound; larger members remain available through exact
+source-view byte pages. Numeric metric previews have explicit count/byte limits.
+Raw comparisons do not infer pairing, units, effects or scientific validity.
+
+The report reader accepts only registered `report.md` output under the report's
+owned directory. It verifies length and digest through one open stream while
+retaining at most a 128 KiB page, with a 256 MiB verification bound matching
+publication. Missing, escaping or changed outputs fail explicitly. Active HTML,
+remote assets and arbitrary filesystem browsing are not enabled.
+
 # Read-only observer ownership
 
 Dashboard questions use a fresh empty-mode Copilot SDK session with only curated
@@ -206,6 +231,12 @@ cursors, truncation, recorded time and retrieval time. Historical source and vie
 IDs never resolve to a newer summary. Zero lexical matches do not prove absence.
 Views of captured observations expose bounded numeric metrics, not arbitrary
 files, commands, environments, logs, datasets, MCP tools or research controls.
+Optional question context is limited to 4 KiB of validated labels, local
+read-only URLs, exact IDs and page cutoffs. It is retained with the question and
+included in retry identity, but confers no authority: tool reads resolve pinned
+IDs and identify current state separately. Historical observation citations
+carry the source-view ID; source-view member citations retain the member and
+byte-page offset rather than silently pointing to current experiments.
 
 The SDK runs **inside** an owned native payload; on Windows its entire child
 tree inherits the grant's Job Object and CPU placement before executing code.
@@ -216,7 +247,10 @@ Waiting is visible and cancellable. Its armed authorization, conditional worker
 claim and terminal receipt live in the machine ledger. Missing receipts retain
 capacity; `machine reconcile` can ingest matching late receipts.
 
-`[dashboard.chat]` remains opt-in. It accepts `enabled`, `model`,
+`[dashboard.chat]` is enabled by default, with inference only on an explicit
+question. `enabled = false` disables it; CLI `--chat`/`--no-chat` override the
+file setting. Missing SDK dependencies leave ordinary pages usable with an
+explicit unavailable reason. Invalid configuration disables chat. It accepts `enabled`, `model`,
 `reasoning_effort`, `cli_path`, positive `timeout_seconds` (5-600), `cpus`,
 `memory_mb`, and positive `max_invocations`. The starter resources are 1 CPU and
 2048 MiB, not a measured SDK requirement. The default allowance of 20 is scoped

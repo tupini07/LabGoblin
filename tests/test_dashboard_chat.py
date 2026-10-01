@@ -80,10 +80,11 @@ def post(base, path, payload, csrf="", **headers):
         return response.status, json.loads(response.read())
 
 
-def test_settings_are_opt_in_and_validated(campaign):
+def test_settings_are_enabled_by_default_and_validated(campaign):
     path = Path(campaign.config.config_path)
-    assert not load_chat_settings(str(path)).enabled
+    assert load_chat_settings(str(path)).enabled
     assert load_chat_settings(str(path), enabled=True).enabled
+    assert not load_chat_settings(str(path), enabled=False).enabled
     original = path.read_text(encoding="utf-8")
     path.write_text(original + '\n[dashboard.chat]\nenabled = true\nmodel = "test-model"\nreasoning_effort = "high"\n',
                     encoding="utf-8")
@@ -94,6 +95,35 @@ def test_settings_are_opt_in_and_validated(campaign):
         path.write_text(original + "\n[dashboard.chat]\n" + invalid + "\n", encoding="utf-8")
         with pytest.raises(ValueError):
             load_chat_settings(str(path))
+
+
+@pytest.mark.parametrize("configured", [None, False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+def test_chat_flag_overrides_configured_choice(campaign, configured, override):
+    path = Path(campaign.config.config_path)
+    if configured is not None:
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write("\n[dashboard.chat]\nenabled = " + str(configured).lower() + "\n")
+    expected = override if override is not None else configured if configured is not None else True
+    assert load_chat_settings(str(path), enabled=override).enabled is expected
+
+
+def test_missing_optional_sdk_does_not_block_default_dashboard(campaign, monkeypatch):
+    import importlib.metadata
+    from tests.test_dashboard import dump
+
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("xgenius.dashboard_chat.importlib.metadata.version", missing)
+    before = dump(campaign.state)
+    with serve(campaign.config.config_path) as base:
+        assert get(base)[0] == 200
+        code, _, body = get(base, "/chat/status")
+        status = json.loads(body)
+        assert code == 200 and status["enabled"] and not status["ready"]
+        assert "dashboard-chat extra" in status["reason"]
+    assert dump(campaign.state) == before
 
 
 def test_reader_only_exposes_curated_evidence(campaign):
@@ -337,7 +367,8 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
             assert page.locator(".chat-sources a").first.get_attribute("target") == "_blank"
             page.screenshot(path=str(tmp_path / "chat-desktop.png"), full_page=True)
             cid = next(iter(observer.conversations))
-            page.get_by_role("navigation").get_by_role("link", name="Journal", exact=True).click()
+            page.get_by_role("navigation", name="Main navigation").get_by_role("link", name="History", exact=True).click()
+            page.get_by_role("navigation", name="Section navigation").get_by_role("link", name="Journal", exact=True).click()
             expect(page.locator("#chat-panel")).to_be_visible()
             expect(page.locator("#chat-open")).to_have_attribute("aria-expanded", "true")
             expect(page.locator(".chat-question")).to_have_text("What is happening?")
@@ -354,7 +385,7 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
             page.reload()
             expect(page.locator("#chat-panel")).to_be_hidden()
             expect(page.locator("#chat-open")).to_have_attribute("aria-expanded", "false")
-            page.get_by_role("navigation").get_by_role("link", name="Overview", exact=True).click()
+            page.get_by_role("navigation", name="Main navigation").get_by_role("link", name="Brief", exact=True).click()
             expect(page.locator("#chat-panel")).to_be_hidden()
             page.go_back()
             expect(page.locator("#chat-panel")).to_be_hidden()

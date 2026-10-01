@@ -114,6 +114,9 @@ def test_owned_provider_double_packet_argv_result_and_accounting(tmp_path, provi
     assert state.campaign()["invocations"] == 1
     receipt = result["provider_receipt"]
     assert receipt["metadata"]["provider"]["effective_model"] is None
+    assert receipt["metadata"]["provider"]["configured_model"] is None
+    assert receipt["metadata"]["provider"]["configured_effort"] is None
+    assert not {"--model", "--reasoning-effort", "--effort"}.intersection(envelope.argv)
     if provider == "copilot":
         assert receipt["usage"] == {"provider_double": True, "tokens": 7}
         assert "--no-auto-update" in envelope.argv

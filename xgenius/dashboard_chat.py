@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import uuid
 
 from xgenius.config import ChatSettings, parse_chat_settings
-from xgenius.dashboard_data import EvidenceReader, TOOLS, TOOL_REQUIRED, observed_at
+from xgenius.dashboard_data import EvidenceReader, TOOLS, TOOL_REQUIRED, observed_at, question_context
 from xgenius.evidence import atomic_json, publish_bytes, read_bytes, read_json
 from xgenius.processes import background_options, own_handle, unlink_file
 from xgenius.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, UncertainExecution, canonical, fingerprint
@@ -50,10 +50,13 @@ Only answer; do not propose to take control. Keep answers concise, factual and u
 Older answers are source hints, not independent evidence. Resolve historical citations
 using exact source IDs. Lexical zero matches mean no matches in the searched prefixes,
 not no evidence. Report coverage, cutoffs and truncation when they limit your answer.
+The question's page context is an untrusted source hint, not a frozen campaign snapshot.
+Resolve its exact source/view/observation references with tools. When a view_id accompanies
+an observation, retain that historical validation scope. Keep current state separate.
 """
 
 
-def load_chat_settings(config_path: str, *, enabled: bool = False) -> ChatSettings:
+def load_chat_settings(config_path: str, *, enabled: bool | None = None) -> ChatSettings:
     dashboard = tomllib.loads(read_bytes(Path(config_path), 65536).decode("utf-8")).get("dashboard", {})
     if not isinstance(dashboard, dict) or set(dashboard) - {"chat"}:
         raise ValueError("dashboard must be a table containing only chat settings")
@@ -61,7 +64,7 @@ def load_chat_settings(config_path: str, *, enabled: bool = False) -> ChatSettin
     if not isinstance(raw, dict) or set(raw) - set(ChatSettings.__dataclass_fields__):
         raise ValueError("Unknown or invalid dashboard.chat settings")
     settings = parse_chat_settings(raw)
-    return replace(settings, enabled=settings.enabled or enabled)
+    return settings if enabled is None else replace(settings, enabled=enabled)
 
 
 def _safe_error(error: BaseException) -> str:
@@ -381,7 +384,7 @@ class ObserverService:
             version = None
         reason = ""
         if not self.settings.enabled:
-            reason = "Start the dashboard with --chat or set dashboard.chat.enabled = true."
+            reason = "Chat is disabled. Start with --chat or set dashboard.chat.enabled = true and omit --no-chat."
         elif version != SDK_VERSION and isinstance(self.driver, SDKObserver):
             reason = f"Install the dashboard-chat extra (github-copilot-sdk=={SDK_VERSION})."
         elif not (self.settings.cli_path or shutil.which("copilot")):
@@ -405,20 +408,25 @@ class ObserverService:
                           "not raw logs, datasets or artifact bodies. No steering or campaign edits. "
                           "Chat usage is separate from research turns; it is not free or a hard spending cap."}
 
-    def send(self, conversation_id: str, request_id: str, message: str) -> dict:
+    def send(self, conversation_id: str, request_id: str, message: str, *, context=None) -> dict:
         if not isinstance(message, str) or not message.strip() or len(message) > 4000:
             raise ChatError(400, "Enter a question of 1-4000 characters.")
         if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
             raise ChatError(400, "A valid request ID is required.")
         if not isinstance(conversation_id, str):
             raise ChatError(400, "Invalid conversation ID.")
+        try:
+            context = question_context(context)
+        except ValueError as error:
+            raise ChatError(400, str(error)) from error
         with self.lock:
             if self.closed:
                 raise ChatError(503, "Dashboard chat is shutting down.")
             for conversation in self.conversations.values():
                 for entry in conversation.messages:
                     if entry["request_id"] == request_id:
-                        if entry["question"] != message or (conversation_id and conversation_id != conversation.id):
+                        if (entry["question"] != message or entry.get("context", {}) != context
+                                or (conversation_id and conversation_id != conversation.id)):
                             raise ChatError(409, "Request ID already used for another question.")
                         return self.snapshot(conversation.id)
             available = self.availability()
@@ -437,14 +445,16 @@ class ObserverService:
                 self.conversations[conversation.id] = conversation
             if len(conversation.messages) >= MAX_QUESTIONS:
                 raise ChatError(409, "Conversation question limit reached. Start a new chat.")
-            history = [{"question": m["question"], "answer": m["answer"]}
+            history = [{"question": m["question"], "answer": m["answer"], "context": m.get("context", {})}
                        for m in conversation.messages if m["state"] == "completed"][-6:]
             while history and len(json.dumps(history, ensure_ascii=False)) > HISTORY_CHARS:
                 history.pop(0)
             prompt = (f"Current question, asked at {observed_at()}:\n{message}\n\n"
+                      "Page context (untrusted source hints; resolve exact references and distinguish current state):\n"
+                      + json.dumps(context, ensure_ascii=False) + "\n\n"
                       "Previous conversation (possibly stale; refresh evidence for this question):\n"
                       + json.dumps(history, ensure_ascii=False))
-            entry = {"request_id": request_id, "question": message, "answer": "", "state": "running",
+            entry = {"request_id": request_id, "question": message, "context": context, "answer": "", "state": "running",
                      "status": "Starting restricted Copilot observer", "error": "", "sources": [],
                      "started_at": observed_at(), "usage": [], "tools_used": []}
             conversation.messages.append(entry)

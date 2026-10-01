@@ -114,25 +114,46 @@ explicit coverage; it does **not** certify scientific truth, novelty or adequacy
 xgenius dashboard --open-browser
 ```
 
-The read-only loopback dashboard defaults to `http://127.0.0.1:8765`. It shows
-operator intent, research progression, recovery blockers, budgets, experiments,
-hypothesis statements, exact evidence and historical sources. Journal entries
-are folded and paginated with stable revision links and bounded search coverage.
-Markdown disables raw HTML and images; assets are packaged locally.
-Opening or refreshing a page never reconciles or acknowledges research.
+The read-only loopback dashboard defaults to `http://127.0.0.1:8765`, organized
+around four destinations:
+
+| Destination | Purpose |
+|---|---|
+| **Brief** | Research question, latest recorded interpretation, next step, recovery attention and recent changes. |
+| **Evidence** | Hypothesis statements, assessment references, exact measurements and side-by-side inspection. |
+| **Work** | Experiment state, named recovery blockers, safe inspection commands and readable resource limits. |
+| **History** | Generation outcomes, folded journal entries, retained reports and immutable source inventories. |
+
+Interpretations are attributed research records, not automatically generated
+verdicts. Validation warnings follow evidence into historical drilldowns.
+Comparison shows exact values without inventing pairing, units or aggregate
+effects. Registered reports open in a digest-verified Markdown reader.
+
+**Mark caught up** saves a browser-local, campaign-generation viewing checkpoint;
+it never acknowledges research events. **Check for updates** announces changed
+records without replacing what you are reading; **Refresh** explicitly updates
+the page. Opening either view never reconciles or runs inference. Markdown
+disables raw HTML and images; assets are packaged locally.
 
 ### Dashboard Copilot observer
 
 ```powershell
 python -m pip install "xgenius[dashboard-chat]"
-xgenius dashboard --chat
+xgenius dashboard
 ```
 
 From a checkout, use `python -m pip install ".[dashboard-chat]"`.
+Chat is enabled by default. Use `--no-chat` or `[dashboard.chat] enabled = false`
+to disable it; an explicit `--chat` or `--no-chat` overrides that configuration.
+Without the optional SDK, ordinary pages still work and chat explains the missing
+dependency. No packages are installed automatically.
 **Ask Copilot** starts inference only when you send a question. The observer gets
 curated, bounded, read-only tools for recorded state, metrics, historical rationale
 and exact source revisions. It cannot steer research, attach to its provider
 session, run commands, or read arbitrary files, logs, datasets or artifact bodies.
+Each question retains its page context and exact source/view references. These
+are retrieval hints, not a frozen snapshot of every subsequent tool result;
+historical evidence remains distinct from current recorded state.
 
 Chat, drafts, open/closed state and maximized layout survive navigation/reload
 while the dashboard process remains alive. **Close** hides it; **New chat** clears

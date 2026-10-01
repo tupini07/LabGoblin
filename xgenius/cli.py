@@ -261,7 +261,8 @@ def parser():
     storage.add_argument("--offset", type=int, default=0)
     dashboard = command("dashboard", "Serve the read-only loopback dashboard")
     dashboard.add_argument("--port", type=int, default=8765)
-    dashboard.add_argument("--chat", action="store_true", help="Opt into separately admitted Copilot SDK observer questions")
+    dashboard.add_argument("--chat", action=argparse.BooleanOptionalAction, default=None,
+                           help="Enable on-demand observer chat (default); --no-chat overrides configuration")
     dashboard.add_argument("--open-browser", action="store_true")
     reset = command("reset", "Archive the exact supported quiescent campaign; never erase a ledger")
     reset.add_argument("--confirm", required=True, help="Exact campaign ID")

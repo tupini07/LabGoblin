@@ -31,6 +31,18 @@
   const storageKey = `xgenius-chat-${token}`;
   const expandedKey = `${storageKey}-expanded`;
   const maximizedKey = `${storageKey}-maximized`;
+  function pageContext() {
+    return JSON.parse(document.getElementById("main").dataset.chatContext);
+  }
+  function contextLabel(context) {
+    const recorded = context.read_at ? ` · Page read ${new Date(context.read_at * 1000).toISOString()}` : "";
+    return `About: ${context.label || "this campaign"}${recorded}. Exact citations retain their source scope; current state is queried separately.`;
+  }
+  function updateContext() {
+    document.getElementById("chat-context").textContent = contextLabel(pageContext());
+  }
+  updateContext();
+  document.addEventListener("dashboard:refresh", updateContext);
   try {
     conversation = sessionStorage.getItem(storageKey) || "";
     expanded = sessionStorage.getItem(expandedKey) === "true";
@@ -76,6 +88,9 @@
         const question = document.createElement("p");
         question.className = "chat-question";
         question.textContent = message.question;
+        const context = document.createElement("p");
+        context.className = "chat-exchange-context";
+        context.textContent = contextLabel(message.context || {});
         const answer = document.createElement("div");
         answer.className = "chat-answer markdown";
         const evidence = document.createElement("div");
@@ -84,7 +99,7 @@
         usage.className = "chat-usage";
         const error = document.createElement("p");
         error.className = "chat-error";
-        entry.append(question, answer, evidence, usage, error);
+        entry.append(question, context, answer, evidence, usage, error);
         messages.append(entry);
         entries.set(message.request_id, entry);
       }
@@ -219,7 +234,8 @@
     const question = input.value.trim();
     if (!question) return;
     if (!pendingRequest || pendingRequest.message !== question) {
-      pendingRequest = { conversation_id: conversation, request_id: crypto.randomUUID().replaceAll("-", ""), message: question };
+      pendingRequest = { conversation_id: conversation, request_id: crypto.randomUUID().replaceAll("-", ""),
+        message: question, context: pageContext() };
     }
     busy = true;
     controls();

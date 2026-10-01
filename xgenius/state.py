@@ -140,8 +140,9 @@ class State:
     def create(cls, config, ledger_path: str | Path) -> "State":
         return cls(Database.create(config, ledger_path))
 
-    def campaign(self) -> dict:
-        with self.db.read() as conn:
+    def campaign(self, *, connection=None) -> dict:
+        from contextlib import nullcontext
+        with self.db.read() if connection is None else nullcontext(connection) as conn:
             value = _campaign(conn)
             generation = dict(conn.execute("SELECT * FROM generations WHERE id=?",
                                            (value["generation"],)).fetchone())
@@ -1199,8 +1200,9 @@ class State:
             return bool(conn.execute("""SELECT 1 FROM events WHERE generation=? AND acknowledged_by IS NULL
                 AND kind!='maintenance' AND seq>? LIMIT 1""", (campaign["generation"], campaign["wake_after"])).fetchone())
 
-    def budget(self, now: float | None = None) -> dict:
-        with self.db.read() as conn:
+    def budget(self, now: float | None = None, *, connection=None) -> dict:
+        from contextlib import nullcontext
+        with self.db.read() if connection is None else nullcontext(connection) as conn:
             campaign = _campaign(conn)
             settings = _settings(conn, campaign)["campaign"]
             reserved = conn.execute("SELECT COUNT(*) FROM invocations WHERE state='reserved'").fetchone()[0]

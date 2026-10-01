@@ -1,12 +1,16 @@
 """Read-only dashboard queries and bounded, model-visible campaign evidence."""
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
+import time
 import urllib.parse
 
 from xgenius import journal, reporting, results
+from xgenius.evidence import contained
+from xgenius.protocol import ACTIVE
 from xgenius.state import State
 
 
@@ -78,6 +82,7 @@ TOOLS = {
     }),
     "evidence_observation": ("Read bounded registered numeric metrics for one exact observation revision, not current files or artifact bodies.", {
         "id": {"type": "string", "maxLength": 128},
+        "view_id": {"type": "string", "maxLength": 128},
     }),
 }
 
@@ -86,6 +91,182 @@ TOOL_REQUIRED = {
     "source_entry": ["id"], "hypothesis_detail": ["id"], "source_view": ["id"], "evidence_observation": ["id"],
 }
 RESEARCH_SOURCES = {"goal", "protocol", "handoff", "journal_import", "summary", "directive"}
+FAILED = ("failed", "timed_out", "interrupted", "not_started")
+ATTENTION = "(a.status IN ('failed','timed_out','interrupted','not_started','recovery_required') OR a.validation='invalid' OR a.collection='failed')"
+
+
+def attempt_filter(status="", needle="", hypothesis="", generation=None):
+    where, args = [], []
+    if status == "attention":
+        where.append(ATTENTION)
+    elif status == "active":
+        where.append("a.status IN (" + ",".join("?" for _ in ACTIVE) + ")")
+        args.extend(ACTIVE)
+    elif status == "invalid":
+        where.append("a.validation='invalid'")
+    elif status:
+        where.append("a.status=?")
+        args.append(status)
+    if needle:
+        where.append("(instr(lower(a.experiment_id),lower(?))>0 OR instr(lower(a.id),lower(?))>0)")
+        args.extend((needle, needle))
+    if hypothesis:
+        where.append("a.hypothesis_id=?")
+        args.append(hypothesis)
+    if generation is not None:
+        where.append("a.generation=?")
+        args.append(generation)
+    return " AND ".join(where) or "1=1", tuple(args)
+
+
+def snapshot(state, conn):
+    now = time.time()
+    current = state.campaign(connection=conn)
+    changes = {key: current[key] for key in (
+        "revision", "attempt_revision", "authority_revision", "config_revision",
+        "operator_mode", "progress", "reason", "generation_state", "research_outcome",
+        "invocations", "blockers",
+    )}
+    changes["attempts"] = [tuple(row) for row in conn.execute(
+        "SELECT status,collection,validation,COUNT(*) FROM attempts GROUP BY status,collection,validation")]
+    changes["turns"] = [tuple(row) for row in conn.execute(
+        "SELECT state,COUNT(*) FROM turns GROUP BY state")]
+    changes["reports"] = tuple(conn.execute("SELECT COUNT(*),MAX(created) FROM reports").fetchone())
+    return {
+        "campaign": current,
+        "budget": state.budget(now, connection=conn),
+        "read_at": now,
+        "source_cutoff": conn.execute("SELECT COALESCE(MAX(seq),0) FROM sources").fetchone()[0],
+        "event_cutoff": conn.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0],
+        "change_token": hashlib.sha256(json.dumps(changes, sort_keys=True).encode()).hexdigest(),
+    }
+
+
+def source_preview(conn, source_id, limit=2400):
+    row = conn.execute("""SELECT id,kind,created,length(body) AS bytes,digest,
+        substr(body,1,?) AS body FROM sources WHERE id=?""", (limit, source_id)).fetchone()
+    if row is None or row["kind"] not in RESEARCH_SOURCES:
+        raise ValueError("Exact retained research source is unavailable")
+    value = dict(row)
+    body = bytes(value.pop("body"))
+    if len(body) == row["bytes"] and hashlib.sha256(body).hexdigest() != row["digest"]:
+        raise ValueError("Retained source revision was modified")
+    return {**value, "text": body.decode("utf-8", errors="replace"), "truncated": len(body) < row["bytes"]}
+
+
+def numeric_metrics(metadata, *, count=16, byte_limit=4096):
+    metrics = json.loads(metadata).get("metrics", {})
+    if not isinstance(metrics, dict) or any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        for value in metrics.values()
+    ):
+        raise ValueError("Registered numeric metrics are invalid")
+    sample = {}
+    for key, value in metrics.items():
+        if len(sample) >= count or len(json.dumps({**sample, key: value}).encode()) > byte_limit:
+            break
+        sample[key] = value
+    return sample, len(metrics)
+
+
+def observation_context(conn, observation_id, *, view_id=""):
+    row = conn.execute("""SELECT o.id,o.attempt_id,o.path,o.kind,o.size,o.digest,o.assurance,o.created,o.metadata,
+        a.experiment_id,a.status,a.collection,a.validation,a.reason,a.collection_reason,a.hypothesis_id,
+        a.collection_event FROM observations o JOIN attempts a ON a.id=o.attempt_id WHERE o.id=?""",
+                       (observation_id,)).fetchone()
+    if row is None:
+        raise ValueError("Exact retained observation is unavailable")
+    value = dict(row)
+    value["metrics"], value["metric_count"] = numeric_metrics(value.pop("metadata"), count=32)
+    if view_id:
+        member = conn.execute("SELECT rowid,digest,length(CAST(outcome AS BLOB)) AS bytes FROM view_members WHERE view_id=? AND attempt_id=?",
+                              (view_id, value["attempt_id"])).fetchone()
+        if member is None:
+            raise ValueError("Historical observation membership is unavailable")
+        if member["bytes"] > 16 * 1024 * 1024:
+            raise ValueError("Historical member exceeds the 16 MiB verification bound; inspect its exact source-view byte pages")
+        digest = hashlib.sha256()
+        with conn.blobopen("view_members", "outcome", member["rowid"], readonly=True) as stream:
+            while block := stream.read(65536):
+                digest.update(block)
+        if digest.hexdigest() != member["digest"]:
+            raise ValueError("Historical observation membership is unavailable or its integrity failed")
+        fields = ("experiment_id", "status", "collection", "validation", "reason", "collection_reason",
+                  "hypothesis_id", "collection_event", "selected", "admitted")
+        record = conn.execute("SELECT " + ",".join(f"json_extract(outcome,'$.{key}') AS {key}" for key in fields)
+                              + """ FROM view_members WHERE rowid=? AND EXISTS(
+                                  SELECT 1 FROM json_each(outcome,'$.observation_ids') WHERE value=?)""",
+                              (member["rowid"], observation_id)).fetchone()
+        if record is None:
+            raise ValueError("Observation is not in this historical source view")
+        value.update(dict(record), view_id=view_id)
+        value.update(selected=bool(record["selected"]), admitted=bool(record["admitted"]))
+    return value
+
+
+def report_text(state, report_id, *, offset=0, limit=128 * 1024):
+    """Verify a registered output in one stream, retaining only the requested byte page."""
+    with state.db.read() as conn:
+        row = conn.execute("SELECT id,view_id,created,outputs FROM reports WHERE id=?", (report_id,)).fetchone()
+    if row is None:
+        raise ValueError("Unknown retained report")
+    output = json.loads(row["outputs"]).get("markdown")
+    if not isinstance(output, dict):
+        raise ValueError("This report has no registered Markdown output available for safe reading")
+    directory = contained(state.root / "reports", report_id)
+    path = contained(directory, output["path"])
+    if path != directory / "report.md":
+        raise ValueError("Report output is not its registered retained Markdown file")
+    size = output["bytes"]
+    if type(size) is not int or not 0 <= size <= 256 * 1024 * 1024:
+        raise ValueError("Report exceeds the supported 256 MiB verification bound")
+    if not 0 <= offset <= size or not 1 <= limit <= 128 * 1024:
+        raise ValueError("Report byte page is outside its supported range")
+    digest, parts, read = hashlib.sha256(), [], 0
+    with path.open("rb") as stream:
+        while block := stream.read(min(65536, size - read + 1)):
+            if read + len(block) > size:
+                raise ValueError("Retained report size changed")
+            digest.update(block)
+            start, end = max(0, offset - read), min(len(block), offset + limit - read)
+            if end > start:
+                parts.append(block[start:end])
+            read += len(block)
+    if read != size or digest.hexdigest() != output["sha256"]:
+        raise ValueError("Retained report integrity failed; refusing changed bytes")
+    body = b"".join(parts)
+    return {**dict(row), "text": body.decode("utf-8", errors="replace"), "bytes": size,
+            "digest": digest.hexdigest(), "offset": offset, "returned_bytes": len(body),
+            "has_more": offset + len(body) < size}
+
+
+def question_context(value):
+    if value is None:
+        return {}
+    text_fields = {"label": 240, "url": 2048, "campaign": 128, "source_id": 128, "view_id": 128,
+                   "observation_id": 128, "attempt_id": 128, "hypothesis_id": 256, "turn_id": 128}
+    numbers = {"generation", "read_at", "source_cutoff", "event_cutoff"}
+    if not isinstance(value, dict) or set(value) - set(text_fields) - numbers:
+        raise ValueError("Unknown dashboard context fields")
+    for key, item in value.items():
+        if key in text_fields and (not isinstance(item, str) or len(item) > text_fields[key]):
+            raise ValueError(f"Invalid dashboard context {key}")
+        if key in numbers and (isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item) or item < 0):
+            raise ValueError(f"Invalid dashboard context {key}")
+        if key in numbers - {"read_at"} and type(item) is not int:
+            raise ValueError(f"Dashboard context {key} must be an integer")
+        if key in numbers and item > (8640000000000 if key == "read_at" else 9007199254740991):
+            raise ValueError(f"Dashboard context {key} is outside its supported range")
+    if "url" in value:
+        target = urllib.parse.urlsplit(value["url"])
+        allowed = {"/", "/evidence", "/work", "/history", "/jobs", "/job", "/hypotheses", "/hypothesis",
+                   "/activity", "/turn", "/artifacts", "/observation", "/reports", "/report", "/view",
+                   "/resources", "/journal", "/goal", "/debug", "/changes", "/compare"}
+        if target.scheme or target.netloc or target.path not in allowed or "\\" in value["url"]:
+            raise ValueError("Dashboard context must reference a read-only local evidence page")
+    if len(json.dumps(value).encode()) > 4096:
+        raise ValueError("Dashboard context exceeds its 4 KiB bound")
+    return dict(value)
 
 
 def _clean(value, limit=2000):
@@ -186,25 +367,22 @@ class EvidenceReader:
             else:
                 with db.read() as conn:
                     data = reporting._page(conn, arguments["id"], offset=arguments.get("offset", 0), limit=10, byte_limit=40000)
-            sources.append(_source("/view", "Exact historical source view", id=arguments["id"], offset=arguments.get("offset", 0)))
+            params = {"id": arguments["id"]}
+            if arguments.get("attempt"):
+                params.update(attempt=arguments["attempt"], byte_offset=arguments.get("offset", 0))
+            else:
+                params["offset"] = arguments.get("offset", 0)
+            sources.append(_source("/view", "Exact historical source view", **params))
         elif name == "evidence_observation":
             with db.read() as conn:
-                row = conn.execute("""SELECT id,attempt_id,kind,size,digest,assurance,created,
-                    json_extract(metadata,'$.metrics') AS metrics FROM observations WHERE id=?""", (arguments["id"],)).fetchone()
-            if row is None:
-                raise ValueError("Exact retained observation is unavailable")
-            data = dict(row)
-            metrics = json.loads(data.pop("metrics") or "{}")
-            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in metrics.values()):
-                raise ValueError("Registered numeric metrics are invalid")
-            limited = {}
-            for key, value in metrics.items():
-                if len(limited) >= 32 or len(json.dumps({**limited, key: value}).encode()) > 4096:
-                    break
-                limited[key] = value
-            data.update(metrics=limited, metric_coverage={"total": len(metrics), "returned": len(limited), "has_more": len(limited) < len(metrics)},
-                        body_access="Not exposed to the observer")
-            sources.append(_source("/observation", "Exact evidence revision", id=data["id"]))
+                data = observation_context(conn, arguments["id"], view_id=arguments.get("view_id", ""))
+            total = data.pop("metric_count")
+            data = _clean(data)
+            data.update(metric_coverage={"total": total, "returned": len(data["metrics"]), "has_more": len(data["metrics"]) < total},
+                        body_access="Not exposed to the observer",
+                        context_scope="Historical view" if arguments.get("view_id") else "Current recorded attempt state, not a live validation")
+            sources.append(_source("/observation", "Exact evidence revision", id=data["id"],
+                                   **({"view": arguments["view_id"]} if arguments.get("view_id") else {})))
         else:
             document = arguments["document"]
             if document == "goal":
