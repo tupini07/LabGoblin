@@ -4,7 +4,7 @@ Copy this directory into a new, dedicated project before running. The example
 uses generated `[2, 4, 6]` values, no private data, dependencies, network or GPUs.
 
 ```powershell
-labgoblin init --agent copilot
+labgoblin init --non-interactive --agent copilot
 labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
 labgoblin batch-submit --file batch.json --json
 labgoblin run --no-agent --json

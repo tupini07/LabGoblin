@@ -130,6 +130,7 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
         "protocol": 3, "turn_id": turn_id, "packet_id": packet_id, "kind": kind,
         "campaign_id": state.id, "generation": campaign["generation"], "revision": campaign["revision"],
         "authority_revision": campaign["authority_revision"],
+        "config_revision": campaign["config_revision"],
         "watermark": watermark, "recorded_at": time.time(), "sources": sources, "directives": directives,
         "instructions": INSTRUCTIONS, "cli_argv": [sys.executable, "-m", "labgoblin.cli"],
         "project": str(state.root.parent), "view_id": view_id,

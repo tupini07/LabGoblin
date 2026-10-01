@@ -110,7 +110,7 @@ def test_chat_flag_overrides_configured_choice(campaign, configured, override):
     assert load_chat_settings(str(path), enabled=override).enabled is expected
 
 
-def test_missing_optional_sdk_does_not_block_default_dashboard(campaign, monkeypatch):
+def test_broken_sdk_installation_does_not_block_readonly_dashboard(campaign, monkeypatch):
     import importlib.metadata
     from tests.test_dashboard import dump
 
@@ -124,7 +124,7 @@ def test_missing_optional_sdk_does_not_block_default_dashboard(campaign, monkeyp
         code, _, body = get(base, "/chat/status")
         status = json.loads(body)
         assert code == 200 and status["enabled"] and not status["ready"]
-        assert "dashboard-chat extra" in status["reason"]
+        assert "Repair the LabGoblin installation" in status["reason"]
     assert dump(campaign.state) == before
 
 
@@ -224,7 +224,7 @@ def test_failures_busy_and_missing_dependency_are_explicit(campaign, monkeypatch
     monkeypatch.setattr("labgoblin.dashboard_chat.importlib.metadata.version", lambda _: "0.0.1")
     observer = ObserverService(campaign.config.config_path, ChatSettings(enabled=True))
     assert not observer.availability()["ready"]
-    with pytest.raises(ChatError, match="Install"):
+    with pytest.raises(ChatError, match="Repair"):
         observer.send("", uuid.uuid4().hex, "Why?")
     assert observer.thread is None
     observer.close()

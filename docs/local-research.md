@@ -8,7 +8,28 @@ interpreter. This onboarding does not assume a published PyPI distribution.
 Return to the intended campaign directory before initializing it.
 
 Run `labgoblin init --agent copilot` in a dedicated project, or omit `--agent` for
-Claude. It creates schema-3 state and a shared owned section in `CLAUDE.md`,
+Claude as the initial research provider. Terminal init uses a Copilot SDK
+conversation, regardless of that research-provider choice. The SDK is a core
+dependency; install/authenticate the standalone CLI first with `copilot login`.
+Missing prerequisites give an explicit error and `--non-interactive` guidance,
+not a fallback or a partially created campaign.
+
+Use `init --non-interactive` or `init --json` for starter defaults with no SDK,
+login check or model call. Non-terminal invocation needs one of those flags.
+`--setup-model MODEL` selects the setup model; `agent.model` configures research.
+The conversation has no harness usage/time cap and is not resumable.
+
+Describe intent, evidence and constraints, then optionally select a local path
+with `/context PATH`. This grants bounded metadata access, not blanket sharing.
+Each non-secret text file requires separate approval; dataset bodies, credentials
+and runtime logs are unavailable. Named readiness probes require approval and
+cannot install, build or run experiments. Checks not performed remain unverified.
+Use `/review` to inspect exact document/config changes and initial versioned
+protocol/constraints, then type the displayed Apply phrase or continue correcting.
+`/cancel` or EOF leaves the campaign untouched. No experiment code is generated,
+no machine capacity is created, and initialization does not start research.
+
+Applied setup creates schema-3 state and a shared owned section in `CLAUDE.md`,
 preserving unrelated text. `instructions --target copilot` explicitly updates
 the owned section in `.github/copilot-instructions.md` when that file takes
 precedence. Nothing changes global provider settings.
@@ -20,9 +41,43 @@ in the current terminal. Managed research sessions receive that interpreter's
 scripts directory on PATH automatically; no global PATH edit is required.
 
 Config loading never creates state or migrates old installations. After an
-explicit quiescent `reset --confirm ID`, `init --existing-config` creates fresh
+explicit quiescent `reset --confirm ID`, `init --existing-config --non-interactive` creates fresh
 state without overwriting the existing configuration/goal. Reset archives the
 old directory, not the ledger, and never starts research.
+
+Publication uses a `.labgoblin.initializing` ownership marker until all approved
+files and initial state/provenance are complete. Concurrent edits invalidate the
+preview. Errors roll back only unchanged attempt-owned writes; a crash or unsafe
+rollback leaves a diagnostic marker and blocks ordinary campaign entry points.
+Inspect its exact file hashes/error and preserve concurrent human edits rather
+than blindly deleting state or treating the campaign as ready.
+
+### Applying configuration changes
+
+Every controller run loads one TOML snapshot after recovering existing work.
+Provider/model/effort, runners, inputs, environments, storage, resources and all
+budgets stay fixed for that run, even if TOML is edited, removed or malformed.
+`validate` and `doctor` inspect a **candidate**, not the active settings.
+Status/dashboard budgets show the loaded snapshot. Submissions and builds issued
+by separate processes use it too; ownership changes during preparation fail
+explicitly instead of mixing configurations.
+
+To apply edits without recreating research: interrupt the controller with Ctrl+C
+(which pauses admission), edit TOML, run `labgoblin validate --json`, then
+`labgoblin run` to load the new snapshot while paused. Use `labgoblin resume`
+and `labgoblin run` to continue. If no controller was running/paused, the next
+`run` loads the file directly. Invalid startup configuration requires another
+run after correction; it is not retried automatically. `reconcile` remains
+available without valid TOML.
+
+Do not use `stop`, `reset` or `reopen` merely to load configuration. Restart
+retains campaign identity, generations, evidence, grants and cumulative usage.
+Admitted work keeps its frozen settings/deadline. Incompatible queued runner,
+input/environment/source/storage or resource requests are reported as not started, retaining their original spec;
+submit a new compatible request explicitly. An old still-running research
+packet cannot submit under a different newly loaded configuration.
+Dashboard chat has its own process-start settings; restart the dashboard to
+apply its TOML edits.
 
 The shared ledger defaults to `%LOCALAPPDATA%\labgoblin\resources.db`
 on Windows or `~/.local/state/labgoblin/resources.db` elsewhere. Tests can select an isolated
@@ -385,9 +440,9 @@ mutate campaign records, reconcile work or acknowledge events.
 
 ### Dashboard Copilot observer
 
-Ordinary dashboard pages need no SDK. Chat is enabled by default and requires
-the optional `dashboard-chat` extra to answer on-demand questions; without it,
-pages remain usable and chat shows an explicit dependency message. Opening a
+The SDK is installed with LabGoblin, but ordinary dashboard pages do not use it.
+Chat is enabled by default; a broken SDK installation leaves pages usable and
+shows explicit repair guidance rather than silently installing packages. Opening a
 page never starts inference. Use `dashboard --no-chat` to disable the observer,
 or set `enabled = false` below. Explicit `--chat`/`--no-chat` flags override the
 configuration. Invalid configuration disables chat while retaining read-only

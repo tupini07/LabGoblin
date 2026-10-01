@@ -317,7 +317,8 @@ class EvidenceReader:
                            "job_counts": counts, "hypotheses": hypotheses, "pending_events": pending,
                            "budgets": self.state.budget(), "recovery": [
                                {key: row[key] for key in ("id", "category", "work_id", "detail")} for row in current["blockers"]],
-                           "note": "Recorded state, not a process probe. Displayed budgets use the last admitted configuration."})
+                           "note": "Recorded state, not a process probe. Budgets use the loaded configuration snapshot; "
+                                   "TOML edits require a controller restart."})
             sources.append(_source("/", "Campaign overview"))
         elif name in ("list_experiments", "get_experiment"):
             with db.read() as conn:

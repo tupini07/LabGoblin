@@ -19,6 +19,31 @@ its interpreter; WSL also declares its distro, and Docker its local context and
 prepared image. Loading configuration is read-only and does not probe runners,
 create state or launch inference.
 
+Terminal initialization is a foreground bootstrap exception, not a managed
+research/observer consumer. It uses the pinned core SDK with an explicit local
+runtime inside an owned stdio relay (no automatic runtime download). The relay
+retires its Windows Job Object when setup/its parent exits. No resource grant,
+setup usage cap, autonomous work, saved transcript or resume operation is added.
+Empty-mode tools require selected roots, per-file consent and approval of fixed
+readiness probes; model text never authorizes publication. Exact reviewed bytes
+and preimages are rechecked before creation. The initialization marker is removed
+last; interrupted/incomplete publication is not an operational campaign.
+Noninteractive/JSON init does not start or authenticate an SDK client.
+
+Configuration activation is an exact-controller-owned, once-per-run transaction.
+`configs` stores the existing typed representation; `restore_config` validates
+it without reading current TOML. Recovery precedes startup validation and remains
+independent of malformed/deleted candidate files. Mutation preparation captures
+the loaded revision and an ownership epoch, including idle-to-running-to-idle
+races. Build admission rechecks that fence after ledger arming and before process
+launch; a mismatch records a proven-not-started receipt. No campaign writer is
+held while entering the machine ledger. Already admitted envelopes are unchanged.
+All TOML budgets/settings require restart; configuration activation never resets
+accounting, generations, evidence or grants. Queued execution settings/resources
+are revalidated, not silently rewritten, and old research packets cannot submit
+under a newly activated configuration. Dashboard settings have a separate
+process-start lifetime.
+
 Explicit local image builds and observers share the machine ledger's
 `consumer_runs` authorization/claim/receipt mechanism, not campaign invocation
 accounting. Builds reserve container resources plus their API client, freeze an

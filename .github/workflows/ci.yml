@@ -1,0 +1,83 @@
+name: Model-free CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  COPILOT_SKIP_CLI_DOWNLOAD: "1"
+
+jobs:
+  regression:
+    name: Windows Python ${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install core and test dependencies
+        run: python -m pip install -e . pytest
+      - name: Model-free regression
+        run: python -m pytest tests -q --basetemp "${{ runner.temp }}\regression" --junitxml=regression.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: regression-${{ matrix.python }}
+          path: regression.xml
+
+  browser:
+    name: Prepared browser with SDK doubles
+    runs-on: windows-latest
+    env:
+      LABGOBLIN_BROWSER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Prepare browser dependencies
+        run: |
+          python -m pip install -e . pytest playwright
+          python -m playwright install chromium
+          $browser = python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()"
+          "LABGOBLIN_BROWSER_EXECUTABLE=$browser" >> $env:GITHUB_ENV
+      - name: Browser and setup regressions without models
+        run: python -m pytest tests\test_dashboard.py tests\test_dashboard_chat.py tests\test_dashboard_redesign.py tests\test_rename.py tests\test_setup_assistant.py -q --basetemp "${{ runner.temp }}\browser" --junitxml=browser.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: browser-diagnostics
+          path: browser.xml
+
+  package:
+    name: Clean wheel and installed example
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install build
+          python -m build --outdir "${{ runner.temp }}\dist"
+      - name: Inspect distribution contents
+        run: python tests\package_check.py "${{ runner.temp }}\dist"
+      - name: Install wheel outside source environment
+        run: |
+          python -m venv "${{ runner.temp }}\installed"
+          $wheel = (Get-ChildItem "${{ runner.temp }}\dist\*.whl").FullName
+          & "${{ runner.temp }}\installed\Scripts\python.exe" -m pip install $wheel
+      - name: Installed model-free acceptance
+        working-directory: ${{ runner.temp }}
+        run: '& "${{ runner.temp }}\installed\Scripts\python.exe" -I "${{ github.workspace }}\tests\installed_smoke.py" --root "${{ runner.temp }}\example"'

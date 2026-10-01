@@ -1,6 +1,6 @@
 """Strict local-only configuration. Loading never creates or migrates state."""
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 import re
 import sys
@@ -288,6 +288,40 @@ def load_config(path: str | Path = ".") -> LabGoblinConfig:
     path = configuration_path(path)
     from labgoblin.evidence import read_bytes
     return parse_config(tomllib.loads(read_bytes(path, 64 * 1024).decode("utf-8")), path)
+
+
+def restore_config(snapshot: dict, *, revision: str, path: str | Path) -> LabGoblinConfig:
+    """Validate the existing persisted dataclass representation without reading TOML."""
+    snapshot = table(snapshot, "configuration snapshot", set(LabGoblinConfig.__dataclass_fields__))
+    if set(snapshot) != set(LabGoblinConfig.__dataclass_fields__):
+        raise ValueError("Configuration snapshot is incomplete")
+    if (snapshot["revision"] != revision or not re.fullmatch("[0-9a-f]{64}", revision)
+            or snapshot["config_path"] != str(Path(path).resolve())):
+        raise ValueError("Configuration snapshot identity/path does not match its campaign")
+    campaign = table(snapshot["campaign"], "snapshot.campaign", set(CampaignConfig.__dataclass_fields__))
+    limits = {}
+    for name in ("max_seconds", "max_invocations"):
+        value = table(campaign.get(name), name, {"value"})
+        limits[name] = value.get("value")
+    runners = {}
+    for name, value in table(snapshot["runners"], "snapshot.runners").items():
+        value = table(value, "snapshot.runner", set(Runner.__dataclass_fields__))
+        fields = {"kind", "python"}
+        if value.get("kind") == "wsl":
+            fields.add("distro")
+        elif value.get("kind") == "docker":
+            fields.update(("image", "context", "network"))
+        runners[name] = {key: item for key, item in value.items() if key in fields}
+    raw = {"schema_version": CONFIG_VERSION, "project": snapshot["project"],
+           "execution": snapshot["execution"], "runners": runners,
+           "campaign": {**table(campaign.get("resources"), "snapshot.resources"), **limits,
+                        "max_jobs": campaign.get("max_jobs"), "max_gpu_hours": campaign.get("max_gpu_hours")},
+           "agent": snapshot["agent"], "storage": snapshot["storage"], "inputs": snapshot["inputs"],
+           "dashboard": {"chat": snapshot["chat"]}}
+    config = replace(parse_config(raw, path), revision=revision)
+    if fingerprint(asdict(config)) != fingerprint(snapshot):
+        raise ValueError("Configuration snapshot does not round-trip through the strict schema")
+    return config
 
 
 def initial_config(name: str, provider: str = "claude", python: str | None = None) -> dict:

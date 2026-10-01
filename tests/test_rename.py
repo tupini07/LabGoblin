@@ -280,7 +280,7 @@ def test_supported_installation_uses_checkout_not_assumed_pypi_release(tmp_path,
     readme = (root / "README.md").read_text(encoding="utf-8")
     guide = (root / "docs" / "local-research.md").read_text(encoding="utf-8")
     assert "git clone https://github.com/tupini07/LabGoblin.git" in readme
-    assert 'python -m pip install -e ".[dashboard-chat]"' in readme
+    assert "pinned SDK is a normal LabGoblin dependency" in readme
     assert 'python -m pip install -e ".[docker-build]"' in guide
     for path in (root / "README.md", root / "CLAUDE.md", *root.joinpath("docs").glob("*.md"),
                  root / "examples" / "local-synthetic" / "README.md"):

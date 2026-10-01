@@ -10,6 +10,7 @@ setup(
         'markdown-it-py>=3.0',
         'tomli_w',
         'psutil>=5.9',
+        'github-copilot-sdk==1.0.15',
         'pywin32>=306; sys_platform == "win32"',
     ],
     package_data={
@@ -21,7 +22,6 @@ setup(
         'examples/local-synthetic/Dockerfile',
     ])],
     extras_require={
-        'dashboard-chat': ['github-copilot-sdk==1.0.15'],
         'docker-build': ['docker==7.1.0'],
     },
     entry_points={

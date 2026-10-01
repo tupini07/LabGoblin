@@ -27,6 +27,18 @@ def _settings(conn, campaign: dict) -> dict:
                                    (campaign["config_revision"],)).fetchone()[0])
 
 
+def _configuration_fence(conn) -> dict:
+    campaign = _campaign(conn)
+    epoch = conn.execute("SELECT value FROM meta WHERE key='controller_epoch'").fetchone()
+    return {"controller": campaign["controller"], "config_revision": campaign["config_revision"],
+            "controller_epoch": epoch[0] if epoch else ""}
+
+
+def _check_configuration_fence(conn, expected):
+    if expected != _configuration_fence(conn):
+        raise ValueError("Controller/configuration changed during preparation; retry with the loaded configuration")
+
+
 def _event(conn, generation: int, kind: str, payload: dict, event_id: str | None = None):
     event_id = event_id or identifier()
     if len(text(event_id, "event ID").encode("utf-8")) > 128 or len(text(kind, "event kind").encode("utf-8")) > 128:
@@ -135,11 +147,14 @@ class State:
 
     @classmethod
     def open(cls, state_dir: str | Path) -> "State":
+        marker = Path(state_dir).with_name(Path(state_dir).name + ".initializing")
+        if marker.exists():
+            raise ValueError(f"Campaign initialization is incomplete or in progress; inspect {marker}")
         return cls(Database(database_path(state_dir)))
 
     @classmethod
-    def create(cls, config, ledger_path: str | Path) -> "State":
-        return cls(Database.create(config, ledger_path))
+    def create(cls, config, ledger_path: str | Path, *, initialization_token=None) -> "State":
+        return cls(Database.create(config, ledger_path, initialization_token=initialization_token))
 
     def campaign(self, *, connection=None) -> dict:
         from contextlib import nullcontext
@@ -181,13 +196,42 @@ class State:
                 raise ValueError("Resource ledger identity changed; recovery cannot use replacement capacity")
             conn.execute("UPDATE meta SET value=? WHERE key='ledger_id'", (ledger_id,))
 
-    def configure(self, config):
+    def configuration(self, candidate=None):
+        from labgoblin.config import load_config, restore_config
+        with self.db.read() as conn:
+            campaign = _campaign(conn)
+            fence = _configuration_fence(conn)
+            if campaign["controller"]:
+                owner = conn.execute("SELECT value FROM meta WHERE key='config_owner'").fetchone()
+                if not owner or owner[0] != campaign["controller"]:
+                    raise ValueError("Controller has not activated a valid startup configuration; retry after startup/recovery")
+                config = restore_config(_settings(conn, campaign), revision=campaign["config_revision"],
+                                        path=self.root.parent / "labgoblin.toml")
+            else:
+                config = candidate if candidate is not None else load_config(self.root.parent)
+            if config.state_dir.resolve() != self.root.resolve():
+                raise ValueError("Configuration belongs to another campaign directory")
+        return config, fence
+
+    def configure(self, config, *, controller):
         if config.state_dir.resolve() != self.root.resolve():
             raise ValueError("Configuration belongs to another campaign directory")
         with self.db.write() as conn:
+            campaign = _campaign(conn)
+            owner = _json(controller)
+            if not controller or campaign["controller"] != owner:
+                raise ValueError("Configuration activation requires exact controller ownership")
+            active = conn.execute("SELECT value FROM meta WHERE key='config_owner'").fetchone()
+            if active and active[0] == owner:
+                raise ValueError("This controller already loaded its configuration; restart to apply edits")
+            old = conn.execute("SELECT content FROM configs WHERE id=?", (config.revision,)).fetchone()
+            if old and old[0] != _json(asdict(config)):
+                raise ValueError("Configuration revision already belongs to different snapshot contents")
             conn.execute("INSERT OR IGNORE INTO configs(id,content,created) VALUES(?,?,?)",
                          (config.revision, _json(asdict(config)), time.time()))
             conn.execute("UPDATE campaign SET config_revision=? WHERE id=?", (config.revision, self.id))
+            conn.execute("INSERT INTO meta(key,value) VALUES('config_owner',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (owner,))
 
     def tick(self, now: float | None = None, *, minimum_elapsed: float | None = None) -> float:
         if minimum_elapsed is not None:
@@ -322,6 +366,8 @@ class State:
         request_digest = fingerprint(spec["request"])
         with self.db.write() as conn:
             campaign = _campaign(conn)
+            if "configuration_fence" in spec:
+                _check_configuration_fence(conn, spec["configuration_fence"])
             old = conn.execute("""SELECT id,request_digest FROM attempts
                 WHERE generation=? AND idempotency_key=?""", (campaign["generation"], spec["key"])).fetchone()
             if old:
@@ -333,10 +379,13 @@ class State:
             if spec.get("authority_revision", campaign["authority_revision"]) != campaign["authority_revision"]:
                 raise ValueError("Governing authority changed during submission preparation; resubmit explicitly")
             if spec.get("submitted_by"):
-                turn = conn.execute("SELECT generation,kind,state FROM turns WHERE id=?", (spec["submitted_by"],)).fetchone()
+                turn = conn.execute("""SELECT t.generation,t.kind,t.state,p.content FROM turns t
+                    JOIN packets p ON p.id=t.packet_id WHERE t.id=?""", (spec["submitted_by"],)).fetchone()
                 if (not turn or turn["generation"] != campaign["generation"] or turn["kind"] != "research"
                         or turn["state"] not in ("prepared", "running")):
                     raise ValueError("Only the current owned research turn may submit work")
+                if json.loads(turn["content"]).get("config_revision") != spec.get("configuration_revision"):
+                    raise ValueError("Research turn configuration changed; return a handoff before submitting")
             if (campaign["operator_mode"] in ("stopping", "stopped")
                     or campaign["progress"] in ("closed", "finalize")):
                 raise ValueError("Campaign is not accepting work; explicitly reopen closed research")
@@ -387,7 +436,8 @@ class State:
                 (*params, limit, offset))]
 
     def source(self, kind: str, body: bytes, *, origin: str, head: str | None = None,
-               metadata: dict | None = None, expected_revision: int | None = None, notify=False) -> str:
+               metadata: dict | None = None, expected_revision: int | None = None, notify=False,
+               configuration_fence=None) -> str:
         text(kind, "source kind")
         text(origin, "source origin")
         if not isinstance(body, bytes) or len(body) > 1024 * 1024:
@@ -397,6 +447,8 @@ class State:
         if head and (head == "rationale" or head.startswith("checkpoint:")):
             raise ValueError("Only an accepted owned handoff can replace governing rationale")
         with self.db.write() as conn:
+            if configuration_fence is not None:
+                _check_configuration_fence(conn, configuration_fence)
             if expected_revision is not None:
                 current = conn.execute("SELECT revision FROM source_heads WHERE name=?", (head,)).fetchone()
                 if (current[0] if current else 0) != expected_revision:
@@ -1093,6 +1145,8 @@ class State:
             if conn.execute("SELECT controller FROM campaign WHERE id=?", (self.id,)).fetchone()[0] != expected:
                 raise ValueError("Controller ownership changed concurrently")
             conn.execute("UPDATE campaign SET controller=? WHERE id=?", (_json(handle) if handle else None, self.id))
+            conn.execute("INSERT INTO meta(key,value) VALUES('controller_epoch',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (identifier(),))
 
     def cancel_attempt(self, attempt_id: str, reason="Operator cancellation") -> dict:
         with self.db.write() as conn:
@@ -1215,6 +1269,8 @@ class State:
             if campaign["started"] is not None:
                 elapsed += max(0, (time.time() if now is None else now) - campaign["observed_wall"])
             return {
+                "configuration": {"revision": campaign["config_revision"],
+                                  "scope": "Loaded controller snapshot; TOML edits require controller restart"},
                 "elapsed_admission_seconds": Limit(settings["max_seconds"]["value"]).view(elapsed),
                 "managed_invocations": Limit(settings["max_invocations"]["value"]).view(campaign["invocations"], reserved),
                 "gpu_hours": {"used": campaign["gpu_hours"], "reserved": active[1], "configured": settings["max_gpu_hours"]},

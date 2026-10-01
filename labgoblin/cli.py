@@ -14,42 +14,9 @@ from labgoblin.evidence import Capture, atomic_bytes, contained, observation, pu
 from labgoblin.evidence import retention_candidates, storage_inventory, watermarks
 from labgoblin.protocol import identifier
 from labgoblin.paths import environment_value, present, project_paths
+from labgoblin.initialization import INSTRUCTIONS, SECTION_START, SECTION_END, instruction_text
 from labgoblin.scheduler import ResourceLedger, ledger_path
 from labgoblin.state import State
-
-
-SECTION_START = "<!-- labgoblin-research:start -->"
-SECTION_END = "<!-- labgoblin-research:end -->"
-INSTRUCTIONS = f"""{SECTION_START}
-## Autonomous local research with LabGoblin
-
-Read the controller's versioned packet before acting. It contains the goal,
-operator constraints, governing rationale, event cutoff and owned result format.
-Use `labgoblin status --json`, `labgoblin budget --json`, and exact `labgoblin evidence`
-or `labgoblin journal entry` retrieval. Previews and searches have bounded coverage.
-
-Submit heavy work with `labgoblin submit --spec work.json --json`. A manifest uses
-a stable idempotency `key`, `argv` array, explicit `source_files`, optional runner
-and hypothesis ID/statement, CPU/RAM/GPU request, finite `seconds`, and relative
-`artifacts`. Write outputs to LABGOBLIN_OUTPUT_DIR; metrics.json is a finite numeric
-JSON object. Access declared inputs through LABGOBLIN_INPUT_NAME. Do not run heavy
-work outside the queue or wait for it while holding a reasoning grant.
-
-Write exactly one JSON handoff to the supplied result path. Explain observations,
-what changed and why, the governing next step, evidence dispositions, and a
-continue/wait/blocked/finalize decision. Finalize names the goal stopping criterion
-and limitations. A report, milestone, empty queue or successful process is not
-automatically successful research. The journal is projected from owned handoffs:
-do not write an independent checkpoint or overwrite research authority.
-
-Do not start providers, subagents or controllers, self-expand the goal, modify
-shared environments or inputs, install into shared environments, push code,
-create GitHub issues/PRs, upload data, or use remote compute. Report/compact are
-fixed safe-point maintenance requests, not independently launched providers.
-Trusted local execution is not filesystem isolation. Effective provider defaults
-may be unknown; configured model and effort are separate from confirmed values.
-{SECTION_END}
-"""
 
 
 class Parser(argparse.ArgumentParser):
@@ -59,17 +26,7 @@ class Parser(argparse.ArgumentParser):
 
 def _instructions(path: Path, state):
     old = read_bytes(path, 256 * 1024) if path.exists() else b""
-    content = old.decode("utf-8")
-    start, end = SECTION_START, SECTION_END
-    if start in content or end in content:
-        if (content.count(start) != 1 or content.count(end) != 1
-                or content.index(end) < content.index(start)):
-            raise ValueError("Instruction markers are ambiguous; preserve and repair the document explicitly")
-        before, owned = content.split(start, 1)
-        _, after = owned.split(end, 1)
-        updated = before + INSTRUCTIONS.strip() + after
-    else:
-        updated = content + ("\n\n" if content else "") + INSTRUCTIONS
+    updated = instruction_text(old.decode("utf-8"))
     if updated.encode("utf-8") == old:
         return
     if path.exists():
@@ -83,59 +40,26 @@ def _instructions(path: Path, state):
 
 
 def initialize(args):
+    from labgoblin import initialization
     root = Path(args.project).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    paths = project_paths(root)
-    path = paths.config
-    if present(path) and not args.existing_config:
-        raise FileExistsError("Configuration already exists; init only creates a fresh local campaign")
-    if args.existing_config and not path.is_file():
-        raise FileNotFoundError("--existing-config requires an existing schema-3 labgoblin.toml")
-    state_dir = paths.state
-    if state_dir.exists() and any(state_dir.iterdir()):
-        raise FileExistsError("Campaign state is not empty; old formats are not migrated")
-    if args.existing_config:
-        import tomllib
-        raw = tomllib.loads(read_bytes(path, 65536).decode("utf-8"))
+    ledger = args.ledger or ledger_path()
+    initialization.preflight(root, existing_config=args.existing_config)
+    if args.non_interactive or args.json:
+        if args.setup_model is not None:
+            raise ValueError("--setup-model applies only to interactive initialization")
+        prepared = initialization.basic(root, ledger, provider=args.agent, existing_config=args.existing_config,
+                                         install_copilot_instructions=args.install_copilot_instructions)
     else:
-        raw = initial_config(root.name, args.agent)
-    config = parse_config(raw, path)
-    state = State.create(config, args.ledger or ledger_path())
-    from labgoblin.processes import CampaignLease
-    with CampaignLease(state.root):
-        with state.db.read():
-            pass
-        return _finish_initialization(args, state, config, raw)
-
-
-def _finish_initialization(args, state, config, raw):
-    import tomli_w
-    root, path = config.root, Path(config.config_path)
-    if not args.existing_config:
-        publish_bytes(path, tomli_w.dumps(raw).encode("utf-8"))
-    goal = root / config.project.research_goal
-    if not goal.exists():
-        publish_bytes(goal, b"# Research goal\n\nDefine the objective, evaluation, evidence, constraints and stopping criteria.\n")
-    journal.ingest_goal(state, config)
-    _instructions(root / "CLAUDE.md", state)
-    copilot = root / ".github" / "copilot-instructions.md"
-    warnings = []
-    if args.install_copilot_instructions:
-        _instructions(copilot, state)
-    elif copilot.exists():
-        warnings.append("Existing .github/copilot-instructions.md may take precedence over CLAUDE.md; "
-                        "install the owned section explicitly with labgoblin instructions --target copilot.")
-    ignore = root / ".gitignore"
-    previous = read_bytes(ignore, 256 * 1024).decode("utf-8") if ignore.exists() else ""
-    state_name = state.root.name
-    missing = [line for line in (f"{state_name}/", f"{state_name}.lock", f"{state_name}-archives/")
-               if line not in previous.splitlines()]
-    if missing:
-        with ignore.open("a", encoding="utf-8") as stream:
-            stream.write("\n# LabGoblin owned runtime state\n" + "\n".join(missing) + "\n")
-    return {"campaign_id": state.id, "project": str(root), "schema_version": 3, "mode": "trusted",
-            "warnings": warnings, "starter_limits": raw["campaign"],
-            "next": "Define the goal and review finite limits; explicitly configure compatible machine capacity before run"}
+        if args.existing_config:
+            raise ValueError("--existing-config requires --non-interactive or --json; existing campaigns are not edited by setup")
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise ValueError("Assisted init requires an interactive terminal; use init --non-interactive or --json")
+        import asyncio
+        from labgoblin.setup_assistant import assist
+        prepared = asyncio.run(assist(root, ledger, provider=args.agent,
+                                      install_copilot_instructions=args.install_copilot_instructions,
+                                      model=args.setup_model))
+    return initialization.apply(prepared)
 
 
 def doctor(root, args):
@@ -162,7 +86,7 @@ def doctor(root, args):
         check("machine", lambda: ResourceLedger(location, expected_id=identity or None).capacity())
     config = check("configuration", lambda: load_config(root))
     if config:
-        checks[-1]["result"] = {"revision": config.revision}
+        checks[-1]["result"] = {"revision": config.revision, "scope": "Disk candidate; requires controller restart"}
         name = args.runner or config.execution.default_runner
         if name not in config.runners:
             checks.append({"check": "runner", "ok": False, "error": f"Unknown runner: {name}"})
@@ -208,7 +132,7 @@ def archive_campaign(state, confirm):
         publish_bytes(target.with_name(target.name + ".lock"), b"\0")
     return {"archived_campaign": state.id, "archive": str(target),
             "retained": "Project configuration, goal, source files and shared machine ledger are unchanged",
-            "next": "Use init --existing-config with an explicit --ledger to create fresh state; no automatic research restart"}
+            "next": "Use init --existing-config --non-interactive with an explicit --ledger to create fresh state; no automatic research restart"}
 
 
 def parser():
@@ -226,6 +150,8 @@ def parser():
 
     init = command("init", "Create fresh schema-3 local campaign state")
     init.add_argument("--agent", choices=("claude", "copilot"), default="claude")
+    init.add_argument("--non-interactive", action="store_true", help="Use starter settings without Copilot authentication or inference")
+    init.add_argument("--setup-model", help="Model for the setup conversation, not the research campaign")
     init.add_argument("--ledger", type=Path)
     init.add_argument("--install-copilot-instructions", action="store_true")
     init.add_argument("--existing-config", action="store_true", help="Initialize fresh state using an existing supported config, without migration")
@@ -353,8 +279,9 @@ def execute(args):
     paths = project_paths(root)
     if args.command == "validate":
         config = load_config(paths.config)
-        return workspace.prepare_spec(config, read_json(args.spec, 65536), validate_only=True) if args.spec else {
+        result = workspace.prepare_spec(config, read_json(args.spec, 65536), validate_only=True) if args.spec else {
             "valid": True, "revision": config.revision, "schema_version": 3, "inference": "never"}
+        return {**result, "configuration_scope": "Disk candidate; not activated"}
     if args.command == "dashboard":
         from labgoblin.dashboard import run_dashboard
         if not 0 <= args.port <= 65535:
@@ -389,7 +316,7 @@ def execute(args):
         if environment_value("TURN_ID"):
             raise ValueError("Image builds are explicit operator operations, not nested research-turn work")
         from labgoblin.backends import build
-        return build(state, load_config(paths.config), args.runner, args.context, args.include,
+        return build(state, None, args.runner, args.context, args.include,
                      cpus=args.cpus, memory_mb=args.memory_mb, timeout=args.seconds)
     if args.command == "storage":
         if args.action == "retention":
@@ -435,14 +362,15 @@ def execute(args):
             raise ValueError("Source set requires --file or --text")
         body = read_bytes(args.file, 1024 * 1024) if args.file else args.text.encode("utf-8")
         body.decode("utf-8")
-        metadata = {}
+        metadata, fence = {}, None
         if args.kind == "goal":
-            config = load_config(state.root.parent)
+            config, fence = state.configuration()
             path = contained(config.root, config.project.research_goal)
             metadata["observed_file_digest"] = Capture.read(path, 1024 * 1024).digest
         source_id = state.source(args.kind, body, origin="operator-command", head=args.kind,
                                  expected_revision=args.expected_revision if args.expected_revision is not None else
-                                 (head["revision"] if head else 0), metadata=metadata, notify=True)
+                                 (head["revision"] if head else 0), metadata=metadata, notify=True,
+                                 configuration_fence=fence)
         return journal.entry(state.db, source_id)
     if args.command == "compact":
         if args.no_agent:
@@ -470,9 +398,8 @@ def execute(args):
     if args.command == "reconcile":
         return {**Campaign(state=state).reconcile(), "campaign": state.campaign()}
     if args.command in ("submit", "batch-submit"):
-        config = load_config(paths.config)
         if args.command == "submit":
-            attempt = workspace.submit(state, config, read_json(args.spec, 65536),
+            attempt = workspace.submit(state, None, read_json(args.spec, 65536),
                                        turn_id=environment_value("TURN_ID"))
             return {"attempt_id": attempt["id"], "status": attempt["status"]}
         data = read_json(args.file)
@@ -482,7 +409,7 @@ def execute(args):
         items = []
         for manifest in manifests:
             try:
-                attempt = workspace.submit(state, config, manifest, turn_id=environment_value("TURN_ID"))
+                attempt = workspace.submit(state, None, manifest, turn_id=environment_value("TURN_ID"))
                 items.append({"ok": True, "attempt_id": attempt["id"], "status": attempt["status"]})
             except (OSError, ValueError, sqlite3.Error) as error:
                 items.append({"ok": False, "error": str(error)[:4000]})
@@ -553,6 +480,12 @@ def main(argv=None):
                       or value.get("campaign", {}).get("blockers"))
         print(json.dumps(value, indent=2, allow_nan=False))
         return 1 if failed else 0
+    except (KeyboardInterrupt, EOFError):
+        if "--json" in argv:
+            print(json.dumps({"cancelled": True, "reason": "Operator cancelled"}))
+        else:
+            print("labgoblin: cancelled", file=sys.stderr)
+        return 130
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         detail = {"error": {"type": type(error).__name__, "message": str(error)[:4000]}}
         if "--json" in argv:

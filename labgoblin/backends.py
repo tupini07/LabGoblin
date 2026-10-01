@@ -641,6 +641,7 @@ def build(state, config, runner_name: str, context: Path, files, *, cpus=1, memo
         raise ValueError(f"Explicit image builds require docker=={BUILD_SDK_VERSION}; "
                          'run python -m pip install -e ".[docker-build]" from the LabGoblin checkout '
                          "with this environment's interpreter")
+    config, configuration_fence = state.configuration(config)
     if runner_name not in config.runners or config.runners[runner_name].kind != "docker":
         raise ValueError("Local image build requires an explicitly selected Docker runner")
     number(timeout, "build deadline")
@@ -686,7 +687,17 @@ def build(state, config, runner_name: str, context: Path, files, *, cpus=1, memo
             path = directory / "envelope.json"
             envelope = replace(envelope, argv=(sys.executable, "-I", "-B", str(bootstrap), "--build-api", str(path)))
             publish_bytes(path, canonical(asdict(envelope)))
+            from labgoblin.state import _check_configuration_fence
+            with state.db.read() as conn:
+                _check_configuration_fence(conn, configuration_fence)
             ledger.arm_consumer(envelope)
+            try:
+                with state.db.read() as conn:
+                    _check_configuration_fence(conn, configuration_fence)
+            except (OSError, ValueError, sqlite3.Error) as error:
+                ledger.finish_consumer(LaunchReceipt(envelope.key, envelope.digest, "not_started", True, 0,
+                    executed=False, reason=f"Configuration changed before build execution: {error}"))
+                raise
             try:
                 with (directory / "supervisor.stdout.log").open("xb") as out, (
                         directory / "supervisor.stderr.log").open("xb") as err:

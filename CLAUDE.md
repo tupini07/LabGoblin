@@ -20,8 +20,8 @@ python -m pytest tests -q
 ```
 
 Use the selected environment's executable when `python` is not on PATH.
-Runtime dependencies are declared in `setup.py`. Optional `dashboard-chat` and
-`docker-build` extras are pinned adapters. Do not add tools or modify shared
+Runtime dependencies are declared in `setup.py`. The pinned Copilot SDK is core;
+`docker-build` is the optional pinned adapter. Do not add tools or modify shared
 environments merely to make a test pass. Real provider calls always need explicit
 authorization and a persisted invocation allowance outside the test campaign.
 
@@ -30,6 +30,7 @@ authorization and a persisted invocation allowance outside the test campaign.
 | Module | Authority |
 |---|---|
 | `config.py`, `protocol.py` | Strict typed configuration, versioned records, finite/unlimited limits. |
+| `initialization.py`, `setup_assistant.py`, `setup_runtime.py` | Reviewed publication, foreground scoped conversation and owned stdio runtime. |
 | `db.py`, `state.py` | Campaign transactions, exact IDs, control revisions, generations and accepted research. |
 | `scheduler.py` | Shared one-time grants, fairness, native placement and separate consumer receipts. |
 | `campaign.py` | Recovery-first progression; no direct unguarded lifecycle writes. |
@@ -48,6 +49,13 @@ authorization and a persisted invocation allowance outside the test campaign.
   death, unused budget, permission to retry, or permission to release.
 - Workers consume frozen envelopes/helpers, not current TOML. Guest payloads
   write qualified receipts, never host SQLite.
+- Each acquired controller activates one configuration snapshot, after recovery.
+  Submission/build preparation uses that snapshot and an ownership/config fence;
+  all TOML edits require restart. Do not reset accounting or rewrite queued evidence.
+- Terminal init uses the core SDK but no research/observer ledger grant. It has
+  no setup usage cap, saved draft, arbitrary command or model-side Apply capability.
+  Explicit noninteractive/JSON init never starts the SDK. Keep per-file consent,
+  fixed approved probes, exact previews and incomplete-publication guards.
 - Windows launches use `processes.background_options()` and assigned Job Objects
   before payload resume. Keep independent breakaway and windowless descendants;
   `DETACHED_PROCESS` is not an equivalent substitute.

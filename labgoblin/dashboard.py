@@ -889,7 +889,8 @@ Which conclusions have experimental support?</p></div></div>
                          + _facts([("Committed CPUs", str(budget["resources"]["committed_cpus"])),
                                    ("Committed memory", f'{budget["resources"]["committed_memory_mb"]} MiB'),
                                    ("Experiment slots", f'{budget["active_experiments"]} / {budget["maximum_experiments"]}')])
-                         + '<p class="muted">Includes managed reasoning and experiments. CPU affinity is placement, not a native CPU-time quota.</p>')
+                         + '<p class="muted">Loaded controller configuration; TOML edits require a controller restart. '
+                           'Includes managed reasoning and experiments. CPU affinity is placement, not a native CPU-time quota.</p>')
         technical = _details("Technical accounting and configured storage", f'<pre>{_escape(json.dumps(budget, indent=2))}</pre>'
                              + f'<pre>{_escape(json.dumps(self.settings["storage"], indent=2))}</pre>'
                              '<p class="muted">Soft monitoring, not a hard disk quota. Use storage inventory for owned sizes and reference reachability.</p>')

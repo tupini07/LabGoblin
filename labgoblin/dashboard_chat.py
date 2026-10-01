@@ -387,7 +387,7 @@ class ObserverService:
         if not self.settings.enabled:
             reason = "Chat is disabled. Start with --chat or set dashboard.chat.enabled = true and omit --no-chat."
         elif version != SDK_VERSION and isinstance(self.driver, SDKObserver):
-            reason = f"Install the dashboard-chat extra (github-copilot-sdk=={SDK_VERSION})."
+            reason = f"Repair the LabGoblin installation; it requires github-copilot-sdk=={SDK_VERSION}."
         elif not (self.settings.cli_path or shutil.which("copilot")):
             reason = "Install and authenticate Copilot CLI first."
         elif isinstance(self.driver, SDKObserver):

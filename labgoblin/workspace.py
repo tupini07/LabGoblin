@@ -164,6 +164,10 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None, *, valida
     workdir.mkdir(parents=True, exist_ok=True)
     spec = {
         "version": 3, "id": root.name, "key": key, "request": request, "runner_name": name,
+        "configuration_revision": config.revision, "runner_definition": asdict(runner),
+        "preparation_settings": {"environment": config.execution.environment,
+                                 "inputs": {name: asdict(value) for name, value in config.inputs.items()},
+                                 "source_files": list(config.execution.source_files)},
         "argv": list(arguments), "cwd": str(workdir), "root": str(root), "output": str(output),
         "source_root": str(snapshot), "source_hashes": copied, "inputs": inputs,
         **asdict(resources), "seconds": seconds, **validators, "artifacts": list(artifacts),
@@ -185,6 +189,7 @@ def submit(state, config, request: dict, *, turn_id: str | None = None) -> dict:
 
 def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
     request = dict(table(request, "work request", REQUEST_FIELDS))
+    config, fence = state.configuration(config)
     with state.db.read() as conn:
         campaign = conn.execute("SELECT generation,authority_revision FROM campaign").fetchone()
         generation = campaign["generation"]
@@ -200,6 +205,8 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
                         AND state IN ('armed','running')""", (turn_id,)).fetchone()):
                 raise ValueError("Submission does not belong to a currently owned research turn")
             packet = json.loads(owner["content"])
+            if packet.get("config_revision") != config.revision:
+                raise ValueError("Research turn configuration changed; return a handoff before submitting")
             if packet.get("authority_revision") != campaign["authority_revision"]:
                 raise ValueError("Governing authority changed since this research packet; return a handoff before submitting")
             source_refs = {name: value["id"] for name, value in packet["sources"].items()}
@@ -218,10 +225,32 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
     spec = prepare_spec(config, effective, owner_id=state.id)
     spec["request"] = request
     spec.update(source_refs=source_refs, generation=generation,
-                authority_revision=campaign["authority_revision"], submitted_by=turn_id)
+                authority_revision=campaign["authority_revision"], submitted_by=turn_id, configuration_fence=fence)
     publish_bytes(Path(spec["root"]) / "spec.json", canonical(spec))
     attempt_id = state.enqueue(spec)
     return state.attempt(attempt_id)
+
+
+def queued_runner(config, spec):
+    name = spec["runner_name"]
+    if name not in config.runners:
+        raise ValueError(f"Queued runner {name!r} is unavailable in the loaded configuration")
+    runner = config.runners[name]
+    if spec.get("runner_definition") != asdict(runner):
+        raise ValueError(f"Queued runner {name!r} differs from its captured definition; resubmit explicitly")
+    prepared = spec.get("preparation_settings")
+    current = {"environment": config.execution.environment,
+               "inputs": {name: asdict(value) for name, value in config.inputs.items()},
+               "source_files": list(config.execution.source_files)}
+    if "source_files" in spec["request"] and prepared is not None:
+        current["source_files"] = prepared["source_files"]
+    if prepared != current or spec["storage"] != asdict(config.storage):
+        raise ValueError("Queued input/environment/source/storage settings changed; resubmit explicitly")
+    allowed = config.campaign.resources
+    if (spec["cpus"] > allowed.cpus or spec["memory_mb"] > allowed.memory_mb
+            or not set(spec["gpus"]).issubset(allowed.gpus)):
+        raise ValueError("Queued request exceeds the loaded campaign resource envelope")
+    return runner
 
 
 def prepare_envelope(state, config, attempt_id: str, grant: dict) -> LaunchEnvelope:
@@ -232,7 +261,7 @@ def prepare_envelope(state, config, attempt_id: str, grant: dict) -> LaunchEnvel
     if grant["state"] != "granted" or grant["work_id"] != attempt_id or grant["owner_id"] != state.id:
         raise ValueError("Work launch requires its exact machine grant")
     require_space(config.storage)
-    runner = validate_runner(asdict(config.runners[spec["runner_name"]]), spec["gpus"])
+    runner = validate_runner(asdict(queued_runner(config, spec)), spec["gpus"])
 
     def resolve(arguments):
         result = list(arguments)

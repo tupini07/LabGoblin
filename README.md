@@ -45,10 +45,23 @@ Set-Location my-research
 labgoblin init --agent copilot
 ```
 
-Plain `init` selects Claude. Edit `research_goal.md` to define the question,
-evaluation protocol, permitted data and environments, stopping criterion, and
-what negative or inconclusive findings would mean. This is an autonomous
-investigation, not an instruction to stop after writing a proposal.
+In an interactive terminal, `init` starts a **Copilot-assisted setup conversation**.
+The pinned Copilot SDK is installed with LabGoblin; the local CLI must already be
+installed and authenticated. Setup helps define the question, evidence, protocol,
+inputs and operational settings, then previews exact changes for your approval.
+It does not start research or configure machine capacity.
+
+Use `init --non-interactive` for deterministic starter files without SDK startup,
+authentication or inference. `--json` also selects this mode; redirected input
+without either flag is an error. The initial research provider remains Claude
+unless `--agent copilot` is supplied. `--setup-model MODEL` changes only the
+setup conversation, not the eventual research model.
+
+Setup shares your conversation and separately approved file text, never silently
+scans a repository or reads datasets. `/context PATH` selects context,
+`/review` previews configuration/documents and versioned protocol/constraints,
+and `/cancel` leaves the campaign untouched. No setup usage cap or resume feature
+is imposed; no experiments, builds or installs are available to the assistant.
 
 Review `labgoblin.toml`, then configure the shared machine envelope explicitly.
 This example permits two managed CPUs and 4 GiB of reserved RAM, plus 2 GiB of
@@ -71,6 +84,13 @@ For a long investigation, review them deliberately. `max_seconds = 0` and
 invocations respectively; no other zero means unlimited. Every operation still
 has a finite deadline, and an open generation reserves its final analysis.
 Managed invocations are not API-call, token, or spending caps.
+
+**All TOML changes require restarting the controller, including budgets.**
+A run loads one snapshot; separate-process submissions use that snapshot too.
+Press Ctrl+C to leave the controller (pausing new admission), edit and validate
+the file, run `labgoblin run` to load it, then `labgoblin resume` and
+`labgoblin run` to continue. This preserves the same campaign, accounting and
+admitted work. `stop` retires work; it is not a configuration-reload command.
 
 See the [operating guide](docs/local-research.md) for complete configuration,
 budgets, provenance, Docker builds, and recovery. The
@@ -155,18 +175,13 @@ disables raw HTML and images; assets are packaged locally.
 
 ### Dashboard Copilot observer
 
-From the LabGoblin checkout, install the optional extra with the campaign's
-prepared environment:
-
-```powershell
-python -m pip install -e ".[dashboard-chat]"
-```
-
-Then run `labgoblin dashboard` from the campaign directory.
+The pinned SDK is a normal LabGoblin dependency. Run `labgoblin dashboard`
+from the campaign directory.
 Chat is enabled by default. Use `--no-chat` or `[dashboard.chat] enabled = false`
 to disable it; an explicit `--chat` or `--no-chat` overrides that configuration.
-Without the optional SDK, ordinary pages still work and chat explains the missing
-dependency. No packages are installed automatically.
+If the SDK installation is broken, ordinary pages still work and chat explains
+how to repair it. No packages are installed automatically. Chat settings are
+loaded by the dashboard process and require its own restart.
 **Ask Copilot** starts inference only when you send a question. The observer gets
 curated, bounded, read-only tools for recorded state, metrics, historical rationale
 and exact source revisions. It cannot steer research, attach to its provider
@@ -201,6 +216,22 @@ Install with `python -m pip install -e .`, then run `python -m pytest tests -q`.
 See [contributor runtime contracts](docs/runtime-protocol.md) and `CLAUDE.md`.
 Guest/browser/build acceptance requires explicit opt-in and already prepared
 environments. Ordinary tests never invoke a real research model.
+
+The checked-in CI workflow covers Windows Python 3.11/3.13, a prepared Chromium
+browser, wheel/sdist identity, and a fresh installed-wheel synthetic run.
+SDK conversations use doubles; CI neither authenticates Copilot nor downloads
+its runtime. Run `python -I tests/installed_smoke.py --root NEW_EMPTY_DIRECTORY`
+with a separately installed wheel to exercise the shipped example without
+source-import leakage.
+
+With explicit authorization for live setup usage and an authenticated local
+Copilot CLI, run `python -m tests.setup_acceptance --live --root NEW_EMPTY_DIRECTORY`.
+This synthetic rehearsal uses the real SDK, tools and initialization path with
+scripted operator input: approved context sharing, declined probes, correction,
+preview/cancel and exact Apply. It does not test physical keyboard interaction
+or start research. The helper reserves up to eight operator prompts in its own
+SQLite allowance, records SDK usage and keeps its synthetic transcript outside
+the generated campaign; this is not a product setup quota or a money limit.
 
 The illustrated [Atari](examples/auto-cleanrl-report/report.html) and
 [Craftax](examples/auto-craftax-report/report.html) reports are **historical v1

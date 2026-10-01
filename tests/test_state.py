@@ -340,15 +340,24 @@ def test_monotonic_controller_high_water_counts_time_during_clock_rollback(state
 
 
 def test_invocation_budget_reserves_closure_and_counts_canaries(state):
+    from labgoblin.processes import own_handle
+    from labgoblin.protocol import canonical, identifier
+
+    def activate(config):
+        owner = own_handle(identifier())
+        state.controller(owner, expected=None)
+        state.configure(config, controller=owner)
+        state.controller(None, expected=canonical(owner).decode())
+
     raw = initial_config("fixture", "copilot")
     raw["campaign"]["max_invocations"] = 1
-    state.configure(parse_config(raw, state.root.parent / "labgoblin.toml"))
+    activate(parse_config(raw, state.root.parent / "labgoblin.toml"))
     current = turn(state, owned=False)
     with pytest.raises(ValueError, match="final analysis"):
         state.reserve_invocations(current.turn_id, "research", ("research",))
     raw["campaign"]["max_invocations"] = 4
     raw["agent"].update(sandbox=True, copilot_home=str(state.root / "sandbox"))
-    state.configure(parse_config(raw, state.root.parent / "labgoblin.toml"))
+    activate(parse_config(raw, state.root.parent / "labgoblin.toml"))
     ids = state.reserve_invocations(current.turn_id, "research", ("canary", "research"))
     assert len(ids) == 2
     assert state.reserve_invocations(current.turn_id, "research", ("canary", "research")) == ids

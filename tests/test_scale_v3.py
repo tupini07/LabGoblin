@@ -72,11 +72,11 @@ def test_database_creation_excludes_readers_and_reset(tmp_path, monkeypatch):
     original = Database._create_owned
     import pytest
 
-    def create(cls, config, ledger):
+    def create(cls, config, ledger, **kwargs):
         with pytest.raises(ValueError, match="readers|archive"):
             with CampaignLease(config.state_dir):
                 pass
-        return original(config, ledger)
+        return original(config, ledger, **kwargs)
 
     monkeypatch.setattr(Database, "_create_owned", classmethod(create))
     db = Database.create(config, tmp_path / "ledger.db")

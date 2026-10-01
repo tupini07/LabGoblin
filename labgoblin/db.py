@@ -269,8 +269,9 @@ class Database:
             yield conn
 
     @classmethod
-    def create(cls, config: LabGoblinConfig, ledger_path: str | Path) -> "Database":
+    def create(cls, config: LabGoblinConfig, ledger_path: str | Path, *, initialization_token=None) -> "Database":
         from labgoblin.processes import CampaignLease
+        from labgoblin.evidence import read_json
         root = config.state_dir
         if not root.resolve().is_relative_to(config.root):
             raise ValueError("Campaign state escapes the project through a symlink/junction")
@@ -285,18 +286,31 @@ class Database:
             if lock_path.resolve() != lock_path or marker != b"\0":
                 raise ValueError("Existing campaign lock is not the expected owned lock file")
         with CampaignLease(root, exclusive=True):
-            path = cls._create_owned(config, ledger_path)
+            marker = root.with_name(root.name + ".initializing")
+            if marker.exists() and (not initialization_token
+                    or read_json(marker)["owner"]["token"] != initialization_token):
+                raise ValueError("Campaign initialization is owned by another attempt")
+            path = cls._create_owned(config, ledger_path, initialization_token=initialization_token)
         return cls(path)
 
     @classmethod
-    def _create_owned(cls, config: LabGoblinConfig, ledger_path: str | Path) -> Path:
+    def _create_owned(cls, config: LabGoblinConfig, ledger_path: str | Path, *, initialization_token=None) -> Path:
         root = config.state_dir
         if root.exists() and any(root.iterdir()):
             raise FileExistsError("Campaign state is not empty; initialize a fresh local campaign")
         root.mkdir(parents=True, exist_ok=True)
         path = database_path(root)
-        with path.open("xb"):
-            pass
+        with path.open("xb") as stream:
+            if initialization_token is not None:
+                import os
+                from labgoblin.evidence import atomic_json, read_json
+                marker = root.with_name(root.name + ".initializing")
+                record = read_json(marker)
+                if record["owner"]["token"] != initialization_token:
+                    raise ValueError("Initialization ownership changed before database creation")
+                stat = os.fstat(stream.fileno())
+                record["database_identity"] = [stat.st_dev, stat.st_ino]
+                atomic_json(marker, record)
         conn = sqlite3.connect(path, isolation_level=None)
         try:
             conn.execute("PRAGMA journal_mode=WAL")

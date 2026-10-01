@@ -110,7 +110,7 @@ def validate_command(command):
 
 
 class WindowsPayload:
-    def __init__(self, command, cwd, env, out, err, spec):
+    def __init__(self, command, cwd, env, out, err, spec, *, stdin=None):
         import msvcrt
         import pywintypes
         import win32api
@@ -138,9 +138,10 @@ class WindowsPayload:
         try:
             info = win32job.QueryInformationJobObject(
                 self.job, win32job.JobObjectExtendedLimitInformation)
-            info["BasicLimitInformation"]["LimitFlags"] = (
-                win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | win32job.JOB_OBJECT_LIMIT_JOB_MEMORY)
-            info["JobMemoryLimit"] = spec["memory_mb"] * 1024 * 1024
+            info["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if "memory_mb" in spec:
+                info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_JOB_MEMORY
+                info["JobMemoryLimit"] = spec["memory_mb"] * 1024 * 1024
             if cpu_ids is not None:
                 info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_AFFINITY
                 info["BasicLimitInformation"]["Affinity"] = sum(1 << cpu for cpu in cpu_ids)
@@ -148,8 +149,9 @@ class WindowsPayload:
             startup = win32process.STARTUPINFO()
             startup.dwFlags |= win32con.STARTF_USESTDHANDLES | win32con.STARTF_USESHOWWINDOW
             startup.wShowWindow = win32con.SW_HIDE
-            null = open(os.devnull, "rb")
-            handles = [msvcrt.get_osfhandle(stream.fileno()) for stream in (null, out, err)]
+            if stdin is None:
+                null = open(os.devnull, "rb")
+            handles = [msvcrt.get_osfhandle(stream.fileno()) for stream in (stdin or null, out, err)]
             for handle in handles:
                 os.set_handle_inheritable(handle, True)
             startup.hStdInput, startup.hStdOutput, startup.hStdError = handles

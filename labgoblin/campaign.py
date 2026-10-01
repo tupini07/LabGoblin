@@ -33,6 +33,8 @@ class Campaign:
         self.adapter = None
         self.adapter_revision = None
         self.clock_anchor = None
+        self.configuration_loaded = False
+        self.configuration_error = None
 
     def acquire(self):
         if self.handle is not None:
@@ -45,6 +47,13 @@ class Campaign:
         handle = own_handle(identifier())
         self.state.controller(handle, expected=existing)
         self.handle = handle
+        self.configuration_loaded = False
+        self.configuration_error = None
+        self.clock_anchor = None
+        self.adapter = None
+        self.adapter_revision = None
+        if not self.fixed_config:
+            self.config = None
         return self
 
     def close(self):
@@ -150,8 +159,11 @@ class Campaign:
             explicit = conn.execute("SELECT 1 FROM maintenance WHERE turn_id=? AND origin='operator' AND state='running'",
                                     (turn["id"],)).fetchone()
         closed = not explicit and (current["generation_state"] != ("sealed" if turn["kind"] == "final_analysis" else "open"))
+        with self.state.db.read() as conn:
+            packet = json.loads(conn.execute("SELECT content FROM packets WHERE id=?", (turn["packet_id"],)).fetchone()[0])
         if (no_agent or current["operator_mode"] not in (("ready", "running", "stopped") if explicit else ("ready", "running"))
-                or turn["revision"] != current["revision"] or closed):
+                or turn["revision"] != current["revision"] or closed
+                or packet.get("config_revision") != current["config_revision"]):
             if not any(i["state"] in ("armed", "running", "uncertain") for i in self._invocations(turn["id"])):
                 self.state.finish_turn(turn["id"], "Pending inference fenced by current control/no-agent policy", cancelled=True)
 
@@ -193,7 +205,7 @@ class Campaign:
     def _launch_attempt(self, attempt):
         resources = Resources(attempt["cpus"], attempt["memory_mb"], tuple(json.loads(attempt["gpus"])))
         spec = json.loads(self.state.attempt(attempt["id"])["spec"])
-        runner = self.config.runners[spec["runner_name"]]
+        runner = workspace.queued_runner(self.config, spec)
         grant = self._grant(attempt["id"], "attempt", resources, native=runner.kind == "native")
         envelope = workspace.prepare_envelope(self.state, self.config, attempt["id"], grant)
         return worker.start(self.state, envelope)
@@ -300,6 +312,19 @@ class Campaign:
             raise ValueError("Controller step requires its exact acquired ownership")
         recovery = self.reconcile()
         errors = list(recovery["errors"])
+        if not self.configuration_loaded:
+            self.configuration_loaded = True
+            try:
+                config = self.config if self.fixed_config else load_config(self.state.root.parent)
+                self.state.configure(config, controller=self.handle)
+                self.config = config
+                self.state.resolve_blocker("configuration")
+            except ERRORS as error:
+                self.configuration_error = error
+        if self.configuration_error is not None:
+            self._error(errors, "configuration", "configuration", self.configuration_error)
+            return {"campaign": self.state.campaign(), "recovery": recovery, "errors": errors, "started": [], "waiting": []}
+        config = self.config
         clock = time.monotonic()
         minimum = self.clock_anchor[1] + clock - self.clock_anchor[0] if self.clock_anchor else None
         elapsed = self.state.tick(minimum_elapsed=minimum)
@@ -316,15 +341,6 @@ class Campaign:
         if (current["operator_mode"] not in ("ready", "running", "stopped")
                 or (current["operator_mode"] == "stopped" or current["generation_state"] == "closed") and not scoped):
             return {"campaign": current, "recovery": recovery, "errors": errors, "started": [], "waiting": []}
-        try:
-            config = self.config if self.fixed_config else load_config(self.state.root.parent)
-            self.state.configure(config)
-            self.state.resolve_blocker("configuration")
-        except ERRORS as error:
-            self._error(errors, "configuration", "configuration", error)
-            self._advance_closure(errors, no_agent=True, admit=False)
-            return {"campaign": self.state.campaign(), "recovery": recovery, "errors": errors, "started": [], "waiting": []}
-        self.config = config
         try:
             require_space(config.storage)
             if current["generation_state"] == "open" and (not no_agent or (config.root / config.project.research_goal).exists()):
