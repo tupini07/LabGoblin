@@ -219,6 +219,9 @@ environments. Ordinary tests never invoke a real research model.
 
 The checked-in CI workflow covers Windows Python 3.11/3.13, a prepared Chromium
 browser, wheel/sdist identity, and a fresh installed-wheel synthetic run.
+Windows regressions use an isolated virtual environment: CPython's launcher
+permits intentional supervisor breakaway from its immediate Windows Job Object,
+unlike the bare hosted interpreter. Runtime ownership checks remain unchanged.
 SDK conversations use doubles; CI neither authenticates Copilot nor downloads
 its runtime. Run `python -I tests/installed_smoke.py --root NEW_EMPTY_DIRECTORY`
 with a separately installed wheel to exercise the shipped example without
