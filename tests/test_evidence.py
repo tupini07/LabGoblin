@@ -6,12 +6,12 @@ import sys
 
 import pytest
 
-from xgenius.config import StorageConfig, Watermark
-from xgenius.evidence import (
+from labgoblin.config import StorageConfig, Watermark
+from labgoblin.evidence import (
     Capture, SizeLimitError, atomic_json, contained, copy_bounded, hash_file,
     parse_json, publish_bytes, read_bytes, read_json, require_space, tail,
 )
-from xgenius.processes import BoundedSpool, background_options
+from labgoblin.processes import BoundedSpool, background_options
 
 
 def test_capture_parse_digest_and_publication_use_same_bytes(tmp_path):
@@ -107,7 +107,7 @@ def test_multibyte_tail_and_rotated_order_are_bounded(tmp_path):
 
 
 def test_atomic_failure_preserves_previous_revision(tmp_path, monkeypatch):
-    import xgenius.evidence as implementation
+    import labgoblin.evidence as implementation
     target = tmp_path / "receipt.json"
     atomic_json(target, {"before": True})
 
@@ -122,7 +122,7 @@ def test_atomic_failure_preserves_previous_revision(tmp_path, monkeypatch):
 
 
 def test_read_containment_and_explicit_volume_watermark(tmp_path, monkeypatch):
-    import xgenius.evidence as implementation
+    import labgoblin.evidence as implementation
     path = tmp_path / "small.json"
     path.write_bytes(b'{"ok":true}')
     assert parse_json(read_bytes(path, 64)) == {"ok": True}
@@ -178,7 +178,7 @@ def test_spool_write_failure_does_not_deadlock_child_or_report_success(tmp_path)
 
 @pytest.mark.parametrize("code", [5, 32, 33])
 def test_windows_file_replacement_retries_transient_reader_denials(tmp_path, monkeypatch, code):
-    from xgenius import processes
+    from labgoblin import processes
     source, target = tmp_path / "new", tmp_path / "old"
     source.write_bytes(b"new")
     target.write_bytes(b"old")
@@ -200,7 +200,7 @@ def test_windows_file_replacement_retries_transient_reader_denials(tmp_path, mon
 
 
 def test_permanent_file_denial_is_bounded_and_preserves_error(tmp_path, monkeypatch):
-    from xgenius import processes
+    from labgoblin import processes
     calls = []
 
     def denied(*args):
@@ -218,7 +218,7 @@ def test_permanent_file_denial_is_bounded_and_preserves_error(tmp_path, monkeypa
 
 def test_supervisor_diagnostics_have_a_finite_utf8_bound():
     import io
-    from xgenius.processes import BoundedDiagnostic
+    from labgoblin.processes import BoundedDiagnostic
     stream = io.BytesIO()
     output = BoundedDiagnostic(stream, 256)
     output.write("\U0001f680" * 1000)

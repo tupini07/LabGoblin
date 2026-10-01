@@ -6,9 +6,9 @@ import json
 import os
 from pathlib import Path
 
-from xgenius.evidence import SizeLimitError, hash_file
-from xgenius.processes import unlink_file
-from xgenius.protocol import canonical, identifier, integer
+from labgoblin.evidence import SizeLimitError, hash_file
+from labgoblin.processes import unlink_file
+from labgoblin.protocol import canonical, identifier, integer
 
 
 COLUMNS = """a.id,a.generation,a.experiment_id,a.hypothesis_id,a.status,a.created,a.started,

@@ -8,8 +8,8 @@ from pathlib import Path
 import shutil
 import time
 
-from xgenius.protocol import canonical, identifier, integer, number, text
-from xgenius.processes import replace_file, unlink_file
+from labgoblin.protocol import canonical, identifier, integer, number, text
+from labgoblin.processes import replace_file, unlink_file
 
 
 class SizeLimitError(ValueError):
@@ -317,7 +317,7 @@ def storage_inventory(state, *, limit=25, offset=0):
 
 def retention_candidates(state, *, limit=25, offset=0):
     import itertools
-    from xgenius.processes import process_state
+    from labgoblin.processes import process_state
     integer(limit, "retention page size")
     integer(offset, "retention offset", zero=True)
     if limit > 100 or offset > 10000:

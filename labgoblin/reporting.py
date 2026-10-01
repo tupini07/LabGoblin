@@ -7,9 +7,9 @@ import math
 from pathlib import Path
 import time
 
-from xgenius.evidence import contained, observation, publish_stream
-from xgenius.protocol import AdmissionWait, PACKET_BYTES, canonical, fingerprint, identifier, integer, table, text
-from xgenius.state import _active_directives, _campaign, _source_revision
+from labgoblin.evidence import contained, observation, publish_stream
+from labgoblin.protocol import AdmissionWait, PACKET_BYTES, canonical, fingerprint, identifier, integer, table, text
+from labgoblin.state import _active_directives, _campaign, _source_revision
 
 
 def selection_options(selected=None, selection_reason="Complete generation inventory"):
@@ -312,7 +312,7 @@ def _chart(points, metric):
 
 def _render_outputs(state, view, value, report_id, *, max_bytes):
     import base64
-    from xgenius import journal
+    from labgoblin import journal
     directory = contained(state.root, Path("reports") / report_id)
     with state.db.read() as conn:
         def sources():

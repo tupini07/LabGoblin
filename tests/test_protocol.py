@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from xgenius.config import initial_config, load_config, parse_config
-from xgenius.protocol import (
+from labgoblin.config import initial_config, load_config, parse_config
+from labgoblin.protocol import (
     HANDOFF_BYTES, Handoff, LaunchEnvelope, LaunchKey, Limit, Resources, argv, canonical,
 )
 
@@ -15,20 +15,20 @@ def config(tmp_path, **changes):
     raw = initial_config("fixture", "copilot")
     for section, values in changes.items():
         raw[section].update(values)
-    return parse_config(raw, tmp_path / "xgenius.toml")
+    return parse_config(raw, tmp_path / "labgoblin.toml")
 
 
 def test_local_config_load_does_not_create_state(tmp_path):
     raw = initial_config("fixture")
     import tomli_w
-    path = tmp_path / "xgenius.toml"
+    path = tmp_path / "labgoblin.toml"
     path.write_text(tomli_w.dumps(raw), encoding="utf-8")
     value = load_config(path)
     assert value.agent.command == ("claude", "--dangerously-skip-permissions")
     assert value.runners["native"].kind == "native"
     assert value.agent.resources.memory_mb == 2048
     assert not value.state_dir.exists()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["xgenius.toml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["labgoblin.toml"]
 
 
 @pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
@@ -36,7 +36,7 @@ def test_old_or_ambiguous_versions_rejected(tmp_path, version):
     raw = initial_config("fixture")
     raw["schema_version"] = version
     with pytest.raises(ValueError, match="Unsupported configuration"):
-        parse_config(raw, tmp_path / "xgenius.toml")
+        parse_config(raw, tmp_path / "labgoblin.toml")
 
 
 @pytest.mark.parametrize("section,values", [
@@ -54,7 +54,7 @@ def test_invalid_config_fields(tmp_path, section, values):
     raw = initial_config("fixture")
     raw.setdefault(section, {}).update(values)
     with pytest.raises(ValueError):
-        parse_config(raw, tmp_path / "xgenius.toml")
+        parse_config(raw, tmp_path / "labgoblin.toml")
 
 
 def test_explicit_unlimited_dimensions_and_zero_gpu(tmp_path):
@@ -84,7 +84,7 @@ def test_runner_fields_are_kind_specific_and_explicit(tmp_path):
         "guest": {"kind": "wsl", "python": "python3", "distro": "Ubuntu"},
         "container": {"kind": "docker", "python": "python", "image": "prepared", "context": "local"},
     })
-    assert len(parse_config(raw, tmp_path / "xgenius.toml").runners) == 3
+    assert len(parse_config(raw, tmp_path / "labgoblin.toml").runners) == 3
     for name, field, value in [
         ("native", "kind", "local"), ("native", "python", ""), ("native", "distro", "Ubuntu"),
         ("guest", "distro", "docker-desktop"), ("container", "context", ""),
@@ -92,14 +92,14 @@ def test_runner_fields_are_kind_specific_and_explicit(tmp_path):
         broken = deepcopy(raw)
         broken["runners"][name][field] = value
         with pytest.raises(ValueError):
-            parse_config(broken, tmp_path / "xgenius.toml")
+            parse_config(broken, tmp_path / "labgoblin.toml")
 
 
 def test_config_identity_changes_without_mutating_an_existing_config(tmp_path):
     raw = initial_config("fixture")
-    before = parse_config(raw, tmp_path / "xgenius.toml")
+    before = parse_config(raw, tmp_path / "labgoblin.toml")
     raw["agent"]["timeout_seconds"] = 123
-    after = parse_config(raw, tmp_path / "xgenius.toml")
+    after = parse_config(raw, tmp_path / "labgoblin.toml")
     assert before.agent.timeout_seconds == 600
     assert after.agent.timeout_seconds == 123
     assert before.revision != after.revision
@@ -110,7 +110,7 @@ def test_no_legacy_sections_or_unknown_input_fields(tmp_path):
                   {"inputs": {"x": {"path": "input", "guess": True}}}]:
         raw = {**initial_config("fixture"), **extra}
         with pytest.raises(ValueError, match="Unknown"):
-            parse_config(raw, tmp_path / "xgenius.toml")
+            parse_config(raw, tmp_path / "labgoblin.toml")
 
 
 def test_sandbox_requires_scoped_explicit_profile(tmp_path):
@@ -118,7 +118,7 @@ def test_sandbox_requires_scoped_explicit_profile(tmp_path):
         config(tmp_path, agent={"sandbox": True})
     with pytest.raises(ValueError, match="under this campaign"):
         config(tmp_path, agent={"sandbox": True, "copilot_home": str(tmp_path.parent)})
-    value = config(tmp_path, agent={"sandbox": True, "copilot_home": ".xgenius\\copilot"})
+    value = config(tmp_path, agent={"sandbox": True, "copilot_home": ".labgoblin\\copilot"})
     assert value.agent.invocation_bundle == 2
     assert not value.state_dir.exists()
 
@@ -154,7 +154,7 @@ def test_owned_handoff_validation_and_deferral():
          "wake_condition": "Attempt completes"}]))
     assert value.evidence[0].wake_condition == "Attempt completes"
     for changes in [
-        {"summary": ""}, {"journal": ".xgenius/journal.md"}, {"disposition": "complete"},
+        {"summary": ""}, {"journal": ".labgoblin/journal.md"}, {"disposition": "complete"},
         {"disposition": "finalize"}, {"maintenance": ["shell"]},
         {"evidence": [{"event_id": "event", "disposition": "deferred", "reason": "Later"}]},
         {"summary": "x" * HANDOFF_BYTES},

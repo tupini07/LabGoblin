@@ -6,10 +6,12 @@ do not assume `CLAUDE.md` wins or overwrite unrelated instructions.
 
 ## Product and development
 
-xgenius is a local autonomous research harness, not a general workflow engine.
+LabGoblin is a local autonomous research harness, not a general workflow engine.
 Python 3.11+, native Windows, prepared WSL2 and local Linux Docker are supported.
 The schema-3 configuration, campaign DB, machine ledger and worker protocol are
-separately versioned. There is no compatibility reader or campaign migration.
+separately versioned. There is no old-schema reader or campaign migration.
+`paths.py` resolves only LabGoblin names; there are no old-name aliases or frozen
+helper compatibility readers. Never rewrite admitted envelopes or receipts.
 Do not reintroduce cluster commands, implicit image pulls or environment installs.
 
 ```powershell

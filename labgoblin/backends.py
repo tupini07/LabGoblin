@@ -19,13 +19,13 @@ import tempfile
 import time
 from types import SimpleNamespace
 
-from xgenius import payload
-from xgenius.processes import temporary_directory
-from xgenius.evidence import (
+from labgoblin import payload
+from labgoblin.processes import temporary_directory
+from labgoblin.evidence import (
     atomic_json, contained, copy_bounded, hash_file, parse_json, publish_bytes, read_bytes,
     read_json, require_space, tail,
 )
-from xgenius.protocol import (
+from labgoblin.protocol import (
     AdmissionWait, LaunchEnvelope, LaunchKey, LaunchReceipt, PreExecutionError, Resources,
     UncertainExecution, canonical, identifier, number, strings,
 )
@@ -39,7 +39,7 @@ INTERPRETER_PROBE = (
 )
 def command(arguments, *, timeout=30, limit=65536) -> str:
     """Bounded, model-free probes use headroom, not an inference allocation."""
-    with temporary_directory(prefix="xgenius-probe-") as name:
+    with temporary_directory(prefix="labgoblin-probe-") as name:
         root = Path(name)
         result = payload.run_process({
             "argv": list(arguments), "cwd": str(root), "root": str(root / "logs"),
@@ -179,12 +179,12 @@ def prepare_guest(envelope: LaunchEnvelope) -> tuple[dict, list[str]]:
         output = Path(spec["output"])
         output.mkdir(parents=True, exist_ok=True)
         spec.update(root="/run", cwd="/source/" + cwd.as_posix(), output="/output", cancel_path="/run/cancel")
-        name = f"xgenius-{envelope.key.nonce}"
+        name = f"labgoblin-{envelope.key.nonce}"
         invoke = [
             *docker_prefix(runner), "create", "--pull=never", "--name", name,
-            "--label", f"xgenius.nonce={envelope.key.nonce}",
-            "--label", f"xgenius.envelope={envelope.digest}",
-            "--label", f"xgenius.campaign={envelope.key.campaign_id}",
+            "--label", f"labgoblin.nonce={envelope.key.nonce}",
+            "--label", f"labgoblin.envelope={envelope.digest}",
+            "--label", f"labgoblin.campaign={envelope.key.campaign_id}",
             "--cpus", str(envelope.resources.cpus), "--memory", f"{envelope.resources.memory_mb}m",
             "--restart", "no", "--network", "bridge" if runner["network"] else "none",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
@@ -215,13 +215,13 @@ def docker_state(envelope):
     if validate_docker_endpoint(runner["context"]) != runner["endpoint"]:
         raise ValueError("Frozen Docker endpoint identity changed")
     fields = command([
-        *docker_prefix(runner), "inspect", f"xgenius-{envelope.key.nonce}", "--format",
+        *docker_prefix(runner), "inspect", f"labgoblin-{envelope.key.nonce}", "--format",
         '{"id":{{json .Id}},"image":{{json .Image}},"labels":{{json .Config.Labels}},'
         '"state":{{json .State}},"restart":{{json .HostConfig.RestartPolicy.Name}}}',
     ])
     value = parse_json(fields.encode("utf-8"))
-    expected = {"xgenius.nonce": envelope.key.nonce, "xgenius.envelope": envelope.digest,
-                "xgenius.campaign": envelope.key.campaign_id}
+    expected = {"labgoblin.nonce": envelope.key.nonce, "labgoblin.envelope": envelope.digest,
+                "labgoblin.campaign": envelope.key.campaign_id}
     if any(value["labels"].get(key) != item for key, item in expected.items()):
         raise ValueError("Container incarnation labels differ from the frozen launch")
     if value["image"] != runner["image_id"] or value["restart"] not in ("no", ""):
@@ -272,7 +272,7 @@ def _supervise_docker(envelope, invoke):
 
 
 def supervise(envelope: LaunchEnvelope) -> LaunchReceipt:
-    from xgenius.workspace import checked_inputs, verify_sources
+    from labgoblin.workspace import checked_inputs, verify_sources
     with ExitStack() as stack:
         try:
             execution = envelope.metadata.get("execution", {})
@@ -337,8 +337,8 @@ def inspect_payload(envelope: LaunchEnvelope) -> str:
         if value not in ("alive", "dead", "unknown"):
             raise ValueError("WSL returned an invalid ownership observation")
         return value
-    from xgenius.processes import process_state
-    from xgenius.state import State
+    from labgoblin.processes import process_state
+    from labgoblin.state import State
     state = State.open(Path(envelope.state_path).parent)
     launch = state.launch(envelope.key.nonce)
     if launch["phase"] != "executing" or not launch["supervisor"]:
@@ -356,7 +356,7 @@ def inspect_payload(envelope: LaunchEnvelope) -> str:
     for name in names:
         try:
             job = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False,
-                                        f"xgenius-{envelope.key.nonce}-{name}")
+                                        f"labgoblin-{envelope.key.nonce}-{name}")
         except pywintypes.error as error:
             if error.winerror == 2:
                 continue
@@ -409,7 +409,7 @@ def build_dockerfile(body: bytes, resolve_image, token: str) -> tuple[bytes, dic
                 raise ValueError("Build stages require distinct literal names")
             stages.append(name)
             pending = "FROM " + " ".join(fields)
-            output.extend((pending, f'LABEL xgenius.build="{token}"'))
+            output.extend((pending, f'LABEL labgoblin.build="{token}"'))
         else:
             if not stages and instruction != "ARG":
                 raise ValueError("Dockerfile must start with FROM (optionally preceded by ARG)")
@@ -420,8 +420,8 @@ def build_dockerfile(body: bytes, resolve_image, token: str) -> tuple[bytes, dic
                         previous = stages[:-1]
                         if source not in previous and not (source.isdecimal() and int(source) < len(previous)):
                             raise ValueError("COPY --from may only reference an earlier stage, never an external image")
-            if instruction == "LABEL" and ("xgenius." in rest.lower() or "$" in rest):
-                raise ValueError("Reserved xgenius labels and dynamic label keys are not permitted")
+            if instruction == "LABEL" and ("labgoblin." in rest.lower() or "$" in rest):
+                raise ValueError("Reserved labgoblin labels and dynamic label keys are not permitted")
             if instruction not in ("ARG", "RUN", "COPY", "ENV", "LABEL", "EXPOSE", "VOLUME", "USER",
                                    "WORKDIR", "CMD", "ENTRYPOINT", "STOPSIGNAL", "HEALTHCHECK", "SHELL"):
                 raise ValueError(f"Unsupported classic Dockerfile instruction: {instruction}")
@@ -442,7 +442,7 @@ def prepare_build_context(context: Path, files, directory: Path, runner: dict, t
         source = contained(context, name)
         relative = source.relative_to(context)
         if (not source.is_file() or any(part.casefold() in
-                (".git", ".venv", ".xgenius", ".env", ".ssh", ".copilot") for part in relative.parts)):
+                (".git", ".venv", ".labgoblin", ".xgenius", ".env", ".ssh", ".copilot") for part in relative.parts)):
             raise ValueError(f"Build context requires explicit source files, not state or credentials: {name}")
         record = copy_bounded(source, contained(directory / "context", relative), max(1, limit - total))
         total += record["bytes"]
@@ -517,7 +517,7 @@ def build_api(envelope: LaunchEnvelope):
     import docker
     import requests
     directory = Path(envelope.root)
-    from xgenius.scheduler import ResourceLedger
+    from labgoblin.scheduler import ResourceLedger
     ledger = ResourceLedger(envelope.ledger_path, expected_id=envelope.ledger_id)
     run = ledger.consumer_run(envelope.key.grant_id)
     if not run or run["phase"] != "executing" or run["digest"] != envelope.digest:
@@ -558,9 +558,9 @@ def build_api(envelope: LaunchEnvelope):
 
 
 def build_main(mode, path):
-    from xgenius.processes import own_handle
-    from xgenius.scheduler import ResourceLedger
-    from xgenius.worker import verify_runtime
+    from labgoblin.processes import own_handle
+    from labgoblin.scheduler import ResourceLedger
+    from labgoblin.worker import verify_runtime
     envelope = LaunchEnvelope.parse(read_json(Path(path)))
     if envelope.kind != "build":
         raise ValueError("Build helper requires its exact build authorization")
@@ -599,14 +599,14 @@ def build_main(mode, path):
             raise UncertainExecution("Invalid build operation result")
         prefix = docker_prefix(runner)
         remaining = command([*prefix, "ps", "--all", "--filter",
-                             f"label=xgenius.build={envelope.key.nonce}", "--format", "{{.ID}}"])
+                             f"label=labgoblin.build={envelope.key.nonce}", "--format", "{{.ID}}"])
         for container_id in remaining.splitlines():
             active = command([*prefix, "inspect", container_id, "--format", "{{.State.Running}}"])
             if active != "false":
                 raise UncertainExecution("An owned build container is not quiescent")
         if result["status"] == "completed":
             image = parse_json(command([*prefix, "image", "inspect", settings["temporary_tag"], "--format",
-                '{"id":{{json .Id}},"owner":{{json (index .Config.Labels "xgenius.build")}}}']).encode("utf-8"))
+                '{"id":{{json .Id}},"owner":{{json (index .Config.Labels "labgoblin.build")}}}']).encode("utf-8"))
             if image["owner"] != envelope.key.nonce or not re.fullmatch(r"sha256:[a-f0-9]{64}", image["id"]):
                 raise UncertainExecution("Built image does not identify this build incarnation")
             command([*prefix, "tag", image["id"], runner["image"]])
@@ -630,15 +630,17 @@ def build_main(mode, path):
 
 def build(state, config, runner_name: str, context: Path, files, *, cpus=1, memory_mb=1024, timeout=600) -> dict:
     import importlib.metadata
-    from xgenius.processes import CampaignLease, background_options, own_handle
-    from xgenius.scheduler import ResourceLedger
-    from xgenius.worker import prepare_runtime
+    from labgoblin.processes import CampaignLease, background_options, own_handle
+    from labgoblin.scheduler import ResourceLedger
+    from labgoblin.worker import prepare_runtime
     try:
         version = importlib.metadata.version("docker")
     except importlib.metadata.PackageNotFoundError:
         version = None
     if version != BUILD_SDK_VERSION:
-        raise ValueError(f"Explicit image builds require docker=={BUILD_SDK_VERSION}; install xgenius[docker-build]")
+        raise ValueError(f"Explicit image builds require docker=={BUILD_SDK_VERSION}; "
+                         'run python -m pip install -e ".[docker-build]" from the LabGoblin checkout '
+                         "with this environment's interpreter")
     if runner_name not in config.runners or config.runners[runner_name].kind != "docker":
         raise ValueError("Local image build requires an explicitly selected Docker runner")
     number(timeout, "build deadline")
@@ -678,7 +680,7 @@ def build(state, config, runner_name: str, context: Path, files, *, cpus=1, memo
                 resources, config.revision, metadata={"cpu_ids": [], "log_bytes": config.storage.log_bytes,
                     "build": {"runner": runner, "snapshot": snapshot, "cpus": cpus, "memory_mb": memory_mb,
                               "network": "default" if runner["network"] else "none",
-                              "temporary_tag": "xgenius-build:" + token}})
+                              "temporary_tag": "labgoblin-build:" + token}})
             envelope = prepare_runtime(state, envelope, root=directory.parent)
             bootstrap = Path(envelope.metadata["runtime"]["root"]) / "bootstrap.py"
             path = directory / "envelope.json"

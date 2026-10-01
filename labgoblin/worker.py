@@ -9,35 +9,35 @@ import subprocess
 import sys
 import time
 
-from xgenius.evidence import atomic_json, contained, hash_file, publish_bytes, read_bytes, read_json
-from xgenius.processes import background_options, own_handle, process_state
-from xgenius.protocol import LaunchEnvelope, LaunchReceipt, PreExecutionError, UncertainExecution, canonical, fingerprint
-from xgenius.scheduler import ResourceLedger
-from xgenius.state import State
+from labgoblin.evidence import atomic_json, contained, hash_file, publish_bytes, read_bytes, read_json
+from labgoblin.processes import background_options, own_handle, process_state
+from labgoblin.protocol import LaunchEnvelope, LaunchReceipt, PreExecutionError, UncertainExecution, canonical, fingerprint
+from labgoblin.scheduler import ResourceLedger
+from labgoblin.state import State
 
 
 RUNTIME_FILES = (
     "__init__.py", "protocol.py", "config.py", "db.py", "state.py", "evidence.py",
     "processes.py", "scheduler.py", "worker.py", "backends.py", "payload.py",
     "workspace.py", "agent.py", "agent_policy.py", "agent_worker.py",
-    "journal.py", "results.py", "reporting.py", "dashboard_data.py", "dashboard_chat.py",
+    "journal.py", "results.py", "reporting.py", "dashboard_data.py", "dashboard_chat.py", "paths.py",
 )
 BOOTSTRAP = b"""from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from xgenius.processes import bound_diagnostics
+from labgoblin.processes import bound_diagnostics
 bound_diagnostics()
 if sys.argv[1] in ("--build-supervisor", "--build-api"):
-    from xgenius.backends import build_main
+    from labgoblin.backends import build_main
     raise SystemExit(build_main(sys.argv[1], sys.argv[2]))
 if sys.argv[1] in ("--observer-supervisor", "--observer-sdk"):
-    from xgenius.dashboard_chat import worker_main
+    from labgoblin.dashboard_chat import worker_main
     raise SystemExit(worker_main(sys.argv[1], sys.argv[2]))
 if sys.argv[1] == "--payload":
-    from xgenius.payload import main
+    from labgoblin.payload import main
     digest = sys.argv[sys.argv.index("--digest") + 1] if "--digest" in sys.argv else None
     raise SystemExit(main(sys.argv[-1], inspect="--inspect" in sys.argv[2:-1], expected_digest=digest))
-from xgenius.worker import main
+from labgoblin.worker import main
 raise SystemExit(main(sys.argv[1]))
 """
 
@@ -50,14 +50,15 @@ def prepare_runtime(state: State, envelope: LaunchEnvelope, *, root: Path | None
     source = Path(__file__).parent
     bodies = {name: read_bytes(source / name, 1024 * 1024) for name in RUNTIME_FILES}
     hashes = {name: hashlib.sha256(body).hexdigest() for name, body in bodies.items()}
-    runtime_id = fingerprint({"files": hashes, "bootstrap": hashlib.sha256(BOOTSTRAP).hexdigest()})
+    manifest = {"files": hashes, "bootstrap": hashlib.sha256(BOOTSTRAP).hexdigest(),
+                "namespace": "labgoblin"}
+    runtime_id = fingerprint(manifest)
     root = contained(root or state.root, Path("runtime") / runtime_id)
     for name, body in bodies.items():
-        publish_bytes(root / "xgenius" / name, body)
+        publish_bytes(root / "labgoblin" / name, body)
     publish_bytes(root / "bootstrap.py", BOOTSTRAP)
     return replace(envelope, metadata={**envelope.metadata, "runtime": {
-        "id": runtime_id, "root": str(root), "files": hashes,
-        "bootstrap": hashlib.sha256(BOOTSTRAP).hexdigest(),
+        "id": runtime_id, "root": str(root), **manifest,
     }})
 
 
@@ -65,15 +66,19 @@ def verify_runtime(state: State, envelope: LaunchEnvelope):
     runtime = envelope.metadata.get("runtime")
     if not isinstance(runtime, dict) or not isinstance(runtime.get("files"), dict):
         raise PreExecutionError("Launch lacks a frozen helper identity")
+    namespace = runtime.get("namespace")
+    if namespace != "labgoblin":
+        raise PreExecutionError("Frozen helper namespace is unsupported")
     if set(runtime["files"]) != set(RUNTIME_FILES):
         raise PreExecutionError("Frozen helper manifest is incomplete")
     root = contained(state.root / "runtime", runtime["root"])
-    if fingerprint({"files": runtime["files"], "bootstrap": runtime["bootstrap"]}) != runtime["id"]:
+    manifest = {"files": runtime["files"], "bootstrap": runtime["bootstrap"], "namespace": namespace}
+    if fingerprint(manifest) != runtime["id"]:
         raise PreExecutionError("Frozen helper manifest identity is invalid")
     for name, expected in runtime["files"].items():
         if Path(name).name != name or name not in RUNTIME_FILES:
             raise PreExecutionError("Frozen helper manifest contains an unsupported path")
-        if hash_file(root / "xgenius" / name, 1024 * 1024) != expected:
+        if hash_file(root / namespace / name, 1024 * 1024) != expected:
             raise PreExecutionError(f"Frozen helper changed: {name}")
     if hash_file(root / "bootstrap.py", 65536) != runtime["bootstrap"]:
         raise PreExecutionError("Frozen worker bootstrap changed")
@@ -173,9 +178,9 @@ def execute(envelope: LaunchEnvelope, executor=None) -> int:
         atomic_json(launch_directory(envelope) / "supervisor.json", handle)
         if executor is None:
             if envelope.kind == "attempt":
-                from xgenius.backends import supervise
+                from labgoblin.backends import supervise
             else:
-                from xgenius.agent_policy import supervise
+                from labgoblin.agent_policy import supervise
             executor = supervise
         entered = True
         receipt = executor(envelope)
@@ -241,7 +246,7 @@ def reconcile(state: State, inspector=None) -> dict:
                     continue
             if receipt_path.exists():
                 if receipt_path.name == "backend-receipt.json":
-                    from xgenius.backends import read_receipt
+                    from labgoblin.backends import read_receipt
                     receipt = read_receipt(envelope)
                     if receipt is None:
                         raise UncertainExecution("Backend receipt disappeared before qualification")

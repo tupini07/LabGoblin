@@ -4,10 +4,10 @@ import time
 
 from tests.test_controller import fixture
 from tests.test_workspace import request
-from xgenius import workspace
-from xgenius.campaign import Campaign
-from xgenius.db import Database
-from xgenius.processes import CampaignLease
+from labgoblin import workspace
+from labgoblin.campaign import Campaign
+from labgoblin.db import Database
+from labgoblin.processes import CampaignLease
 
 
 def test_terminal_history_does_not_reparse_specs_or_replay_releases(tmp_path, monkeypatch):
@@ -67,8 +67,8 @@ def test_terminal_history_does_not_reparse_specs_or_replay_releases(tmp_path, mo
 
 
 def test_database_creation_excludes_readers_and_reset(tmp_path, monkeypatch):
-    from xgenius.config import initial_config, parse_config
-    config = parse_config(initial_config("creation"), tmp_path / "xgenius.toml")
+    from labgoblin.config import initial_config, parse_config
+    config = parse_config(initial_config("creation"), tmp_path / "labgoblin.toml")
     original = Database._create_owned
     import pytest
 

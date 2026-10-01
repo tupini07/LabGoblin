@@ -6,8 +6,9 @@ from pathlib import Path
 import sqlite3
 import time
 
-from xgenius.config import XGeniusConfig
-from xgenius.protocol import ACTIVE, DATABASE_VERSION, canonical, identifier, require_version
+from labgoblin.config import LabGoblinConfig
+from labgoblin.paths import DATABASE_NAME, database_path
+from labgoblin.protocol import ACTIVE, DATABASE_VERSION, canonical, identifier, require_version
 
 
 APPLICATION_ID = 0x58474533
@@ -211,9 +212,9 @@ def connection(path: str | Path, *, write: bool = False, lease: bool = True):
     path = Path(path).resolve(strict=True)
     if not path.is_file():
         raise ValueError(f"Database is not a file: {path}")
-    from xgenius.processes import CampaignLease
+    from labgoblin.processes import CampaignLease
     lock_path = path.parent.with_name(path.parent.name + ".lock")
-    guard = CampaignLease(path.parent) if lease and path.name == "xgenius.db" and lock_path.exists() else nullcontext()
+    guard = CampaignLease(path.parent) if lease and path.name == DATABASE_NAME and lock_path.exists() else nullcontext()
     with guard:
         with _connection(path, write=write) as conn:
             yield conn
@@ -245,7 +246,7 @@ class Database:
             require_version(conn.execute("PRAGMA user_version").fetchone()[0],
                             DATABASE_VERSION, "campaign database")
             if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
-                raise ValueError("Database is not an xgenius campaign")
+                raise ValueError("Database is not a LabGoblin campaign")
             row = conn.execute("SELECT id FROM campaign").fetchone()
             if row is None:
                 raise ValueError("Campaign initialization is incomplete")
@@ -268,8 +269,8 @@ class Database:
             yield conn
 
     @classmethod
-    def create(cls, config: XGeniusConfig, ledger_path: str | Path) -> "Database":
-        from xgenius.processes import CampaignLease
+    def create(cls, config: LabGoblinConfig, ledger_path: str | Path) -> "Database":
+        from labgoblin.processes import CampaignLease
         root = config.state_dir
         if not root.resolve().is_relative_to(config.root):
             raise ValueError("Campaign state escapes the project through a symlink/junction")
@@ -288,12 +289,12 @@ class Database:
         return cls(path)
 
     @classmethod
-    def _create_owned(cls, config: XGeniusConfig, ledger_path: str | Path) -> Path:
+    def _create_owned(cls, config: LabGoblinConfig, ledger_path: str | Path) -> Path:
         root = config.state_dir
         if root.exists() and any(root.iterdir()):
             raise FileExistsError("Campaign state is not empty; initialize a fresh local campaign")
         root.mkdir(parents=True, exist_ok=True)
-        path = root / "xgenius.db"
+        path = database_path(root)
         with path.open("xb"):
             pass
         conn = sqlite3.connect(path, isolation_level=None)
@@ -316,7 +317,7 @@ class Database:
             conn.execute("""INSERT INTO campaign(
                 id,generation,operator_mode,progress,created,config_revision)
                 VALUES(?,1,'ready','research',?,?)""", (campaign_id, now, config.revision))
-            from xgenius.protocol import fingerprint
+            from labgoblin.protocol import fingerprint
             conn.execute("""INSERT INTO events(id,generation,kind,payload,payload_digest,created)
                 VALUES(?,1,'initial','{}',?,?)""", (identifier(), fingerprint({}), now))
             conn.execute(f"PRAGMA user_version={DATABASE_VERSION}")

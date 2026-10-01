@@ -9,13 +9,13 @@ import time
 import psutil
 import pytest
 
-from xgenius import agent, agent_policy, agent_worker, backends, worker
-from xgenius.config import initial_config, parse_config
-from xgenius.evidence import publish_bytes, read_json, tail
-from xgenius.payload import command_units, process_environment
-from xgenius.protocol import LaunchReceipt, Resources, canonical, identifier
-from xgenius.scheduler import MachineSample, ResourceLedger
-from xgenius.state import State
+from labgoblin import agent, agent_policy, agent_worker, backends, worker
+from labgoblin.config import initial_config, parse_config
+from labgoblin.evidence import publish_bytes, read_json, tail
+from labgoblin.payload import command_units, process_environment
+from labgoblin.protocol import LaunchReceipt, Resources, canonical, identifier
+from labgoblin.scheduler import MachineSample, ResourceLedger
+from labgoblin.state import State
 
 
 HELP = """--prompt <text>
@@ -55,8 +55,8 @@ def fixture(tmp_path, provider="copilot", *, sandbox=False):
     raw = initial_config("provider-fixture", provider)
     raw["agent"].update(command=[sys.executable, str(program)], resources={"cpus": 1, "memory_mb": 256})
     if sandbox:
-        raw["agent"].update(sandbox=True, copilot_home=str(Path(".xgenius") / "sandbox"))
-    config = parse_config(raw, tmp_path / "xgenius.toml")
+        raw["agent"].update(sandbox=True, copilot_home=str(Path(".labgoblin") / "sandbox"))
+    config = parse_config(raw, tmp_path / "labgoblin.toml")
     cpus = tuple(psutil.Process().cpu_affinity()[:2])
     ledger = ResourceLedger.create(tmp_path / "machine.db",
                                    sampler=lambda g: MachineSample(cpus, 8192, 8192),

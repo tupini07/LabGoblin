@@ -17,11 +17,11 @@
     if (!controls) return;
     controls.hidden = false;
     const current = frame();
-    const key = `xgenius-checkpoint-${current.campaign}-${current.generation}`;
+    const key = `labgoblin-checkpoint-${current.campaign}-${current.generation}`;
     const note = document.getElementById("catchup-status");
     const link = document.getElementById("catchup-link");
     try {
-      const saved = JSON.parse(localStorage.getItem(key) || "null");
+      const saved = JSON.parse(localStorage.getItem(key) ?? "null");
       const valid = saved && saved.campaign === current.campaign && saved.generation === current.generation
         && Number.isFinite(saved.read_at) && saved.read_at >= 0 && saved.read_at <= 8640000000000
         && ["source_cutoff", "event_cutoff"].every(name =>
@@ -108,7 +108,7 @@
     }
     if (event.target.closest("#catchup-save, #catchup-clear")) {
       const current = frame();
-      const key = `xgenius-checkpoint-${current.campaign}-${current.generation}`;
+      const key = `labgoblin-checkpoint-${current.campaign}-${current.generation}`;
       try {
         if (event.target.closest("#catchup-clear")) localStorage.removeItem(key);
         else localStorage.setItem(key, JSON.stringify(current));

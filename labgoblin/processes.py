@@ -99,7 +99,7 @@ class BoundedDiagnostic(io.TextIOBase):
         self.received += len(encoded)
         if self.truncated:
             return len(value)
-        marker = b"\n[xgenius supervisor diagnostics truncated]\n"
+        marker = b"\n[labgoblin supervisor diagnostics truncated]\n"
         room = max(0, self.limit - len(marker) - self.retained)
         body = encoded[:room].decode("utf-8", errors="ignore").encode("utf-8")
         self.stream.write(body)
@@ -195,7 +195,7 @@ class BoundedSpool:
         read_fd, write_fd = os.pipe()
         self.reader = os.fdopen(read_fd, "rb", buffering=0)
         self.writer = os.fdopen(write_fd, "wb", buffering=0)
-        self.thread = threading.Thread(target=self._drain, name="xgenius-log-drain", daemon=True)
+        self.thread = threading.Thread(target=self._drain, name="labgoblin-log-drain", daemon=True)
         self.thread.start()
 
     def _drain(self):

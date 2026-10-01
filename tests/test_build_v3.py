@@ -7,11 +7,13 @@ import sys
 
 import pytest
 
+from labgoblin.paths import environment_value
+
 from tests.test_controller import fixture
-from xgenius import backends, worker
-from xgenius.evidence import publish_bytes
-from xgenius.processes import own_handle
-from xgenius.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, canonical, identifier
+from labgoblin import backends, worker
+from labgoblin.evidence import publish_bytes
+from labgoblin.processes import own_handle
+from labgoblin.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, canonical, identifier
 
 
 IMAGE = "sha256:" + "a" * 64
@@ -28,7 +30,7 @@ def test_build_pins_local_bases_and_stage_copy_without_registry_references():
         b"FROM scratch\nCOPY --from=source /src/ /app/\n", local_image, "fixture")
     assert b"FROM " + b"a" * 64 + b" AS source" in body
     assert b"prepared:local" not in body
-    assert body.count(b'LABEL xgenius.build="fixture"') == 2
+    assert body.count(b'LABEL labgoblin.build="fixture"') == 2
     assert bases == {"prepared:local": IMAGE}
 
 
@@ -39,7 +41,7 @@ def test_build_pins_local_bases_and_stage_copy_without_registry_references():
     b"FROM scratch\nONBUILD RUN echo anything\n",
     b"FROM scratch\nCOPY --from=remote:image /bin /bin\n",
     b"FROM scratch\nCOPY --from=${IMAGE} /bin /bin\n",
-    b"FROM scratch\nLABEL xgenius.build=other\n",
+    b"FROM scratch\nLABEL labgoblin.build=other\n",
     b"FROM scratch\nLABEL ${KEY}=value\n",
     b"FROM prepared:local\nRUN <<EOF\nsomething\nEOF\n",
 ])
@@ -115,14 +117,14 @@ def build_authorization(tmp_path):
     root.mkdir(parents=True)
     path = root / "context.tar"
     path.write_bytes(b"frozen fixture")
-    from xgenius.evidence import hash_file
+    from labgoblin.evidence import hash_file
     envelope = LaunchEnvelope(
         LaunchKey(consumer, 1, token, token, token), "build", (sys.executable, "-c", "pass"),
         str(root), str(root), str(state.path), str(ledger.path), ledger.id, 10, resources, config.revision,
         metadata={"cpu_ids": [], "log_bytes": 1024, "build": {
             "runner": {"kind": "docker", "context": "fixture", "endpoint": "unix:///fixture", "image": "test:local"},
             "snapshot": {"tar": str(path), "tar_limit": 1024, "tar_sha256": hash_file(path, 1024)},
-            "temporary_tag": "xgenius-build:" + token, "network": "none", "cpus": 1, "memory_mb": 512}})
+            "temporary_tag": "labgoblin-build:" + token, "network": "none", "cpus": 1, "memory_mb": 512}})
     envelope = worker.prepare_runtime(state, envelope, root=root.parent)
     ledger.arm_consumer(envelope)
     path = root / "envelope.json"
@@ -180,15 +182,15 @@ def test_only_matching_complete_build_receipts_can_retire_uncertain_consumers(tm
     assert ledger.recover_consumers()[0]["state"] == "released"
 
 
-@pytest.mark.skipif(os.environ.get("XGENIUS_DOCKER_BUILD_TESTS") != "1",
+@pytest.mark.skipif(environment_value("DOCKER_BUILD_TESTS") != "1",
                     reason="Opt in to an already prepared local Docker engine and Python image")
 @pytest.mark.parametrize("fails", [False, True])
 def test_prepared_docker_build_has_real_engine_receipt_and_releases(tmp_path, fails):
-    from xgenius.config import parse_config
+    from labgoblin.config import parse_config
     config, state, ledger, raw = fixture(tmp_path)
-    tag = "xgenius-validation:" + identifier()
+    tag = "labgoblin-validation:" + identifier()
     raw["runners"]["container"] = {
-        "kind": "docker", "context": os.environ.get("XGENIUS_DOCKER_CONTEXT", "default"),
+        "kind": "docker", "context": environment_value("DOCKER_CONTEXT", "default"),
         "python": "python", "image": tag, "network": False}
     config = parse_config(raw, config.config_path)
     (config.root / "fixture.txt").write_bytes(b"synthetic build marker")
@@ -219,16 +221,16 @@ def test_prepared_docker_build_has_real_engine_receipt_and_releases(tmp_path, fa
                 continue
             envelope = LaunchEnvelope.parse(json.loads(record["envelope"]))
             assert not backends.command([*prefix, "ps", "--filter",
-                "label=xgenius.build=" + envelope.key.nonce, "--format", "{{.ID}}"])
+                "label=labgoblin.build=" + envelope.key.nonce, "--format", "{{.ID}}"])
             owned = backends.command([*prefix, "image", "ls", "--filter",
-                "label=xgenius.build=" + envelope.key.nonce, "--format", "{{.Repository}}:{{.Tag}}"])
+                "label=labgoblin.build=" + envelope.key.nonce, "--format", "{{.Repository}}:{{.Tag}}"])
             permitted = {tag, envelope.metadata["build"]["temporary_tag"]}
             for name in set(owned.splitlines()) & permitted:
                 backends.command([*prefix, "image", "rm", "--no-prune", name])
             remaining = backends.command([*prefix, "image", "ls", "--all", "--no-trunc", "--filter",
-                "label=xgenius.build=" + envelope.key.nonce, "--format", "{{.ID}}"])
+                "label=labgoblin.build=" + envelope.key.nonce, "--format", "{{.ID}}"])
             for image in dict.fromkeys(remaining.splitlines()):
                 identity = json.loads(backends.command([*prefix, "image", "inspect", image, "--format",
-                    '{"owner":{{json (index .Config.Labels "xgenius.build")}},"tags":{{json .RepoTags}}}']))
+                    '{"owner":{{json (index .Config.Labels "labgoblin.build")}},"tags":{{json .RepoTags}}}']))
                 assert identity["owner"] == envelope.key.nonce and not identity["tags"]
                 backends.command([*prefix, "image", "rm", "--no-prune", image])

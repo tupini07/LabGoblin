@@ -12,11 +12,13 @@ import uuid
 
 import pytest
 
+from labgoblin.paths import environment_value
+
 from tests.test_dashboard import campaign, complete_job, dump, get, job, notes, serve
 from tests.test_dashboard_chat import FakeObserver, finished, post, service, token
-from xgenius import reporting
-from xgenius.dashboard_data import observation_context, question_context, report_text, snapshot
-from xgenius.protocol import EvidenceDisposition, Handoff, Resources, canonical
+from labgoblin import reporting
+from labgoblin.dashboard_data import observation_context, question_context, report_text, snapshot
+from labgoblin.protocol import EvidenceDisposition, Handoff, Resources, canonical
 
 
 class Document(HTMLParser):
@@ -109,7 +111,7 @@ def test_brief_four_destinations_and_reference_chain_without_inference(campaign)
 
 @pytest.mark.parametrize("status", ["active", "attention", "invalid", "", "cancelled", "' OR 1=1"])
 def test_count_and_filter_share_scope_with_invalid_and_cancelled_attempts(campaign, status):
-    from xgenius.dashboard_data import attempt_filter
+    from labgoblin.dashboard_data import attempt_filter
 
     attempts, _, _ = study(campaign)
     with campaign.state.db.write() as conn:
@@ -146,7 +148,7 @@ def test_observation_keeps_invalidity_and_scoped_history_including_observer(camp
         member = get(base, f"/view?id={view['id']}&attempt={attempts[-1]}")[2]
         assert b"Unequal warm-up" in member and b"Switch to current experiment state" in member
         assert f"view={view['id']}".encode() in member
-    from xgenius.dashboard_data import EvidenceReader
+    from labgoblin.dashboard_data import EvidenceReader
     reader = EvidenceReader(campaign.config.config_path)
     data = reader.read("evidence_observation", {"id": observations[-1], "view_id": view["id"]})
     assert data["data"]["validation"] == "invalid"
@@ -425,7 +427,7 @@ def test_contextual_questions_are_bounded_idempotent_and_not_authority(campaign)
     assert dump(campaign.state) == before
 
 
-@pytest.mark.skipif(os.environ.get("XGENIUS_BROWSER_TESTS") != "1", reason="Opt in to prepared Edge")
+@pytest.mark.skipif(environment_value("BROWSER_TESTS") != "1", reason="Opt in to prepared Edge")
 def test_browser_owner_journeys_checkpoint_context_reports_and_mobile(campaign, tmp_path):
     from playwright.sync_api import sync_playwright, expect
 
@@ -436,7 +438,7 @@ def test_browser_owner_journeys_checkpoint_context_reports_and_mobile(campaign, 
     driver = FakeObserver()
     observer = service(campaign, driver)
     with serve(campaign.config.config_path, observer=observer) as base, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, executable_path=os.environ.get("XGENIUS_BROWSER_EXECUTABLE"))
+        browser = playwright.chromium.launch(headless=True, executable_path=environment_value("BROWSER_EXECUTABLE"))
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             errors, requests = [], []
@@ -511,12 +513,12 @@ def test_browser_owner_journeys_checkpoint_context_reports_and_mobile(campaign, 
             browser.close()
 
 
-@pytest.mark.skipif(os.environ.get("XGENIUS_BROWSER_TESTS") != "1", reason="Opt in to prepared Edge")
+@pytest.mark.skipif(environment_value("BROWSER_TESTS") != "1", reason="Opt in to prepared Edge")
 def test_browser_nonreplacing_updates_and_cross_tab_checkpoints(campaign):
     from playwright.sync_api import sync_playwright, expect
 
     with serve(campaign.config.config_path, chat=False) as base, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, executable_path=os.environ.get("XGENIUS_BROWSER_EXECUTABLE"))
+        browser = playwright.chromium.launch(headless=True, executable_path=environment_value("BROWSER_EXECUTABLE"))
         try:
             context = browser.new_context(viewport={"width": 1440, "height": 1000})
             page, other = context.new_page(), context.new_page()
@@ -525,7 +527,7 @@ def test_browser_nonreplacing_updates_and_cross_tab_checkpoints(campaign):
             other.goto(base)
             page.get_by_role("button", name="Mark caught up").click()
             expect(other.locator("#catchup-status")).to_contain_text("Since your saved checkpoint")
-            key = f"xgenius-checkpoint-{campaign.state.id}-1"
+            key = f"labgoblin-checkpoint-{campaign.state.id}-1"
             saved = page.evaluate("key => localStorage.getItem(key)", key)
             previous = page.locator("main").inner_html()
             campaign.state.blocker("inspect", "ownership", "Backend unreachable; liveness unknown.")

@@ -9,12 +9,12 @@ import pytest
 
 from tests.test_providers import DOUBLE, HELP, fixture as provider_fixture
 from tests.test_workspace import PROGRAM, request
-from xgenius import agent, workspace
-from xgenius.campaign import Campaign
-from xgenius.config import initial_config, parse_config
-from xgenius.protocol import AdmissionWait, LaunchEnvelope, LaunchKey, LaunchReceipt, UncertainExecution, identifier
-from xgenius.scheduler import MachineSample, ResourceLedger
-from xgenius.state import State
+from labgoblin import agent, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.config import initial_config, parse_config
+from labgoblin.protocol import AdmissionWait, LaunchEnvelope, LaunchKey, LaunchReceipt, UncertainExecution, identifier
+from labgoblin.scheduler import MachineSample, ResourceLedger
+from labgoblin.state import State
 
 
 def fixture(tmp_path, *, max_invocations=10, retries=0, program=DOUBLE):
@@ -30,7 +30,7 @@ def fixture(tmp_path, *, max_invocations=10, retries=0, program=DOUBLE):
     raw["campaign"]["max_invocations"] = max_invocations
     raw["agent"].update(command=[sys.executable, str(provider)], retries=retries,
                         timeout_seconds=10, resources={"cpus": 1, "memory_mb": 256})
-    config = parse_config(raw, project / "xgenius.toml")
+    config = parse_config(raw, project / "labgoblin.toml")
     cpus = tuple(psutil.Process().cpu_affinity()[:2])
     ledger = ResourceLedger.create(tmp_path / "machine.db",
                                    sampler=lambda _: MachineSample(cpus, 8192, 8192),

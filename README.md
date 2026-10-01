@@ -1,13 +1,18 @@
-# xgenius
+# LabGoblin
 
 **Local autonomous research with Claude Code or GitHub Copilot CLI.**
 
-xgenius runs a long investigation as fresh, bounded research sessions and
+LabGoblin runs a long investigation as fresh, bounded research sessions and
 independently supervised experiments. It preserves why decisions were made,
 shares CPU/RAM/GPU admission across campaigns, recovers owned work after
 controller exit, and distinguishes successful execution from assessed research.
 Native Windows, an explicitly prepared WSL2 distro, and local Linux Docker are
 supported. No backend or provider is silently substituted.
+
+**Derived from [Roger Creus Castanyer's xgenius](https://github.com/roger-creus/xgenius),
+not a drop-in replacement for the original SLURM harness.** This independently
+developed local-runtime edition lives at [tupini07/LabGoblin](https://github.com/tupini07/LabGoblin).
+Original authorship, MIT copyright and historical reports remain credited below.
 
 **Version 2 is a clean break.** Configuration, campaign state, the machine ledger
 and worker protocol use schema 3. Old formats are rejected, not migrated.
@@ -15,16 +20,29 @@ Cluster/SSH/SBATCH/Singularity operations are removed. Never replace an old
 machine ledger while its workers might still be running; establish quiescence
 with the old installation before setting up a fresh runtime.
 
+**LabGoblin has no xgenius compatibility aliases.** Use the `labgoblin` command,
+`labgoblin.toml` and `.labgoblin/labgoblin.db`. Old command/import names, environment
+variables and frozen helpers are not supported, even for schema-3 installations.
+Initialize a new campaign rather than renaming old research state. See
+[names and existing installations](docs/local-research.md#names-and-existing-installations)
+before replacing an old installation or changing the shared ledger location.
+
 ## Start a local investigation
 
 Use Python 3.11+ in a persistent environment. Install and authenticate the
-standalone `copilot` CLI or Claude Code separately.
+standalone `copilot` CLI or Claude Code separately. Install LabGoblin from this
+GitHub checkout; these instructions do not assume a published PyPI release.
+If you already have a checkout, use its existing path rather than cloning or
+renaming it.
 
 ```powershell
-python -m pip install .
+git clone https://github.com/tupini07/LabGoblin.git
+Set-Location LabGoblin
+python -m pip install -e .
+Set-Location ..
 New-Item -ItemType Directory my-research
 Set-Location my-research
-xgenius init --agent copilot
+labgoblin init --agent copilot
 ```
 
 Plain `init` selects Claude. Edit `research_goal.md` to define the question,
@@ -32,14 +50,14 @@ evaluation protocol, permitted data and environments, stopping criterion, and
 what negative or inconclusive findings would mean. This is an autonomous
 investigation, not an instruction to stop after writing a proposal.
 
-Review `xgenius.toml`, then configure the shared machine envelope explicitly.
+Review `labgoblin.toml`, then configure the shared machine envelope explicitly.
 This example permits two managed CPUs and 4 GiB of reserved RAM, plus 2 GiB of
 unallocated headroom; it is not a recommendation for every workstation:
 
 ```powershell
-xgenius machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
-xgenius doctor --provider --json
-xgenius run
+labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
+labgoblin doctor --provider --json
+labgoblin run
 ```
 
 The envelope includes research and maintenance reasoning, not just experiments.
@@ -111,7 +129,7 @@ explicit coverage; it does **not** certify scientific truth, novelty or adequacy
 ## Research dashboard
 
 ```powershell
-xgenius dashboard --open-browser
+labgoblin dashboard --open-browser
 ```
 
 The read-only loopback dashboard defaults to `http://127.0.0.1:8765`, organized
@@ -137,12 +155,14 @@ disables raw HTML and images; assets are packaged locally.
 
 ### Dashboard Copilot observer
 
+From the LabGoblin checkout, install the optional extra with the campaign's
+prepared environment:
+
 ```powershell
-python -m pip install "xgenius[dashboard-chat]"
-xgenius dashboard
+python -m pip install -e ".[dashboard-chat]"
 ```
 
-From a checkout, use `python -m pip install ".[dashboard-chat]"`.
+Then run `labgoblin dashboard` from the campaign directory.
 Chat is enabled by default. Use `--no-chat` or `[dashboard.chat] enabled = false`
 to disable it; an explicit `--chat` or `--no-chat` overrides that configuration.
 Without the optional SDK, ordinary pages still work and chat explains the missing
@@ -166,7 +186,7 @@ but its owned SDK processes still acquire machine capacity.
 
 Trusted native execution is not a hostile-code sandbox. CPU placement is not a
 CPU-time quota; WSL memory monitoring is not a kernel-hard memory limit. The
-ledger coordinates cooperating xgenius consumers, not every process or OS user.
+ledger coordinates cooperating LabGoblin consumers, not every process or OS user.
 Explicit free-space monitoring is a soft safeguard, not a filesystem quota.
 Optional Copilot sandboxing fails closed when its prepared policy is unavailable.
 
@@ -189,7 +209,7 @@ figures and conclusions are preserved.
 
 ## Attribution and citation
 
-This local-runtime edition builds on Roger Creus Castanyer's xgenius.
+LabGoblin builds on Roger Creus Castanyer's xgenius.
 The original software citation remains:
 
 ```bibtex

@@ -8,9 +8,9 @@ from tests.copilot_acceptance import reserve_call, run
 def test_repeated_control_restart_cycles_keep_cumulative_accounting(tmp_path):
     from tests.test_controller import fixture
     from tests.test_workspace import request
-    from xgenius import workspace
-    from xgenius.campaign import Campaign
-    from xgenius.state import State
+    from labgoblin import workspace
+    from labgoblin.campaign import Campaign
+    from labgoblin.state import State
     config, state, ledger, _ = fixture(tmp_path)
     elapsed = 0
     for cycle in range(6):

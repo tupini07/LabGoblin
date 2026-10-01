@@ -8,9 +8,9 @@ import threading
 import psutil
 import pytest
 
-from xgenius.evidence import read_json, tail
-from xgenius.payload import command_units, execute_spec, run_process
-from xgenius.protocol import LaunchEnvelope, LaunchKey, Resources
+from labgoblin.evidence import read_json, tail
+from labgoblin.payload import command_units, execute_spec, run_process
+from labgoblin.protocol import LaunchEnvelope, LaunchKey, Resources
 
 
 @pytest.fixture
@@ -129,8 +129,8 @@ def test_input_validator_refusal_prevents_main_payload(spec):
 
 
 def test_consumption_pin_refusal_still_identifies_exact_guest_mapping(spec, monkeypatch):
-    from xgenius import payload
-    from xgenius.protocol import fingerprint
+    from labgoblin import payload
+    from labgoblin.protocol import fingerprint
     spec = envelope_spec(spec)
     def refused(inputs):
         raise ValueError("strict input changed before consumption")
@@ -167,9 +167,9 @@ def test_real_payload_preserves_empty_quoted_unicode_and_windows_arguments(spec)
 
 
 def test_guest_mapping_and_validator_mutation_are_fenced_before_start(spec):
-    from xgenius import payload
-    from xgenius.evidence import publish_bytes
-    from xgenius.protocol import canonical
+    from labgoblin import payload
+    from labgoblin.evidence import publish_bytes
+    from labgoblin.protocol import canonical
     spec = envelope_spec(spec)
     path = Path(spec["cwd"]) / "manifest.json"
     digest = publish_bytes(path, canonical(spec))
@@ -185,7 +185,7 @@ def test_guest_mapping_and_validator_mutation_are_fenced_before_start(spec):
 ])
 def test_linux_session_liveness_after_supervisor_loss(tmp_path, case, expected):
     import json
-    from xgenius.payload import inspect_linux
+    from labgoblin.payload import inspect_linux
     root, proc = tmp_path / "attempt", tmp_path / "proc"
     root.mkdir()
     boot = proc / "sys" / "kernel" / "random" / "boot_id"

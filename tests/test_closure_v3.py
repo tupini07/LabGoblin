@@ -6,9 +6,9 @@ import pytest
 from tests.test_controller import drain, fixture
 from tests.test_state import accept, allocate, envelope, spec, state
 from tests.test_workspace import request
-from xgenius import briefing, reporting, workspace
-from xgenius.campaign import Campaign
-from xgenius.protocol import Handoff, LaunchEnvelope, LaunchKey, Resources, identifier
+from labgoblin import briefing, reporting, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.protocol import Handoff, LaunchEnvelope, LaunchKey, Resources, identifier
 
 
 CLOSER = r'''
@@ -68,7 +68,7 @@ def test_late_contradictory_admitted_result_is_in_one_final_owned_assessment(tmp
     (config.root / "replication.py").write_text(
         "import os,pathlib,time\n"
         f"while not pathlib.Path({str(barrier)!r}).exists(): time.sleep(0.02)\n"
-        "pathlib.Path(os.environ['XGENIUS_OUTPUT_DIR'],'metrics.json').write_text('{\"score\":999}')\n",
+        "pathlib.Path(os.environ['LABGOBLIN_OUTPUT_DIR'],'metrics.json').write_text('{\"score\":999}')\n",
         encoding="utf-8")
     baseline = workspace.submit(state, config, request())
     replication = workspace.submit(state, config, request(key="replication", argv=["python", "replication.py"],

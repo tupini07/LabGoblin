@@ -7,9 +7,9 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from xgenius.evidence import Capture, contained, hash_file, parse_json, publish_bytes, read_bytes, read_json
-from xgenius.payload import execute_spec
-from xgenius.protocol import HANDOFF_BYTES, Handoff, LaunchReceipt, PACKET_BYTES, PreExecutionError, canonical, fingerprint
+from labgoblin.evidence import Capture, contained, hash_file, parse_json, publish_bytes, read_bytes, read_json
+from labgoblin.payload import execute_spec
+from labgoblin.protocol import HANDOFF_BYTES, Handoff, LaunchReceipt, PACKET_BYTES, PreExecutionError, canonical, fingerprint
 
 
 def sandbox_policy(config) -> dict:
@@ -32,7 +32,7 @@ def sandbox_policy(config) -> dict:
 
 def prepare_canary(policy: dict, root: Path, nonce: str) -> tuple[str, dict]:
     denied = Path(policy["denied_root"]) / f"{nonce}.txt"
-    marker = b"xgenius sandbox marker\n"
+    marker = b"labgoblin sandbox marker\n"
     publish_bytes(denied, marker)
     result = root / "canary-result.json"
     script = root / "canary.py"
@@ -66,7 +66,7 @@ def _verify_policy(envelope):
         if hash_file(Path(canary["script"]), 65536) != canary["script_digest"]:
             raise PreExecutionError("Owned sandbox canary changed before invocation")
         return
-    from xgenius.state import State
+    from labgoblin.state import State
     state = State.open(Path(envelope.state_path).parent)
     with state.db.read() as conn:
         invocation = conn.execute("SELECT * FROM invocations WHERE id=? AND turn_id=? AND kind='canary'",
@@ -82,8 +82,8 @@ def _verify_policy(envelope):
 
 
 def supervise(envelope) -> LaunchReceipt:
-    from xgenius.backends import native_spec
-    from xgenius.worker import launch_directory
+    from labgoblin.backends import native_spec
+    from labgoblin.worker import launch_directory
     try:
         if hash_file(Path(envelope.metadata["packet_path"]), PACKET_BYTES) != envelope.metadata["packet_digest"]:
             raise PreExecutionError("Owned inference packet changed before provider start")

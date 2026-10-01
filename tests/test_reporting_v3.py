@@ -7,9 +7,9 @@ import pytest
 from tests.test_controller import fixture
 from tests.test_memory_v3 import COMPACTOR
 from tests.test_workspace import admit, finish, request, setup
-from xgenius import reporting, workspace
-from xgenius.campaign import Campaign
-from xgenius.evidence import SizeLimitError, hash_file
+from labgoblin import reporting, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.evidence import SizeLimitError, hash_file
 
 
 REPORTER = COMPACTOR.replace(

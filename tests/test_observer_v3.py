@@ -10,15 +10,15 @@ import pytest
 
 from tests.test_controller import fixture
 from tests.test_workspace import request
-from xgenius import journal, workspace
-from xgenius.campaign import Campaign
-from xgenius.config import ChatSettings, parse_config
-from xgenius.dashboard_chat import ObserverService, SDKObserver, worker_main
-from xgenius.dashboard_data import EvidenceReader
-from xgenius.evidence import publish_bytes
-from xgenius.processes import own_handle
-from xgenius.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, canonical, fingerprint
-from xgenius.worker import prepare_runtime
+from labgoblin import journal, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.config import ChatSettings, parse_config
+from labgoblin.dashboard_chat import ObserverService, SDKObserver, worker_main
+from labgoblin.dashboard_data import EvidenceReader
+from labgoblin.evidence import publish_bytes
+from labgoblin.processes import own_handle
+from labgoblin.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, canonical, fingerprint
+from labgoblin.worker import prepare_runtime
 
 
 def snapshot(state):
@@ -34,7 +34,7 @@ def test_reader_retains_history_and_does_not_write_or_expose_payloads(tmp_path):
     source = state.source("journal_import", b"Negative finding: predictor did not improve.", origin="operator")
     old_goal = state.source("goal", b"Historical goal", origin="operator", head="goal")
     state.source("goal", b"Different current goal", origin="operator", head="goal")
-    config.root.joinpath("xgenius.toml").write_text("broken TOML [", encoding="utf-8")
+    config.root.joinpath("labgoblin.toml").write_text("broken TOML [", encoding="utf-8")
     reader = EvidenceReader(config.config_path)
     before = snapshot(state)
     data = reader.read("campaign_status", {})

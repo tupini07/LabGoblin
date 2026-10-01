@@ -8,10 +8,10 @@ import re
 import shutil
 import sys
 
-from xgenius.backends import command
-from xgenius.evidence import contained, hash_file, require_space
-from xgenius.payload import command_units, validate_command
-from xgenius.protocol import LaunchEnvelope, LaunchKey, PACKET_BYTES, Resources, identifier
+from labgoblin.backends import command
+from labgoblin.evidence import contained, hash_file, require_space
+from labgoblin.payload import command_units, validate_command
+from labgoblin.protocol import LaunchEnvelope, LaunchKey, PACKET_BYTES, Resources, identifier
 
 
 CONTROLLED_FLAGS = {
@@ -113,7 +113,7 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
     launch_root = root / "launches" / nonce
     result = root / "handoff.json"
     prompt = (
-        f"Execute this one xgenius {turn['kind']} operation. Read the UTF-8 JSON packet at "
+        f"Execute this one LabGoblin {turn['kind']} operation. Read the UTF-8 JSON packet at "
         f"{json.dumps(str(packet_path), ensure_ascii=False)} and follow its owned result protocol. "
         f"Write the required UTF-8 JSON result to {json.dumps(str(result), ensure_ascii=False)}. "
         "Do not start another provider, controller, workflow, or interactive session."
@@ -129,14 +129,14 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
     executable_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
     environment = {
         "PATH": str(executable_dir) + os.pathsep + os.environ.get("PATH", ""),
-        "XGENIUS_PROJECT": str(config.root), "XGENIUS_TURN_ID": turn_id,
-        "XGENIUS_PACKET_ID": packet["id"], "XGENIUS_INVOCATION_ID": invocation_id,
-        "XGENIUS_RESOURCE_DB": str(ledger_path),
+        "LABGOBLIN_PROJECT": str(config.root), "LABGOBLIN_TURN_ID": turn_id,
+        "LABGOBLIN_PACKET_ID": packet["id"], "LABGOBLIN_INVOCATION_ID": invocation_id,
+        "LABGOBLIN_RESOURCE_DB": str(ledger_path),
     }
     if config.agent.copilot_home:
         environment["COPILOT_HOME"] = str(contained(state.root, config.root / config.agent.copilot_home))
     if config.agent.sandbox:
-        from xgenius.agent_policy import prepare_canary, sandbox_policy
+        from labgoblin.agent_policy import prepare_canary, sandbox_policy
         policy = sandbox_policy(config)
         metadata["sandbox_policy"] = policy
         if invocation["kind"] == "canary":

@@ -10,25 +10,27 @@ import sys
 import time
 
 import pytest
+
+from labgoblin.paths import environment_value
 import tomli_w
 
 from tests.test_controller import fixture
-from xgenius import backends, worker, workspace
-from xgenius.campaign import Campaign
-from xgenius.config import parse_config
-from xgenius.evidence import read_json
-from xgenius.processes import background_options, process_state
-from xgenius.protocol import LaunchEnvelope
+from labgoblin import backends, worker, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.config import parse_config
+from labgoblin.evidence import read_json
+from labgoblin.processes import background_options, process_state
+from labgoblin.protocol import LaunchEnvelope
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("XGENIUS_SYSTEM_E2E") != "1",
+    environment_value("SYSTEM_E2E") != "1",
     reason="Explicit opt-in to prepared native/WSL/Docker system execution")
 
 TASK = """import json,os,sys,time
 from pathlib import Path
-out=Path(os.environ['XGENIUS_OUTPUT_DIR'])
-assert 'XGENIUS_TEST_CREDENTIAL' not in os.environ
+out=Path(os.environ['LABGOBLIN_OUTPUT_DIR'])
+assert 'LABGOBLIN_TEST_CREDENTIAL' not in os.environ
 (out/'ready.json').write_text(json.dumps(dict(pid=os.getpid(),platform=sys.platform)))
 if 'hold' in sys.argv:
     deadline=time.monotonic()+30
@@ -44,8 +46,8 @@ def prepare(tmp_path):
     config, state, ledger, raw = fixture(tmp_path)
     (config.root / "experiment.py").write_text(TASK, encoding="utf-8")
     raw["runners"].update(
-        ubuntu={"kind": "wsl", "distro": os.environ.get("XGENIUS_WSL_DISTRO", "Ubuntu"), "python": "python3"},
-        container={"kind": "docker", "context": os.environ.get("XGENIUS_DOCKER_CONTEXT", "default"),
+        ubuntu={"kind": "wsl", "distro": environment_value("WSL_DISTRO", "Ubuntu"), "python": "python3"},
+        container={"kind": "docker", "context": environment_value("DOCKER_CONTEXT", "default"),
                    "image": "python:3.11-slim", "python": "python", "network": False})
     config = parse_config(raw, config.config_path)
     Path(config.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
@@ -53,9 +55,9 @@ def prepare(tmp_path):
 
 
 def cli(config, *arguments, expected=0):
-    env = {**os.environ, "PYTHONUTF8": "1", "XGENIUS_TEST_CREDENTIAL": "synthetic-not-a-real-credential"}
+    env = {**os.environ, "PYTHONUTF8": "1", "LABGOBLIN_TEST_CREDENTIAL": "synthetic-not-a-real-credential"}
     result = subprocess.run(
-        [sys.executable, "-m", "xgenius.cli", "--project", str(config.root), *arguments, "--json"],
+        [sys.executable, "-m", "labgoblin.cli", "--project", str(config.root), *arguments, "--json"],
         cwd=config.root, env=env, capture_output=True, text=True, encoding="utf-8", timeout=120,
         **background_options())
     assert result.returncode == expected, (result.stdout, result.stderr)
@@ -138,7 +140,7 @@ def test_controller_exit_and_parent_job_closure_preserve_owned_payload(tmp_path,
             "win32job.JOB_OBJECT_LIMIT_BREAKAWAY_OK;"
             "win32job.SetInformationJobObject(j,win32job.JobObjectExtendedLimitInformation,v);"
             "win32job.AssignProcessToJobObject(j,win32api.GetCurrentProcess());")
-    code = prefix + "from xgenius.cli import main;main(['run','--no-agent','--json'])"
+    code = prefix + "from labgoblin.cli import main;main(['run','--no-agent','--json'])"
     with (config.root / "controller.out").open("wb") as out, (config.root / "controller.err").open("wb") as err:
         process = subprocess.Popen([sys.executable, "-c", code], cwd=config.root, stdout=out, stderr=err,
                                    **background_options())
@@ -165,7 +167,7 @@ def test_real_cancel_during_output_validator_preserves_owned_shutdown(tmp_path, 
     config, state, ledger = prepare(tmp_path)
     backends.validate_runner(asdict(config.runners[kind]))
     script = ("import os,time;from pathlib import Path;"
-              "(Path(os.environ['XGENIUS_OUTPUT_DIR'])/'validator-ready').touch();time.sleep(30)")
+              "(Path(os.environ['LABGOBLIN_OUTPUT_DIR'])/'validator-ready').touch();time.sleep(30)")
     attempt = submit(state, config, kind=kind, validators=[["python", "-c", script]])
     output = Path(json.loads(attempt["spec"])["output"])
     try:
@@ -191,8 +193,8 @@ def test_shipped_example_full_cli_and_deterministic_report(tmp_path):
     submitted = cli(config, "batch-submit", "--file", str(project / "batch.json"))
     assert len(submitted["items"]) == 3 and submitted["failed"] == 0
     cli(config, "run", "--no-agent")
-    from xgenius.state import State
-    state = State.open(project / ".xgenius")
+    from labgoblin.state import State
+    state = State.open(project / ".labgoblin")
     with state.db.read() as conn:
         means = sorted(json.loads(row[0])["metrics"]["mean"] for row in conn.execute(
             "SELECT metadata FROM observations WHERE kind='metrics'"))
@@ -202,8 +204,8 @@ def test_shipped_example_full_cli_and_deterministic_report(tmp_path):
     assert state.campaign()["invocations"] == 0
     cli(config, "stop")
     archived = cli(config, "reset", "--confirm", state.id)
-    assert (Path(archived["archive"]) / "xgenius.db").is_file()
-    assert not (project / ".xgenius").exists()
+    assert (Path(archived["archive"]) / "labgoblin.db").is_file()
+    assert not (project / ".labgoblin").exists()
 
 
 def test_lost_wsl_supervisor_retains_live_guest_ownership(tmp_path):
@@ -262,14 +264,14 @@ def test_external_owned_container_loss_is_not_success(tmp_path):
 
 
 def test_two_real_campaigns_share_capacity_and_distinct_native_cpu_sets(tmp_path):
-    from xgenius.config import initial_config
-    from xgenius.state import State
+    from labgoblin.config import initial_config
+    from labgoblin.state import State
     config, state, ledger = prepare(tmp_path)
     other_root = tmp_path / "other"
     other_root.mkdir()
     raw = initial_config("other")
-    other_config = parse_config(raw, other_root / "xgenius.toml")
-    other_root.joinpath("xgenius.toml").write_text(tomli_w.dumps(raw), encoding="utf-8")
+    other_config = parse_config(raw, other_root / "labgoblin.toml")
+    other_root.joinpath("labgoblin.toml").write_text(tomli_w.dumps(raw), encoding="utf-8")
     other_root.joinpath("experiment.py").write_text(TASK, encoding="utf-8")
     other_root.joinpath("research_goal.md").write_text("Synthetic shared-capacity check.", encoding="utf-8")
     other = State.create(other_config, ledger.path)

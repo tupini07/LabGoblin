@@ -14,19 +14,20 @@ import urllib.parse
 
 from markdown_it import MarkdownIt
 
-from xgenius import journal, reporting
-from xgenius.config import ChatSettings
-from xgenius.dashboard_chat import ChatError, ObserverService, load_chat_settings
-from xgenius.dashboard_data import (
+from labgoblin import journal, reporting
+from labgoblin.config import ChatSettings
+from labgoblin.dashboard_chat import ChatError, ObserverService, load_chat_settings
+from labgoblin.dashboard_data import (
     FAILED, RESEARCH_SOURCES, attempt_filter, numeric_metrics,
     observation_context, report_text, snapshot, source_preview, read_text as _read_text,
 )
-from xgenius.evidence import observation, tail
-from xgenius.protocol import ACTIVE
-from xgenius.processes import CampaignLease
-from xgenius.scheduler import ResourceLedger
-from xgenius.state import State
-from xgenius.worker import launch_directory
+from labgoblin.evidence import observation, tail
+from labgoblin.protocol import ACTIVE
+from labgoblin.processes import CampaignLease
+from labgoblin.paths import configuration_path, state_directory
+from labgoblin.scheduler import ResourceLedger
+from labgoblin.state import State
+from labgoblin.worker import launch_directory
 
 
 PAGE_SIZE = 50
@@ -162,8 +163,8 @@ class DashboardServer(ThreadingHTTPServer):
     def __init__(self, address, config_path, *, chat=None, observer=None):
         if address[0] not in ("127.0.0.1", "localhost"):
             raise ValueError("The dashboard must bind to loopback")
-        self.config_path = str(Path(config_path).resolve())
-        self.state = State.open(Path(self.config_path).parent / ".xgenius")
+        self.config_path = str(configuration_path(config_path))
+        self.state = State.open(state_directory(self.config_path))
         self.chat_token = secrets.token_urlsafe(32)
         self.configuration_error = ""
         try:
@@ -277,7 +278,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise DashboardError(404, "No dashboard control endpoint exists here.")
             if self.headers.get("Origin") not in (None, f"http://{host}"):
                 raise DashboardError(403, "Cross-origin chat requests are not allowed.")
-            token = self.headers.get("X-Xgenius-Token", "")
+            token = self.headers.get("X-LabGoblin-Token", "")
             if not token.isascii() or not secrets.compare_digest(token, self.server.chat_token):
                 raise DashboardError(403, "Reload the dashboard before using chat.")
             if self.headers.get_content_type() != "application/json":
@@ -358,12 +359,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="xgenius-chat-token" content="{self.server.chat_token}">
-<title>{_escape(title)} | {_escape(project)} | xgenius</title>
+<meta name="labgoblin-chat-token" content="{self.server.chat_token}">
+<title>{_escape(title)} | {_escape(project)} | LabGoblin</title>
 <link rel="stylesheet" href="/static/dashboard.css">
 <script src="/static/dashboard.js" defer></script></head>
 <body><a class="skip-link" href="#main">Skip to content</a>
-<aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">x</span>xgenius</a>
+<aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">L</span>LabGoblin</a>
 <div class="project-label">RESEARCH WORKSPACE</div><div class="project-name">{_escape(project)}</div>
 <span class="mode">Local campaign</span><nav aria-label="Main navigation">{nav}</nav>
 <div class="sidebar-note"><span class="status-dot"></span> Read-only dashboard<br>
@@ -760,7 +761,7 @@ Which conclusions have experimental support?</p></div></div>
         return content
 
     def _work_logs(self, work_id):
-        from xgenius.protocol import LaunchEnvelope
+        from labgoblin.protocol import LaunchEnvelope
         launches = self._rows("SELECT envelope FROM launches WHERE work_id=? ORDER BY created DESC LIMIT 1", (work_id,))
         if not launches:
             return _panel("Retained diagnostics", '<p class="muted">No owned launch or retained stream is registered for this work. '
@@ -1041,7 +1042,7 @@ Which conclusions have experimental support?</p></div></div>
         def quote(value):
             return "'" + str(value).replace("'", "''") + "'" if sys.platform == "win32" else shlex.quote(str(value))
         executable = Path(sys.prefix) / ("Scripts" if sys.platform == "win32" else "bin") / (
-            "xgenius.exe" if sys.platform == "win32" else "xgenius")
+            "labgoblin.exe" if sys.platform == "win32" else "labgoblin")
         prefix = "& " + quote(executable) if sys.platform == "win32" else quote(executable)
         project = quote(self.root.parent)
         commands = [f"{prefix} status --project {project} --json"]
@@ -1140,10 +1141,10 @@ Which conclusions have experimental support?</p></div></div>
         return content + _details("Technical source scope", f'<pre>{_escape(json.dumps({k: v for k, v in value.items() if k != "attempts"}, indent=2))}</pre>')
 
 
-def run_dashboard(config_path="xgenius.toml", port=8765, *, chat=None, open_browser=False, json_output=False):
+def run_dashboard(config_path=".", port=8765, *, chat=None, open_browser=False, json_output=False):
     with DashboardServer(("127.0.0.1", port), config_path, chat=chat) as server:
         url = f"http://127.0.0.1:{server.server_port}"
-        print(json.dumps({"url": url, "read_only": True}) if json_output else f"xgenius dashboard: {url}", flush=True)
+        print(json.dumps({"url": url, "read_only": True}) if json_output else f"LabGoblin dashboard: {url}", flush=True)
         if open_browser:
             import webbrowser
             webbrowser.open(url)

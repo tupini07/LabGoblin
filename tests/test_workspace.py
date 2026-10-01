@@ -9,17 +9,17 @@ import time
 import psutil
 import pytest
 
-from xgenius import backends, worker, workspace
-from xgenius.config import initial_config, parse_config
-from xgenius.evidence import SizeLimitError, observation, read_json
-from xgenius.protocol import LaunchReceipt, Resources
-from xgenius.scheduler import MachineSample, ResourceLedger
-from xgenius.state import State
+from labgoblin import backends, worker, workspace
+from labgoblin.config import initial_config, parse_config
+from labgoblin.evidence import SizeLimitError, observation, read_json
+from labgoblin.protocol import LaunchReceipt, Resources
+from labgoblin.scheduler import MachineSample, ResourceLedger
+from labgoblin.state import State
 
 
 PROGRAM = (
     "import json,os,pathlib\n"
-    "pathlib.Path(os.environ['XGENIUS_OUTPUT_DIR'],'metrics.json').write_text("
+    "pathlib.Path(os.environ['LABGOBLIN_OUTPUT_DIR'],'metrics.json').write_text("
     "json.dumps({'score':42}),encoding='utf-8')\n"
 )
 
@@ -33,7 +33,7 @@ def setup(tmp_path, *, inputs=None, storage=None):
     raw["inputs"] = inputs or {}
     if storage:
         raw["storage"] = storage
-    config = parse_config(raw, project / "xgenius.toml")
+    config = parse_config(raw, project / "labgoblin.toml")
     cpus = tuple(psutil.Process().cpu_affinity()[:2])
     ledger = ResourceLedger.create(tmp_path / "machine.db",
                                    sampler=lambda g: MachineSample(cpus, 8192, 8192),
@@ -234,7 +234,7 @@ def test_modified_retained_object_is_not_served_as_original(tmp_path):
 
 
 def test_collection_never_reopens_live_metrics_for_hashing_or_serving(tmp_path, monkeypatch):
-    from xgenius.evidence import Capture
+    from labgoblin.evidence import Capture
     config, state, ledger = setup(tmp_path)
     envelope = finish(state, admit(config, state, ledger))
     metrics = Path(envelope.metadata["execution"]["output"]) / "metrics.json"

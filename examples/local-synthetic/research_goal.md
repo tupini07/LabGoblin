@@ -4,7 +4,7 @@ Determine whether adding one to each of the fixed synthetic values `[2, 4, 6]`
 increases their arithmetic mean by exactly one, while an unchanged replication
 preserves the baseline mean.
 
-Submit the three unchanged manifests in `batch.json` through xgenius once.
+Submit the three unchanged manifests in `batch.json` through labgoblin once.
 Do not run heavy work directly. Assess the registered baseline, replication
 and shifted metrics, their numeric differences, execution and validation status.
 Return an owned wait handoff while work remains, not an early completion.

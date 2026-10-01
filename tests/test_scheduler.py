@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-from xgenius.protocol import Resources
-from xgenius.scheduler import MachineSample, ResourceLedger
+from labgoblin.protocol import Resources
+from labgoblin.scheduler import MachineSample, ResourceLedger
 
 
 @pytest.fixture

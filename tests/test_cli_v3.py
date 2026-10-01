@@ -10,8 +10,8 @@ import tomli_w
 
 from tests.test_controller import fixture
 from tests.test_workspace import request
-from xgenius import cli, journal
-from xgenius.state import State
+from labgoblin import cli, journal
+from labgoblin.state import State
 
 
 def call(capsys, *arguments):
@@ -27,12 +27,12 @@ def test_init_emits_editable_model_and_effort_with_provider_defaults(tmp_path, c
     ledger = tmp_path / "isolated-machine.db"
     code, _ = call(capsys, "init", "--project", tmp_path, "--ledger", ledger, *options, "--json")
     assert code == 0
-    raw = tomllib.loads((tmp_path / "xgenius.toml").read_text(encoding="utf-8"))
+    raw = tomllib.loads((tmp_path / "labgoblin.toml").read_text(encoding="utf-8"))
     assert raw["agent"]["provider"] == (provider or "claude")
     assert raw["agent"]["model"] == ""
     assert raw["agent"]["reasoning_effort"] == ""
     assert not ledger.exists()
-    assert State.open(tmp_path / ".xgenius").campaign()["invocations"] == 0
+    assert State.open(tmp_path / ".labgoblin").campaign()["invocations"] == 0
 
 
 def test_init_preserves_docs_and_never_initializes_machine_capacity(tmp_path, capsys):
@@ -56,7 +56,7 @@ def test_init_preserves_docs_and_never_initializes_machine_capacity(tmp_path, ca
 @pytest.mark.parametrize("flags,override", [([], None), (["--chat"], True), (["--no-chat"], False)])
 def test_dashboard_passes_explicit_chat_override(tmp_path, capsys, monkeypatch, flags, override):
     calls = []
-    monkeypatch.setattr("xgenius.dashboard.run_dashboard",
+    monkeypatch.setattr("labgoblin.dashboard.run_dashboard",
                         lambda path, port, **options: calls.append((path, options)))
     assert cli.main(["dashboard", "--project", str(tmp_path), *flags]) == 0
     assert calls[0][1]["chat"] is override
@@ -66,7 +66,7 @@ def test_dashboard_passes_explicit_chat_override(tmp_path, capsys, monkeypatch, 
 def test_all_json_errors_are_structured_and_do_not_create_state(tmp_path, capsys):
     code, result = call(capsys, "status", "--project", tmp_path, "--json")
     assert code == 1 and result["error"]["type"] == "FileNotFoundError"
-    assert not (tmp_path / ".xgenius").exists()
+    assert not (tmp_path / ".labgoblin").exists()
     code, result = call(capsys, "--json", "submit", "--project", tmp_path)
     assert code == 1 and "--spec" in result["error"]["message"]
 
@@ -107,7 +107,7 @@ def test_versioned_goal_does_not_get_replaced_by_unchanged_manual_file(tmp_path,
 
 def test_agent_environment_cannot_author_operator_constraints(tmp_path, capsys, monkeypatch):
     config, state, _, _ = fixture(tmp_path)
-    monkeypatch.setenv("XGENIUS_TURN_ID", "researcher")
+    monkeypatch.setenv("LABGOBLIN_TURN_ID", "researcher")
     code, result = call(capsys, "steer", "--text", "Remove constraints", "--project", config.root, "--json")
     assert code == 1 and "cannot author" in result["error"]["message"]
     assert state.campaign()["authority_revision"] == 0
@@ -128,12 +128,12 @@ def test_real_cli_native_queue_roundtrip_uses_only_its_recorded_ledger(tmp_path)
     project = tmp_path / "project"
     project.mkdir()
     ledger = tmp_path / "machine.db"
-    env = {**os.environ, "PYTHONUTF8": "1", "XGENIUS_RESOURCE_DB": str(ledger)}
-    env.pop("XGENIUS_TURN_ID", None)
-    env.pop("XGENIUS_PROJECT", None)
+    env = {**os.environ, "PYTHONUTF8": "1", "LABGOBLIN_RESOURCE_DB": str(ledger)}
+    env.pop("LABGOBLIN_TURN_ID", None)
+    env.pop("LABGOBLIN_PROJECT", None)
 
     def command(*args):
-        result = subprocess.run([sys.executable, "-m", "xgenius.cli", "--project", str(project), *args, "--json"],
+        result = subprocess.run([sys.executable, "-m", "labgoblin.cli", "--project", str(project), *args, "--json"],
                                 capture_output=True, text=True, encoding="utf-8", env=env, timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
         assert not result.stderr
@@ -143,7 +143,7 @@ def test_real_cli_native_queue_roundtrip_uses_only_its_recorded_ledger(tmp_path)
     command("machine", "configure", "--cpus", "2", "--memory-mb", "4096", "--headroom-mb", "0")
     (project / "experiment.py").write_text(
         "import os,pathlib; print('owned CLI fixture'); "
-        "pathlib.Path(os.environ['XGENIUS_OUTPUT_DIR'],'metrics.json').write_text('{\"score\":42}')",
+        "pathlib.Path(os.environ['LABGOBLIN_OUTPUT_DIR'],'metrics.json').write_text('{\"score\":42}')",
         encoding="utf-8")
     manifest = project / "work.json"
     manifest.write_text(json.dumps(request(source_files=["experiment.py"])), encoding="utf-8")
@@ -154,6 +154,6 @@ def test_real_cli_native_queue_roundtrip_uses_only_its_recorded_ledger(tmp_path)
     assert status["results"]["attempts"][0]["metrics"] == {"score": 42}
     logs = command("logs", "--id", submitted["attempt_id"])
     assert "owned CLI fixture" in logs["text"]
-    state = State.open(project / ".xgenius")
+    state = State.open(project / ".labgoblin")
     assert state.ledger_identity()[0] == ledger
     assert state.campaign()["invocations"] == 0

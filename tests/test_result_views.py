@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-from xgenius import results, workspace
-from xgenius.evidence import SizeLimitError
+from labgoblin import results, workspace
+from labgoblin.evidence import SizeLimitError
 from tests.test_workspace import admit, finish, request, setup
 
 

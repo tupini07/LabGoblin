@@ -3,8 +3,8 @@
 import json
 from pathlib import Path
 
-from xgenius.evidence import Capture, contained, parse_json
-from xgenius.protocol import HANDOFF_BYTES, Handoff
+from labgoblin.evidence import Capture, contained, parse_json
+from labgoblin.protocol import HANDOFF_BYTES, Handoff
 
 
 def read_result(state, turn_id: str) -> dict:
@@ -41,7 +41,7 @@ def accept_result(state, turn_id: str) -> dict:
     if kind == "compact":
         state.accept_compaction(value["content"], invocation_id=value["invocation_id"])
     elif kind == "report":
-        from xgenius.reporting import publish_report
+        from labgoblin.reporting import publish_report
         publish_report(state, value["content"].get("view_id"), value=value["content"], invocation_id=value["invocation_id"])
     else:
         state.accept_handoff(Handoff.parse(value["content"]), invocation_id=value["invocation_id"])

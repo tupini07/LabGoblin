@@ -8,9 +8,9 @@ import subprocess
 import sys
 import time
 
-from xgenius.evidence import Capture, atomic_json, parse_json, publish_bytes, read_json, verify_input_pins
-from xgenius.processes import BoundedSpool
-from xgenius.protocol import (
+from labgoblin.evidence import Capture, atomic_json, parse_json, publish_bytes, read_json, verify_input_pins
+from labgoblin.processes import BoundedSpool
+from labgoblin.protocol import (
     LaunchEnvelope, LaunchReceipt, PreExecutionError, UncertainExecution,
     Resources, argv, canonical, fingerprint, integer, number,
 )
@@ -232,11 +232,11 @@ def process_environment(spec):
         "CUDA_VISIBLE_DEVICES": ",".join(spec.get("gpus", [])),
     })
     if "output" in spec:
-        env["XGENIUS_OUTPUT_DIR"] = spec["output"]
+        env["LABGOBLIN_OUTPUT_DIR"] = spec["output"]
     if "work_id" in spec:
-        env["XGENIUS_ATTEMPT_ID"] = spec["work_id"]
+        env["LABGOBLIN_ATTEMPT_ID"] = spec["work_id"]
     for name, value in spec.get("inputs", {}).items():
-        env[f"XGENIUS_INPUT_{name.upper()}"] = value["access_path"]
+        env[f"LABGOBLIN_INPUT_{name.upper()}"] = value["access_path"]
     return env
 
 
@@ -392,7 +392,7 @@ def execute_spec(spec, *, publish_receipt=True):
                 break
             name = "main" if stage == "main" else f"{stage}-{index}"
             child = {**spec, "argv": command, "seconds": remaining,
-                     "root": str(root / name), "job_name": f"xgenius-{envelope.key.nonce}-{name}"}
+                     "root": str(root / name), "job_name": f"labgoblin-{envelope.key.nonce}-{name}"}
             outcome = run_process(child)
             outcomes.append({"stage": name, **outcome})
             if stage == "main":

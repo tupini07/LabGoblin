@@ -10,12 +10,14 @@ import urllib.error
 import urllib.request
 
 import pytest
+
+from labgoblin.paths import environment_value
 import tomli_w
 
 from tests.test_controller import fixture
 from tests.test_workspace import request
-from xgenius import journal, reporting, workspace
-from xgenius.dashboard import DashboardServer, JOURNAL_PAGE_SIZE, LOG_LIMIT, _markdown, _read_text
+from labgoblin import journal, reporting, workspace
+from labgoblin.dashboard import DashboardServer, JOURNAL_PAGE_SIZE, LOG_LIMIT, _markdown, _read_text
 
 
 @contextmanager
@@ -211,7 +213,7 @@ def test_host_and_loopback_boundary(campaign):
         assert error.value.code == 403
 
 
-@pytest.mark.skipif(os.environ.get("XGENIUS_BROWSER_TESTS") != "1", reason="Opt in to prepared Playwright/Chromium")
+@pytest.mark.skipif(environment_value("BROWSER_TESTS") != "1", reason="Opt in to prepared Playwright/Chromium")
 def test_browser_navigation_journal_refresh_and_mobile(campaign, tmp_path):
     from playwright.sync_api import sync_playwright, expect
     campaign.state.hypothesis("h001", "Controls improve coverage")
@@ -220,7 +222,7 @@ def test_browser_navigation_journal_refresh_and_mobile(campaign, tmp_path):
                         "| Score | Meaning |\n| --- | --- |\n| 42 | Synthetic |\n\n<script>window.injected=true</script>")
     before = dump(campaign.state)
     with serve(campaign.config.config_path) as base, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, executable_path=os.environ.get("XGENIUS_BROWSER_EXECUTABLE"))
+        browser = playwright.chromium.launch(headless=True, executable_path=environment_value("BROWSER_EXECUTABLE"))
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             errors, requests = [], []

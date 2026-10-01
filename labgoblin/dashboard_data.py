@@ -8,14 +8,15 @@ from pathlib import Path
 import time
 import urllib.parse
 
-from xgenius import journal, reporting, results
-from xgenius.evidence import contained
-from xgenius.protocol import ACTIVE
-from xgenius.state import State
+from labgoblin import journal, reporting, results
+from labgoblin.evidence import contained
+from labgoblin.protocol import ACTIVE
+from labgoblin.state import State
+from labgoblin.paths import configuration_path, state_directory
 
 
 def query(path: Path, sql: str, params: tuple = ()) -> list[dict]:
-    from xgenius.db import connection
+    from labgoblin.db import connection
     with connection(path) as conn:
         return [dict(row) for row in conn.execute(sql, params)]
 
@@ -281,8 +282,8 @@ def _clean(value, limit=2000):
 
 class EvidenceReader:
     def __init__(self, config_path: str):
-        self.config_path = str(Path(config_path).resolve())
-        self.state = State.open(Path(self.config_path).parent / ".xgenius")
+        self.config_path = str(configuration_path(config_path))
+        self.state = State.open(state_directory(self.config_path))
 
     def read(self, name: str, arguments: dict) -> dict:
         if name not in TOOLS or not isinstance(arguments, dict):

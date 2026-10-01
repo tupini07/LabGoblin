@@ -5,14 +5,14 @@ import time
 
 import pytest
 
-from xgenius.config import initial_config, parse_config
-from xgenius.protocol import Handoff, LaunchEnvelope, LaunchKey, Resources, canonical, fingerprint, identifier
-from xgenius.state import State
+from labgoblin.config import initial_config, parse_config
+from labgoblin.protocol import Handoff, LaunchEnvelope, LaunchKey, Resources, canonical, fingerprint, identifier
+from labgoblin.state import State
 
 
 @pytest.fixture
 def state(tmp_path):
-    cfg = parse_config(initial_config("fixture", "copilot"), tmp_path / "xgenius.toml")
+    cfg = parse_config(initial_config("fixture", "copilot"), tmp_path / "labgoblin.toml")
     result = State.create(cfg, tmp_path / "machine.db")
     result.bind_ledger(tmp_path / "machine.db", "machine")
     return result
@@ -101,22 +101,22 @@ def test_open_missing_state_never_creates_directory(tmp_path):
 
 
 def test_reject_old_database_without_migration(tmp_path):
-    root = tmp_path / ".xgenius"
+    root = tmp_path / ".labgoblin"
     root.mkdir()
-    path = root / "xgenius.db"
+    path = root / "labgoblin.db"
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA user_version=2")
     before = path.read_bytes()
     with pytest.raises(ValueError, match="Unsupported campaign database"):
         State.open(root)
     assert path.read_bytes() == before
-    assert [p.name for p in root.iterdir()] == ["xgenius.db"]
+    assert [p.name for p in root.iterdir()] == ["labgoblin.db"]
 
 
 def test_read_connections_are_read_only_and_init_is_exclusive(state):
     with state.db.read() as conn, pytest.raises(sqlite3.OperationalError, match="readonly"):
         conn.execute("UPDATE campaign SET revision=99")
-    cfg = parse_config(initial_config("fixture"), state.root.parent / "xgenius.toml")
+    cfg = parse_config(initial_config("fixture"), state.root.parent / "labgoblin.toml")
     with pytest.raises(FileExistsError):
         State.create(cfg, state.root.parent / "machine.db")
     assert state.campaign()["revision"] == 0
@@ -186,7 +186,7 @@ def test_late_old_handoff_does_not_reopen_stop_or_new_generation(state):
 
 
 def test_acceptance_rolls_back_acknowledgement_and_sources_together(state, monkeypatch):
-    import xgenius.state as implementation
+    import labgoblin.state as implementation
     current = turn(state)
     event = state.pending_events()[0]
     value = handoff(current, evidence=[{"event_id": event["id"], "disposition": "assessed", "reason": "Read."}])
@@ -283,7 +283,7 @@ def test_receipt_recovery_does_not_load_current_toml(state):
     allocation = allocate(state, work)
     value = envelope(state, work, allocation)
     state.arm(value)
-    (state.root.parent / "xgenius.toml").write_text("not [valid toml", encoding="utf-8")
+    (state.root.parent / "labgoblin.toml").write_text("not [valid toml", encoding="utf-8")
     recovered = State.open(state.root)
     recovered.finish_launch(value.key.nonce, receipt(value))
     recovered.finish_launch(value.key.nonce, receipt(value))
@@ -342,13 +342,13 @@ def test_monotonic_controller_high_water_counts_time_during_clock_rollback(state
 def test_invocation_budget_reserves_closure_and_counts_canaries(state):
     raw = initial_config("fixture", "copilot")
     raw["campaign"]["max_invocations"] = 1
-    state.configure(parse_config(raw, state.root.parent / "xgenius.toml"))
+    state.configure(parse_config(raw, state.root.parent / "labgoblin.toml"))
     current = turn(state, owned=False)
     with pytest.raises(ValueError, match="final analysis"):
         state.reserve_invocations(current.turn_id, "research", ("research",))
     raw["campaign"]["max_invocations"] = 4
     raw["agent"].update(sandbox=True, copilot_home=str(state.root / "sandbox"))
-    state.configure(parse_config(raw, state.root.parent / "xgenius.toml"))
+    state.configure(parse_config(raw, state.root.parent / "labgoblin.toml"))
     ids = state.reserve_invocations(current.turn_id, "research", ("canary", "research"))
     assert len(ids) == 2
     assert state.reserve_invocations(current.turn_id, "research", ("canary", "research")) == ids

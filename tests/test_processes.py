@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from xgenius import processes
-from xgenius.payload import WindowsPayload
-from xgenius.protocol import identifier
+from labgoblin import processes
+from labgoblin.payload import WindowsPayload
+from labgoblin.protocol import identifier
 
 
 WINDOW_PROBE = (
@@ -84,7 +84,7 @@ def test_background_process_and_unmodified_child_have_no_console_window(tmp_path
     assert all(not row["window"] and not row["visible"] and row["console_codepage"] for row in rows)
 
 def test_temporary_cleanup_retries_only_transient_windows_sharing(monkeypatch):
-    from xgenius import processes
+    from labgoblin import processes
     calls = []
     class Directory:
         name = "owned"

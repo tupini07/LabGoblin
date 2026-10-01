@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -20,15 +21,19 @@ import traceback
 
 import tomli_w
 
-from xgenius.campaign import Campaign
-from xgenius.cli import INSTRUCTIONS
-from xgenius.config import ChatSettings, initial_config, parse_config
-from xgenius.dashboard_chat import SDKObserver
-from xgenius.dashboard_data import EvidenceReader
-from xgenius.evidence import atomic_json
-from xgenius.protocol import canonical
-from xgenius.scheduler import ResourceLedger
-from xgenius.state import State
+# Model-free help probes intentionally strip PYTHONPATH before launching this script.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from labgoblin.campaign import Campaign
+from labgoblin.cli import INSTRUCTIONS
+from labgoblin.config import ChatSettings, initial_config, parse_config
+from labgoblin.dashboard_chat import SDKObserver
+from labgoblin.dashboard_data import EvidenceReader
+from labgoblin.evidence import atomic_json
+from labgoblin.protocol import canonical
+from labgoblin.scheduler import ResourceLedger
+from labgoblin.state import State
 
 
 GOAL = """# Synthetic finite acceptance study
@@ -55,7 +60,7 @@ Do not submit more work, request maintenance, or reopen research.
 
 EXPERIMENT = """import json,os,sys,time
 from pathlib import Path
-output=Path(os.environ['XGENIUS_OUTPUT_DIR'])
+output=Path(os.environ['LABGOBLIN_OUTPUT_DIR'])
 if sys.argv[1]=='999':
     (output/'ready').touch()
     deadline=time.monotonic()+420
@@ -89,7 +94,8 @@ def provider_double(arguments):
     first = not (Path(packet["project"]) / "double-submitted").exists()
     if first:
         subprocess.run([*packet["cli_argv"], "batch-submit", "--file", "batch.json", "--json"],
-                       cwd=packet["project"], check=True, timeout=30)
+                       cwd=packet["project"], check=True, timeout=30,
+                       env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
         Path(packet["project"], "double-submitted").touch()
     result = dict(
         turn_id=packet["turn_id"], packet_id=packet["packet_id"], summary="Synthetic finite comparison",
@@ -167,8 +173,8 @@ def run(root, *, live=False):
         command=[sys.executable, str(Path(__file__).resolve()), "--forward", str(wrapper),
                  "--allow-all-tools", "--disable-builtin-mcps", "--no-custom-instructions"],
         timeout_seconds=180 if live else 20, retries=0, resources={"cpus": 1, "memory_mb": 2048})
-    config = parse_config(raw, project / "xgenius.toml")
-    project.joinpath("xgenius.toml").write_text(tomli_w.dumps(raw), encoding="utf-8")
+    config = parse_config(raw, project / "labgoblin.toml")
+    project.joinpath("labgoblin.toml").write_text(tomli_w.dumps(raw), encoding="utf-8")
     ledger = ResourceLedger.create(root / "machine.db")
     ledger.configure(2, 4096, (), 256)
     state = State.create(config, ledger.path)

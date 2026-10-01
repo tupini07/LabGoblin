@@ -20,8 +20,13 @@ env/
 *.swo
 *~
 
-# xgenius runtime state (per-project, not in package repo)
+# Private runtime state, including retained pre-rename artifacts
+.labgoblin/
+.labgoblin.lock
+.labgoblin-archives/
 .xgenius/
+.xgenius.lock
+.xgenius-archives/
 
 # Singularity/Docker
 *.sif

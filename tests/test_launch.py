@@ -6,19 +6,19 @@ import time
 
 import pytest
 
-from xgenius.config import initial_config, parse_config
-from xgenius.protocol import (
+from labgoblin.config import initial_config, parse_config
+from labgoblin.protocol import (
     LaunchEnvelope, LaunchKey, LaunchReceipt, PreExecutionError, Resources,
     UncertainExecution, identifier,
 )
-from xgenius.scheduler import MachineSample, ResourceLedger
-from xgenius.state import State
-from xgenius import worker
+from labgoblin.scheduler import MachineSample, ResourceLedger
+from labgoblin.state import State
+from labgoblin import worker
 
 
 @pytest.fixture
 def admission(tmp_path):
-    cfg = parse_config(initial_config("fixture"), tmp_path / "xgenius.toml")
+    cfg = parse_config(initial_config("fixture"), tmp_path / "labgoblin.toml")
     ledger = ResourceLedger.create(
         tmp_path / "machine.db",
         sampler=lambda gpus: MachineSample((0, 1), 8192, 8192),
@@ -136,7 +136,7 @@ def test_unarmed_helper_cannot_execute(admission):
 
 def test_changed_frozen_helper_fails_before_execution(admission):
     state, ledger, envelope = prepared(admission)
-    helper = Path(envelope.metadata["runtime"]["root"]) / "xgenius" / "payload.py"
+    helper = Path(envelope.metadata["runtime"]["root"]) / "labgoblin" / "payload.py"
     helper.write_bytes(helper.read_bytes() + b"\n# changed\n")
     calls = []
     assert worker.execute(envelope, lambda value: calls.append(value)) == 1
@@ -171,7 +171,7 @@ def test_receipt_published_before_database_crash_is_recoverable_without_config(a
     monkeypatch.setattr(State, "finish_launch", fail_once)
     assert worker.execute(envelope, completed) == 1
     assert (worker.launch_directory(envelope) / "receipt.json").exists()
-    (state.root.parent / "xgenius.toml").write_text("invalid [config", encoding="utf-8")
+    (state.root.parent / "labgoblin.toml").write_text("invalid [config", encoding="utf-8")
     result = worker.reconcile(State.open(state.root))
     assert result["recovered"] == [envelope.key.work_id]
     assert not result["unresolved"]
@@ -219,7 +219,7 @@ def test_late_completion_cannot_clear_operator_pause(admission):
 
 
 def test_recycled_pid_is_not_a_live_owner():
-    from xgenius.processes import own_handle, process_state
+    from labgoblin.processes import own_handle, process_state
     handle = own_handle("owned")
     assert process_state(handle) == "alive"
     handle["created"] += 1

@@ -6,16 +6,16 @@ from pathlib import Path
 import sqlite3
 import time
 
-from xgenius import agent, agent_worker, backends, briefing, journal, reporting, worker, workspace
-from xgenius.config import load_config
-from xgenius.evidence import atomic_json, require_space
-from xgenius.processes import own_handle, process_state
-from xgenius.protocol import (
+from labgoblin import agent, agent_worker, backends, briefing, journal, reporting, worker, workspace
+from labgoblin.config import load_config
+from labgoblin.evidence import atomic_json, require_space
+from labgoblin.processes import own_handle, process_state
+from labgoblin.protocol import (
     AdmissionClosed, AdmissionWait, BudgetExhausted, LaunchEnvelope,
     Resources, UncertainExecution, canonical, identifier,
 )
-from xgenius.scheduler import ResourceLedger
-from xgenius.state import State
+from labgoblin.scheduler import ResourceLedger
+from labgoblin.state import State
 
 
 ERRORS = (OSError, ValueError, RuntimeError, sqlite3.Error)
@@ -317,7 +317,7 @@ class Campaign:
                 or (current["operator_mode"] == "stopped" or current["generation_state"] == "closed") and not scoped):
             return {"campaign": current, "recovery": recovery, "errors": errors, "started": [], "waiting": []}
         try:
-            config = self.config if self.fixed_config else load_config(self.state.root.parent / "xgenius.toml")
+            config = self.config if self.fixed_config else load_config(self.state.root.parent)
             self.state.configure(config)
             self.state.resolve_blocker("configuration")
         except ERRORS as error:
@@ -460,7 +460,7 @@ class Campaign:
         return result
 
     def _run_owned(self, *, no_agent, once, poll_seconds):
-        from xgenius.protocol import number
+        from labgoblin.protocol import number
         number(poll_seconds, "poll interval")
         with self:
             initial = self.step(no_agent=no_agent, admit=False)

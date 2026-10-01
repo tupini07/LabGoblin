@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 import time
 
-from xgenius.db import Database
-from xgenius.protocol import (
+from labgoblin.db import Database
+from labgoblin.paths import database_path
+from labgoblin.protocol import (
     ACTIVE, TERMINAL, AdmissionClosed, AdmissionWait, BudgetExhausted, Handoff, LaunchEnvelope, LaunchKey, LaunchReceipt, Limit, Resources,
     canonical, fingerprint, identifier, integer, number, table, text,
 )
@@ -134,7 +135,7 @@ class State:
 
     @classmethod
     def open(cls, state_dir: str | Path) -> "State":
-        return cls(Database(Path(state_dir) / "xgenius.db"))
+        return cls(Database(database_path(state_dir)))
 
     @classmethod
     def create(cls, config, ledger_path: str | Path) -> "State":
@@ -454,7 +455,7 @@ class State:
             raise ValueError("Reports are never automatic paid requests")
         options = options or {}
         if kind == "report":
-            from xgenius.reporting import selection_options
+            from labgoblin.reporting import selection_options
             options = selection_options(**table(options, "report options", {"selected", "selection_reason"}))
         elif options:
             raise ValueError("Compaction has no arbitrary operation options")
@@ -464,7 +465,7 @@ class State:
     @staticmethod
     def _maintenance(conn, kind, origin, options=None):
         if kind == "report":
-            from xgenius.reporting import selection_options
+            from labgoblin.reporting import selection_options
             options = selection_options(**(options or {}))
         options = options or {}
         revision = _source_revision(conn)
@@ -981,7 +982,7 @@ class State:
             if {ref for e in handoff.evidence for ref in e.references} - allowed_refs:
                 raise ValueError("Handoff cites evidence not delivered or retrieved by this turn")
             if handoff.assessment is not None:
-                from xgenius.reporting import read_all
+                from labgoblin.reporting import read_all
                 assessment = handoff.assessment
                 if turn["kind"] != "final_analysis" or json.loads(packet["content"]).get("view_id") != assessment["view_id"]:
                     raise ValueError("Assessment must name the final turn's exact source view")
@@ -1179,7 +1180,7 @@ class State:
             metadata = json.loads(view[0])
             quiescent = self._quiescent(conn) and metadata["operationally_ready"]
             if outcome == "assessed":
-                from xgenius.reporting import valid_assessed_turn
+                from labgoblin.reporting import valid_assessed_turn
                 if not quiescent or not valid_assessed_turn(conn, view_id, assessed_turn):
                     raise ValueError("Assessed closure requires an owned complete assessment and operational quiescence")
             assessment = {"view_id": view_id, "inventory_digest": metadata["inventory_digest"], "outcome": outcome,

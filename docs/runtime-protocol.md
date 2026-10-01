@@ -1,9 +1,18 @@
 # Local runtime contract
 
-xgenius 2 uses configuration, campaign database, machine-ledger and worker
+LabGoblin 2 uses configuration, campaign database, machine-ledger and worker
 protocol version 3. These versions are checked independently. Old formats are
 not migrated: initialize a fresh local campaign. An incompatible existing
 machine ledger must not be replaced while old work may still be running.
+
+Only LabGoblin command, import, environment and default path names are supported.
+Helper manifests must explicitly bind the `labgoblin` namespace and the complete
+file set into their identity; every source/bootstrap hash is verified. Missing
+or old namespaces are rejected, not interpreted as a compatibility format.
+No new helper is substituted for an admitted frozen one. Windows Job Object/
+container names, Docker ownership labels/build tags and sandbox markers use
+LabGoblin names. SQL application IDs and schema versions are unchanged.
+See [names and existing installations](local-research.md#names-and-existing-installations).
 
 Only native, WSL2 and local Docker workers are supported. Each runner declares
 its interpreter; WSL also declares its distro, and Docker its local context and
@@ -20,7 +29,7 @@ owned launch argv before execution. Recovery qualifies the same mapping digest
 on guest receipts, including a pre-execution input-pin refusal; it does not
 bypass that check when the host supervisor was lost.
 
-Campaign creation takes an exclusive external `.xgenius.lock` lease; readers,
+Campaign creation takes an exclusive external `.labgoblin.lock` lease; readers,
 submission preparation and dashboard lifetimes take shared leases. Reset needs
 exclusive access and never renames a directory containing its open lock handle.
 Cached database objects verify campaign identity on every read/write.
@@ -128,7 +137,7 @@ Zero matches do not establish that the archive contains no relevant evidence.
 `source set --kind goal|protocol` commits a retained operator revision. A goal
 set this way does not overwrite the goal file or reimport its unchanged older
 bytes; a subsequent observed manual edit becomes a new attributed revision.
-Manual `.xgenius\journal.md` imports are retained notes, never owned handoffs.
+Manual `.labgoblin\journal.md` imports are retained notes, never owned handoffs.
 
 Compaction is one owned, budgeted maintenance request, never an independent child
 provider. Automatic compaction becomes eligible after 32 KiB of newly indexed

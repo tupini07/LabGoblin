@@ -2,14 +2,19 @@
 
 ## Fresh initialization and capacity
 
-Run `xgenius init --agent copilot` in a dedicated project, or omit `--agent` for
+Install from the [LabGoblin GitHub checkout](https://github.com/tupini07/LabGoblin),
+using `python -m pip install -e .` there with the prepared environment's
+interpreter. This onboarding does not assume a published PyPI distribution.
+Return to the intended campaign directory before initializing it.
+
+Run `labgoblin init --agent copilot` in a dedicated project, or omit `--agent` for
 Claude. It creates schema-3 state and a shared owned section in `CLAUDE.md`,
 preserving unrelated text. `instructions --target copilot` explicitly updates
 the owned section in `.github/copilot-instructions.md` when that file takes
 precedence. Nothing changes global provider settings.
 
 For a project-local Windows virtual environment, use
-`.\.venv\Scripts\xgenius.exe` without changing PATH. To use bare `xgenius`
+`.\.venv\Scripts\labgoblin.exe` without changing PATH. To use bare `labgoblin`
 instead, activate that environment or prepend its `Scripts` directory to PATH
 in the current terminal. Managed research sessions receive that interpreter's
 scripts directory on PATH automatically; no global PATH edit is required.
@@ -19,9 +24,9 @@ explicit quiescent `reset --confirm ID`, `init --existing-config` creates fresh
 state without overwriting the existing configuration/goal. Reset archives the
 old directory, not the ledger, and never starts research.
 
-The shared ledger defaults to `%LOCALAPPDATA%\xgenius\resources.db` on Windows
-and the user's local state directory elsewhere. Tests can select an isolated
-ledger with `init --ledger PATH` or `XGENIUS_RESOURCE_DB`. Production campaigns
+The shared ledger defaults to `%LOCALAPPDATA%\labgoblin\resources.db`
+on Windows or `~/.local/state/labgoblin/resources.db` elsewhere. Tests can select an isolated
+ledger with `init --ledger PATH` or `LABGOBLIN_RESOURCE_DB`. Production campaigns
 sharing a workstation must coordinate through the same ledger; a new filename
 is not permission to ignore work in an older ledger.
 
@@ -30,6 +35,48 @@ Configure capacity explicitly with `machine configure --cpus 2 --memory-mb 4096
 Reasoning, experiments and maintenance compete fairly for capacity; a one-slot
 deployment alternates rather than keeping a permanent reasoning reservation.
 The oldest eligible satisfiable request gets a drain-to-fit barrier.
+
+## Names and existing installations
+
+LabGoblin is derived from [Roger Creus Castanyer's xgenius](https://github.com/roger-creus/xgenius),
+but is **not drop-in compatible with the original cluster harness**. The product,
+distribution/import and command are `LabGoblin`, `labgoblin` and `labgoblin`.
+Version 2.0.0 retains all four schema/protocol versions at 3, but **old names are
+not supported**. There is no compatibility package, executable alias, automatic
+path lookup, environment alias or browser-preference migration.
+
+Fresh `init` writes `labgoblin.toml`, `.labgoblin/labgoblin.db`, the external
+`.labgoblin.lock` and LabGoblin-branded agent instructions. Managed sessions and
+payloads expose only `LABGOBLIN_*` variables, including project/turn identity,
+`LABGOBLIN_OUTPUT_DIR`, `LABGOBLIN_ATTEMPT_ID` and `LABGOBLIN_INPUT_NAME`.
+Python consumers use `LabGoblinConfig` and `labgoblin` imports.
+
+Create a new campaign in a dedicated directory. Renaming an old campaign's
+files is not a supported migration: its instructions, snapshots, packets and
+frozen runtime may still require the old installation. Preserve that installation
+and its state separately if recovery or historical access is needed. Never
+rewrite admitted envelopes, receipts or ownership records to make them look new.
+
+Only `LABGOBLIN_RESOURCE_DB` or explicit `--ledger PATH` overrides the default
+machine-ledger location. Old environment variables and app-data directories are
+not searched. Before configuring this default on a previously used workstation,
+establish quiescence with the old runtime. Back up the old ledger; if reusing its
+schema-3 capacity, explicitly move the inactive ledger or select its existing
+path. Do not create a second capacity pool while old work could still consume
+resources. Campaigns and envelopes use their recorded ledger path and identity;
+a missing or mismatched bound ledger remains an error.
+
+Use a fresh environment for LabGoblin, or explicitly uninstall the old
+distribution before installing from this checkout. An editable installation
+must be reinstalled after entry-point changes. Installing LabGoblin does not
+rename any existing campaign or start research.
+
+Frozen helpers require an explicit `labgoblin` namespace and exact manifest/
+bootstrap hashes. Missing or old namespaces are rejected. Ownership names,
+Docker labels and temporary build tags use `labgoblin`; SQL application IDs
+remain unchanged. Missing/mismatched ownership stays uncertain and retains its grant.
+`CITATION.cff`, the original citation, copyright and historical reports describe
+the original software, not a renamed historical method.
 
 ## Configuration
 
@@ -178,7 +225,7 @@ No environments, datasets, caches or dependencies are automatically copied or
 installed. Payloads inherit essential PATH/home/temp variables and explicit
 non-secret overrides, not the controller's complete credential environment.
 
-Write artifacts under `XGENIUS_OUTPUT_DIR`. A `metrics.json` artifact is an
+Write artifacts under `LABGOBLIN_OUTPUT_DIR`. A `metrics.json` artifact is an
 object of finite numeric values, not booleans or strings. Optional
 `input_validators` and `validators` are arrays of argv arrays and share the
 operation's resources, deadline and cancellation; include their source files.
@@ -189,7 +236,7 @@ Hypothesis-associated work supplies both `hypothesis_id` and a scientific
 changed. Use a new ID and optional `hypothesis set --supersedes OLD_ID` for a
 revised claim. Support/setup/replication work need not invent a hypothesis.
 
-Declared inputs use `XGENIUS_INPUT_NAME`. `declared` does not certify content;
+Declared inputs use `LABGOBLIN_INPUT_NAME`. `declared` does not certify content;
 `checked` requires an explicit bounded hash policy; pre/post checks do not prove
 no mutation during execution. `stable-consumption` prepares only a bounded small
 file and requires supported Windows read leases or read-only Docker access.
@@ -255,11 +302,17 @@ Docker socket, broad host mounts or privileged mode. A payload receipt alone doe
 not prove container quiescence. Completed owned containers remain inspectable.
 
 An image build is an **explicit operator operation**, not automatic work in
-`run`, and uses the optional `docker-build` extra:
+`run`, and uses the optional `docker-build` extra. Install it from the LabGoblin
+checkout with the campaign's prepared interpreter:
 
 ```powershell
-python -m pip install "xgenius[docker-build]"
-xgenius build --runner container --context . --include experiment.py --seconds 600
+python -m pip install -e ".[docker-build]"
+```
+
+Then, from the campaign's reviewed build-context directory:
+
+```powershell
+labgoblin build --runner container --context . --include experiment.py --seconds 600
 ```
 
 The Dockerfile is always included. Repeat `--include` for every additional
@@ -284,7 +337,7 @@ restarts, builders with elevated privileges or backend fallback.
 
 ## Reading the research dashboard
 
-`xgenius dashboard --open-browser` opens **Brief**, the research-first catch-up
+`labgoblin dashboard --open-browser` opens **Brief**, the research-first catch-up
 view. It shows the retained question, latest accepted rationale, qualified next
 step and independent execution/research facts. Recovery blockers are promoted
 when present; a closed generation shows its recorded outcome instead of old

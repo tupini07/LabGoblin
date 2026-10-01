@@ -6,10 +6,11 @@ import re
 import sys
 import tomllib
 
-from xgenius.protocol import (
+from labgoblin.protocol import (
     CONFIG_VERSION, Limit, Resources, argv, boolean, fingerprint, integer,
     number, require_version, strings, table, text,
 )
+from labgoblin.paths import configuration_path, state_directory
 
 
 AGENT_COMMANDS = {
@@ -125,7 +126,7 @@ def parse_chat_settings(value: dict) -> ChatSettings:
 
 
 @dataclass(frozen=True)
-class XGeniusConfig:
+class LabGoblinConfig:
     project: ProjectConfig
     execution: ExecutionConfig
     runners: dict[str, Runner]
@@ -143,7 +144,7 @@ class XGeniusConfig:
 
     @property
     def state_dir(self) -> Path:
-        return self.root / ".xgenius"
+        return state_directory(self.config_path)
 
 
 def environment(value, name: str) -> dict[str, str]:
@@ -203,7 +204,7 @@ def _input(name: str, value: dict) -> InputConfig:
     )
 
 
-def parse_config(raw: dict, path: str | Path) -> XGeniusConfig:
+def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
     raw = table(raw, "configuration")
     require_version(raw.get("schema_version"), CONFIG_VERSION, "configuration")
     table(raw, "configuration", {"schema_version", "project", "execution", "runners",
@@ -252,8 +253,9 @@ def parse_config(raw: dict, path: str | Path) -> XGeniusConfig:
     if sandbox:
         if provider != "copilot" or not home:
             raise ValueError("Sandbox requires Copilot and an explicitly provisioned copilot_home")
-        if not (path.parent / home).resolve().is_relative_to(path.parent / ".xgenius"):
-            raise ValueError("Sandbox profile must be under this campaign's .xgenius directory")
+        sandbox_root = state_directory(path)
+        if not (path.parent / home).resolve().is_relative_to(sandbox_root):
+            raise ValueError(f"Sandbox profile must be under this campaign's {sandbox_root} directory")
     agent_config = AgentConfig(
         provider, command, agent_resources,
         number(agent.get("timeout_seconds", 600), "agent.timeout_seconds"),
@@ -277,14 +279,14 @@ def parse_config(raw: dict, path: str | Path) -> XGeniusConfig:
     inputs = {name: _input(name, value)
               for name, value in table(raw.get("inputs", {}), "inputs").items()}
     dashboard = table(raw.get("dashboard", {}), "dashboard", {"chat"})
-    return XGeniusConfig(project_config, execution_config, runners, campaign_config,
+    return LabGoblinConfig(project_config, execution_config, runners, campaign_config,
                         agent_config, StorageConfig(**limits, volumes=volumes), inputs,
                         str(path), fingerprint(raw), parse_chat_settings(dashboard.get("chat", {})))
 
 
-def load_config(path: str | Path = "xgenius.toml") -> XGeniusConfig:
-    path = Path(path).resolve()
-    from xgenius.evidence import read_bytes
+def load_config(path: str | Path = ".") -> LabGoblinConfig:
+    path = configuration_path(path)
+    from labgoblin.evidence import read_bytes
     return parse_config(tomllib.loads(read_bytes(path, 64 * 1024).decode("utf-8")), path)
 
 
@@ -305,9 +307,9 @@ def initial_config(name: str, provider: str = "claude", python: str | None = Non
     }
 
 
-def get_project_dir(config: XGeniusConfig) -> str:
+def get_project_dir(config: LabGoblinConfig) -> str:
     return str(config.root)
 
 
-def get_xgenius_dir(config: XGeniusConfig) -> str:
+def get_labgoblin_dir(config: LabGoblinConfig) -> str:
     return str(config.state_dir)

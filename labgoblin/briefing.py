@@ -7,9 +7,9 @@ from pathlib import Path
 import sys
 import time
 
-from xgenius.evidence import SizeLimitError, contained, hash_file, parse_json, publish_bytes
-from xgenius.protocol import AdmissionWait, HANDOFF_BYTES, PACKET_BYTES, PACKET_EVENTS, Limit, canonical, identifier, integer
-from xgenius.state import _active_directives, _campaign, _queue_order, _settings, _source_revision
+from labgoblin.evidence import SizeLimitError, contained, hash_file, parse_json, publish_bytes
+from labgoblin.protocol import AdmissionWait, HANDOFF_BYTES, PACKET_BYTES, PACKET_EVENTS, Limit, canonical, identifier, integer
+from labgoblin.state import _active_directives, _campaign, _queue_order, _settings, _source_revision
 
 
 INSTRUCTIONS = """Conduct one autonomous research turn, not a human-agent collaboration.
@@ -18,13 +18,13 @@ the governing rationale; use archive retrieval for earlier negative findings and
 Derived summaries are unverified hints, never authority over these sources or constraints.
 Do useful support work or replication without inventing a hypothesis or discovery.
 
-Submit heavy experiments with xgenius submit (an argv-form JSON manifest), never as
+Submit heavy experiments with labgoblin submit (an argv-form JSON manifest), never as
 unmanaged shell jobs. All experiments and inference share finite resources. Do not start
 controllers, providers, subagents or workflows, install into shared environments, upload
 data, push code, or expand the goal. Trusted execution is not filesystem isolation.
 Do not wait synchronously for experiments while holding the reasoning grant.
 
-Use xgenius evidence and journal retrieval for exact revisions. Event and metric previews
+Use labgoblin evidence and journal retrieval for exact revisions. Event and metric previews
 may be incomplete: inspect their coverage and retrieve more before drawing conclusions.
 Zero search matches are not proof of absent evidence. Never replace historical evidence
 with a current mutable file. Process success is not artifact validity or scientific success.
@@ -131,7 +131,7 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
         "campaign_id": state.id, "generation": campaign["generation"], "revision": campaign["revision"],
         "authority_revision": campaign["authority_revision"],
         "watermark": watermark, "recorded_at": time.time(), "sources": sources, "directives": directives,
-        "instructions": INSTRUCTIONS, "cli_argv": [sys.executable, "-m", "xgenius.cli"],
+        "instructions": INSTRUCTIONS, "cli_argv": [sys.executable, "-m", "labgoblin.cli"],
         "project": str(state.root.parent), "view_id": view_id,
         "budgets": {
             "elapsed_admission_seconds": Limit(settings["campaign"]["max_seconds"]["value"]).view(campaign["elapsed"]),
@@ -155,7 +155,7 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
     if len(canonical(packet)) > PACKET_BYTES:
         raise SizeLimitError("Mandatory goal, rationale and constraints exceed the packet byte limit; none were clipped")
     if view_id:
-        from xgenius.reporting import _page
+        from labgoblin.reporting import _page
         packet["inventory"] = _page(conn, view_id, byte_limit=PACKET_BYTES - len(canonical(packet)) - 2048)
         packet["result_protocol"]["optional"].append("assessment")
         packet["result_protocol"]["assessment_shape"] = {
@@ -163,7 +163,7 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
             "assess_all": True, "exclusions": [{"attempt_id": "optional exact ID", "reason": "explicit rationale"}],
             "limitations": "Required limitations; assess_all explicitly considers every inventoried observation except named exclusions",
         }
-        packet["instructions"] += ("\nRetrieve all remaining inventory pages with xgenius view --id VIEW_ID --offset END --json."
+        packet["instructions"] += ("\nRetrieve all remaining inventory pages with labgoblin view --id VIEW_ID --offset END --json."
                                    " Your final handoff must include the exact assessment object to establish inventory coverage.\n")
         if len(canonical(packet)) > PACKET_BYTES:
             raise SizeLimitError("Mandatory final inventory context exceeds the packet byte allowance")
@@ -171,7 +171,7 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
         if not view_id:
             raise ValueError("Report inference requires its committed source view")
         packet["instructions"] = """Write an interim historical research report from ONLY this immutable source view and
-its exact retained source/observation references. Retrieve every inventory page with xgenius view.
+its exact retained source/observation references. Retrieve every inventory page with labgoblin view.
 Keep the complete denominator visible even when only selected attempts support a comparison.
 Do not perform research, read raw datasets, submit experiments, or start another provider.
 Return concise title, summary, limitations, reference IDs and structured numeric claims.

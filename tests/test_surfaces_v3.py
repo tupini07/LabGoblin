@@ -8,11 +8,11 @@ from tests.test_cli_v3 import call
 from tests.test_controller import fixture
 from tests.test_dashboard import serve
 from tests.test_workspace import request
-from xgenius import cli, workspace
-from xgenius.campaign import Campaign
-from xgenius.evidence import read_json, retention_candidates
-from xgenius.processes import CampaignLease
-from xgenius.state import State
+from labgoblin import cli, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.evidence import read_json, retention_candidates
+from labgoblin.processes import CampaignLease
+from labgoblin.state import State
 
 
 def prepared(tmp_path):
@@ -61,7 +61,7 @@ def test_validate_and_doctor_do_not_copy_or_spend_inference(tmp_path, capsys):
 def test_machine_defaults_to_recorded_ledger_and_never_recreates_missing_bound_ledger(tmp_path, capsys, monkeypatch):
     config, state, ledger, _ = prepared(tmp_path)
     unrelated = tmp_path / "unrelated.db"
-    monkeypatch.setenv("XGENIUS_RESOURCE_DB", str(unrelated))
+    monkeypatch.setenv("LABGOBLIN_RESOURCE_DB", str(unrelated))
     code, value = call(capsys, "machine", "status", "--project", config.root, "--json")
     assert code == 0 and value["ledger_id"] == ledger.id
     ledger.path.unlink()
@@ -81,7 +81,7 @@ def test_reset_refuses_live_readers_then_archives_and_fresh_init_is_explicit(tmp
     code, value = call(capsys, "reset", "--project", config.root, "--confirm", state.id, "--json")
     assert code == 0, value
     archive = Path(value["archive"])
-    assert (archive / "xgenius.db").exists() and not state.root.exists()
+    assert (archive / "labgoblin.db").exists() and not state.root.exists()
     assert ledger.path.exists() and Path(config.config_path).read_bytes() == before
     code, value = call(capsys, "init", "--project", config.root, "--existing-config", "--ledger", ledger.path, "--json")
     assert code == 0 and value["campaign_id"] != state.id
@@ -122,7 +122,7 @@ def test_submission_rechecks_generation_and_authority_after_copy(tmp_path, monke
     assert not state.attempts()
     markers = list((state.root / "attempts").glob("*/preparation.json"))
     assert len(markers) == 1 and read_json(markers[0])["owner_id"] == state.id
-    monkeypatch.setattr("xgenius.processes.process_state", lambda _: "dead")
+    monkeypatch.setattr("labgoblin.processes.process_state", lambda _: "dead")
     retained = retention_candidates(state)
     assert retained["dry_run"] and retained["candidates"][0]["candidate"]
     assert markers[0].exists()

@@ -9,11 +9,11 @@ import shutil
 import stat
 import time
 
-from xgenius.config import environment
-from xgenius.evidence import (
+from labgoblin.config import environment
+from labgoblin.evidence import (
     Capture, SizeLimitError, contained, copy_bounded, hash_file, publish_bytes, require_space, verify_input_pins,
 )
-from xgenius.protocol import (
+from labgoblin.protocol import (
     LaunchEnvelope, LaunchKey, Resources, TERMINAL, argv, boolean, canonical,
     fingerprint, identifier, number, strings, table, text,
 )
@@ -139,7 +139,7 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None, *, valida
     if not root.is_relative_to(config.root):
         raise ValueError("Campaign state escapes the project through a symlink/junction")
     root.mkdir(parents=True, exist_ok=False)
-    from xgenius.processes import own_handle
+    from labgoblin.processes import own_handle
     publish_bytes(root / "preparation.json", canonical({
         "protocol": 3, "owner_id": owner_id, "work_id": root.name,
         "handle": own_handle(root.name), "request_digest": fingerprint(request),
@@ -178,7 +178,7 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None, *, valida
 
 
 def submit(state, config, request: dict, *, turn_id: str | None = None) -> dict:
-    from xgenius.processes import CampaignLease
+    from labgoblin.processes import CampaignLease
     with CampaignLease(state.root):
         return _submit_owned(state, config, request, turn_id=turn_id)
 
@@ -188,7 +188,7 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
     with state.db.read() as conn:
         campaign = conn.execute("SELECT generation,authority_revision FROM campaign").fetchone()
         generation = campaign["generation"]
-        from xgenius.state import _active_directives
+        from labgoblin.state import _active_directives
         source_refs = dict(conn.execute("SELECT name,source_id FROM source_heads WHERE name IN ('goal','protocol','rationale','summary')"))
         source_refs.update({f"directive:{r['id']}": r["source_id"] for r in _active_directives(conn, generation)})
         if turn_id:
@@ -225,8 +225,8 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
 
 
 def prepare_envelope(state, config, attempt_id: str, grant: dict) -> LaunchEnvelope:
-    from xgenius.backends import validate_runner
-    from xgenius.payload import validate_command
+    from labgoblin.backends import validate_runner
+    from labgoblin.payload import validate_command
     attempt = state.attempt(attempt_id)
     spec = json.loads(attempt["spec"])
     if grant["state"] != "granted" or grant["work_id"] != attempt_id or grant["owner_id"] != state.id:

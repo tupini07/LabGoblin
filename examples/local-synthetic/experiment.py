@@ -12,7 +12,7 @@ def main():
     args = parser.parse_args()
     values = [2 + args.offset, 4 + args.offset, 6 + args.offset]
     metrics = {"mean": sum(values) / len(values), "count": len(values), "offset": args.offset}
-    output = Path(os.environ["XGENIUS_OUTPUT_DIR"])
+    output = Path(os.environ["LABGOBLIN_OUTPUT_DIR"])
     (output / "metrics.json").write_text(json.dumps(metrics, allow_nan=False), encoding="utf-8")
     print(json.dumps(metrics, allow_nan=False))
 

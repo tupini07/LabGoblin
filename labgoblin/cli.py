@@ -3,36 +3,36 @@
 import argparse
 from dataclasses import asdict
 import json
-import os
 from pathlib import Path
 import sqlite3
 import sys
 
-from xgenius import __version__, briefing, journal, reporting, results, workspace
-from xgenius.campaign import Campaign
-from xgenius.config import initial_config, load_config, parse_config
-from xgenius.evidence import Capture, atomic_bytes, contained, observation, publish_bytes, read_bytes, read_json, tail
-from xgenius.evidence import retention_candidates, storage_inventory, watermarks
-from xgenius.protocol import identifier
-from xgenius.scheduler import ResourceLedger, ledger_path
-from xgenius.state import State
+from labgoblin import __version__, briefing, journal, reporting, results, workspace
+from labgoblin.campaign import Campaign
+from labgoblin.config import initial_config, load_config, parse_config
+from labgoblin.evidence import Capture, atomic_bytes, contained, observation, publish_bytes, read_bytes, read_json, tail
+from labgoblin.evidence import retention_candidates, storage_inventory, watermarks
+from labgoblin.protocol import identifier
+from labgoblin.paths import environment_value, present, project_paths
+from labgoblin.scheduler import ResourceLedger, ledger_path
+from labgoblin.state import State
 
 
-SECTION_START = "<!-- xgenius-research:start -->"
-SECTION_END = "<!-- xgenius-research:end -->"
+SECTION_START = "<!-- labgoblin-research:start -->"
+SECTION_END = "<!-- labgoblin-research:end -->"
 INSTRUCTIONS = f"""{SECTION_START}
-## Autonomous local research with xgenius
+## Autonomous local research with LabGoblin
 
 Read the controller's versioned packet before acting. It contains the goal,
 operator constraints, governing rationale, event cutoff and owned result format.
-Use `xgenius status --json`, `xgenius budget --json`, and exact `xgenius evidence`
-or `xgenius journal entry` retrieval. Previews and searches have bounded coverage.
+Use `labgoblin status --json`, `labgoblin budget --json`, and exact `labgoblin evidence`
+or `labgoblin journal entry` retrieval. Previews and searches have bounded coverage.
 
-Submit heavy work with `xgenius submit --spec work.json --json`. A manifest uses
+Submit heavy work with `labgoblin submit --spec work.json --json`. A manifest uses
 a stable idempotency `key`, `argv` array, explicit `source_files`, optional runner
 and hypothesis ID/statement, CPU/RAM/GPU request, finite `seconds`, and relative
-`artifacts`. Write outputs to XGENIUS_OUTPUT_DIR; metrics.json is a finite numeric
-JSON object. Access declared inputs through XGENIUS_INPUT_NAME. Do not run heavy
+`artifacts`. Write outputs to LABGOBLIN_OUTPUT_DIR; metrics.json is a finite numeric
+JSON object. Access declared inputs through LABGOBLIN_INPUT_NAME. Do not run heavy
 work outside the queue or wait for it while holding a reasoning grant.
 
 Write exactly one JSON handoff to the supplied result path. Explain observations,
@@ -60,11 +60,13 @@ class Parser(argparse.ArgumentParser):
 def _instructions(path: Path, state):
     old = read_bytes(path, 256 * 1024) if path.exists() else b""
     content = old.decode("utf-8")
-    if SECTION_START in content:
-        if content.count(SECTION_START) != 1 or content.count(SECTION_END) != 1:
+    start, end = SECTION_START, SECTION_END
+    if start in content or end in content:
+        if (content.count(start) != 1 or content.count(end) != 1
+                or content.index(end) < content.index(start)):
             raise ValueError("Instruction markers are ambiguous; preserve and repair the document explicitly")
-        before, owned = content.split(SECTION_START, 1)
-        _, after = owned.split(SECTION_END, 1)
+        before, owned = content.split(start, 1)
+        _, after = owned.split(end, 1)
         updated = before + INSTRUCTIONS.strip() + after
     else:
         updated = content + ("\n\n" if content else "") + INSTRUCTIONS
@@ -83,12 +85,13 @@ def _instructions(path: Path, state):
 def initialize(args):
     root = Path(args.project).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    path = root / "xgenius.toml"
-    if path.exists() and not args.existing_config:
+    paths = project_paths(root)
+    path = paths.config
+    if present(path) and not args.existing_config:
         raise FileExistsError("Configuration already exists; init only creates a fresh local campaign")
     if args.existing_config and not path.is_file():
-        raise FileNotFoundError("--existing-config requires an existing schema-3 xgenius.toml")
-    state_dir = root / ".xgenius"
+        raise FileNotFoundError("--existing-config requires an existing schema-3 labgoblin.toml")
+    state_dir = paths.state
     if state_dir.exists() and any(state_dir.iterdir()):
         raise FileExistsError("Campaign state is not empty; old formats are not migrated")
     if args.existing_config:
@@ -98,7 +101,7 @@ def initialize(args):
         raw = initial_config(root.name, args.agent)
     config = parse_config(raw, path)
     state = State.create(config, args.ledger or ledger_path())
-    from xgenius.processes import CampaignLease
+    from labgoblin.processes import CampaignLease
     with CampaignLease(state.root):
         with state.db.read():
             pass
@@ -121,20 +124,22 @@ def _finish_initialization(args, state, config, raw):
         _instructions(copilot, state)
     elif copilot.exists():
         warnings.append("Existing .github/copilot-instructions.md may take precedence over CLAUDE.md; "
-                        "install the owned section explicitly with xgenius instructions --target copilot.")
+                        "install the owned section explicitly with labgoblin instructions --target copilot.")
     ignore = root / ".gitignore"
     previous = read_bytes(ignore, 256 * 1024).decode("utf-8") if ignore.exists() else ""
-    missing = [line for line in (".xgenius/", ".xgenius.lock", ".xgenius-archives/") if line not in previous.splitlines()]
+    state_name = state.root.name
+    missing = [line for line in (f"{state_name}/", f"{state_name}.lock", f"{state_name}-archives/")
+               if line not in previous.splitlines()]
     if missing:
         with ignore.open("a", encoding="utf-8") as stream:
-            stream.write("\n# xgenius owned runtime state\n" + "\n".join(missing) + "\n")
+            stream.write("\n# LabGoblin owned runtime state\n" + "\n".join(missing) + "\n")
     return {"campaign_id": state.id, "project": str(root), "schema_version": 3, "mode": "trusted",
             "warnings": warnings, "starter_limits": raw["campaign"],
             "next": "Define the goal and review finite limits; explicitly configure compatible machine capacity before run"}
 
 
 def doctor(root, args):
-    from xgenius import agent, backends
+    from labgoblin import agent, backends
     checks = []
 
     def check(name, action):
@@ -148,14 +153,14 @@ def doctor(root, args):
 
     state = None
     try:
-        state = State.open(root / ".xgenius")
+        state = State.open(project_paths(root).state)
         checks.append({"check": "state", "ok": True, "campaign_id": state.id})
     except (OSError, ValueError, sqlite3.Error) as error:
         checks.append({"check": "state", "ok": False, "error": str(error)})
     if state:
         location, identity = state.ledger_identity()
         check("machine", lambda: ResourceLedger(location, expected_id=identity or None).capacity())
-    config = check("configuration", lambda: load_config(root / "xgenius.toml"))
+    config = check("configuration", lambda: load_config(root))
     if config:
         checks[-1]["result"] = {"revision": config.revision}
         name = args.runner or config.execution.default_runner
@@ -171,8 +176,8 @@ def doctor(root, args):
 
 
 def archive_campaign(state, confirm):
-    from xgenius.db import connection
-    from xgenius.processes import CampaignLease, process_state
+    from labgoblin.db import connection
+    from labgoblin.processes import CampaignLease, process_state
     if confirm != state.id:
         raise ValueError("reset requires --confirm with the exact campaign ID from status")
     with CampaignLease(state.root, exclusive=True):
@@ -196,7 +201,7 @@ def archive_campaign(state, confirm):
                     (state.id, state.id, str(state.path))).fetchone()
             if row:
                 raise ValueError(f"Reset refuses unreleased machine consumer {row['token']}")
-        parent = contained(state.root.parent, ".xgenius-archives")
+        parent = contained(state.root.parent, state.root.name + "-archives")
         parent.mkdir(exist_ok=True)
         target = parent / ("campaign-" + identifier())
         state.root.rename(target)
@@ -210,8 +215,8 @@ def parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--project", default=argparse.SUPPRESS, help="Project root (default: current directory)")
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Emit structured JSON")
-    root = Parser(prog="xgenius", description="Local autonomous research for Claude and Copilot")
-    root.add_argument("--project", default=os.environ.get("XGENIUS_PROJECT", "."))
+    root = Parser(prog="labgoblin", description="Local autonomous research for Claude and Copilot")
+    root.add_argument("--project", default=environment_value("PROJECT", "."))
     root.add_argument("--json", action="store_true")
     root.add_argument("--version", action="version", version=__version__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -334,7 +339,7 @@ def parser():
 
 
 def _record_retrieval(state, reference_id):
-    turn_id = os.environ.get("XGENIUS_TURN_ID")
+    turn_id = environment_value("TURN_ID")
     if turn_id:
         state.retrieved(turn_id, reference_id)
 
@@ -345,25 +350,26 @@ def execute(args):
         return initialize(args)
     if args.command == "doctor":
         return doctor(root, args)
+    paths = project_paths(root)
     if args.command == "validate":
-        config = load_config(root / "xgenius.toml")
+        config = load_config(paths.config)
         return workspace.prepare_spec(config, read_json(args.spec, 65536), validate_only=True) if args.spec else {
             "valid": True, "revision": config.revision, "schema_version": 3, "inference": "never"}
     if args.command == "dashboard":
-        from xgenius.dashboard import run_dashboard
+        from labgoblin.dashboard import run_dashboard
         if not 0 <= args.port <= 65535:
             raise ValueError("Dashboard port must be between 0 and 65535")
-        run_dashboard(str(root / "xgenius.toml"), args.port, chat=args.chat,
+        run_dashboard(str(paths.config), args.port, chat=args.chat,
                       open_browser=args.open_browser, json_output=args.json)
         return None
     if args.command == "instructions":
         target = root / ("CLAUDE.md" if args.target == "claude" else ".github")
         if args.target == "copilot":
             target /= "copilot-instructions.md"
-        _instructions(target, State.open(root / ".xgenius"))
+        _instructions(target, State.open(paths.state))
         return {"path": str(target), "owned_section": SECTION_START}
     if args.command == "machine":
-        project_state = State.open(root / ".xgenius") if args.ledger is None and (root / ".xgenius" / "xgenius.db").exists() else None
+        project_state = State.open(paths.state) if args.ledger is None and present(paths.state) else None
         recorded, identity = project_state.ledger_identity() if project_state else (ledger_path(), "")
         location = args.ledger or recorded
         if args.action == "configure":
@@ -378,12 +384,12 @@ def execute(args):
         recovery = ledger.recover_consumers() if args.action == "reconcile" else []
         return {"ledger_id": ledger.id, "path": str(ledger.path), "capacity": ledger.capacity(), "grants": ledger.rows(),
                 "consumer_recovery": recovery, "errors": [row for row in recovery if row.get("error")]}
-    state = State.open(args.state_dir if args.command == "reconcile" and args.state_dir else root / ".xgenius")
+    state = State.open(args.state_dir if args.command == "reconcile" and args.state_dir else paths.state)
     if args.command == "build":
-        if os.environ.get("XGENIUS_TURN_ID"):
+        if environment_value("TURN_ID"):
             raise ValueError("Image builds are explicit operator operations, not nested research-turn work")
-        from xgenius.backends import build
-        return build(state, load_config(root / "xgenius.toml"), args.runner, args.context, args.include,
+        from labgoblin.backends import build
+        return build(state, load_config(paths.config), args.runner, args.context, args.include,
                      cpus=args.cpus, memory_mb=args.memory_mb, timeout=args.seconds)
     if args.command == "storage":
         if args.action == "retention":
@@ -392,7 +398,7 @@ def execute(args):
             return retention_candidates(state, limit=args.limit, offset=args.offset)
         return storage_inventory(state, limit=args.limit, offset=args.offset)
     if args.command == "reset":
-        if os.environ.get("XGENIUS_TURN_ID"):
+        if environment_value("TURN_ID"):
             raise ValueError("A research turn cannot archive its own campaign")
         return archive_campaign(state, args.confirm)
     if args.command == "run":
@@ -411,7 +417,7 @@ def execute(args):
     if args.command == "budget":
         return state.budget()
     if args.command == "steer":
-        if os.environ.get("XGENIUS_TURN_ID"):
+        if environment_value("TURN_ID"):
             raise ValueError("A research turn cannot author or revoke operator constraints")
         body = read_bytes(args.file, 65536).decode("utf-8") if args.file else args.text
         return state.directive(body, scope=args.scope, supersedes=args.supersedes, request_id=args.request_id)
@@ -423,7 +429,7 @@ def execute(args):
                 raise ValueError("No retained source revision exists for this kind")
             _record_retrieval(state, head["source_id"])
             return {**journal.entry(state.db, head["source_id"]), "head_revision": head["revision"]}
-        if os.environ.get("XGENIUS_TURN_ID"):
+        if environment_value("TURN_ID"):
             raise ValueError("Research turns cannot replace the operator goal or evaluation protocol")
         if args.file is None and args.text is None:
             raise ValueError("Source set requires --file or --text")
@@ -431,7 +437,7 @@ def execute(args):
         body.decode("utf-8")
         metadata = {}
         if args.kind == "goal":
-            config = load_config(state.root.parent / "xgenius.toml")
+            config = load_config(state.root.parent)
             path = contained(config.root, config.project.research_goal)
             metadata["observed_file_digest"] = Capture.read(path, 1024 * 1024).digest
         source_id = state.source(args.kind, body, origin="operator-command", head=args.kind,
@@ -442,11 +448,11 @@ def execute(args):
         if args.no_agent:
             return {**journal.page(state.db), "inference": "not_requested",
                     "reason": "Exact archive access remains available without a summary invocation"}
-        if os.environ.get("XGENIUS_TURN_ID"):
+        if environment_value("TURN_ID"):
             raise ValueError("Request researcher maintenance in the owned handoff, not as an operator command")
         return state.request_maintenance("compact")
     if args.command == "report":
-        if os.environ.get("XGENIUS_TURN_ID"):
+        if environment_value("TURN_ID"):
             raise ValueError("Request report maintenance in the owned handoff")
         options = reporting.selection_options(args.selected, args.selection_reason)
         if args.no_agent:
@@ -457,17 +463,17 @@ def execute(args):
         if args.attempt:
             return reporting.member(state.db, args.id, args.attempt, offset=args.offset)
         value = reporting.page(state.db, args.id, offset=args.offset, limit=args.limit)
-        turn_id = os.environ.get("XGENIUS_TURN_ID")
+        turn_id = environment_value("TURN_ID")
         if turn_id:
             state.retrieved_view(turn_id, value)
         return value
     if args.command == "reconcile":
         return {**Campaign(state=state).reconcile(), "campaign": state.campaign()}
     if args.command in ("submit", "batch-submit"):
-        config = load_config(root / "xgenius.toml")
+        config = load_config(paths.config)
         if args.command == "submit":
             attempt = workspace.submit(state, config, read_json(args.spec, 65536),
-                                       turn_id=os.environ.get("XGENIUS_TURN_ID"))
+                                       turn_id=environment_value("TURN_ID"))
             return {"attempt_id": attempt["id"], "status": attempt["status"]}
         data = read_json(args.file)
         manifests = data.get("experiments") if isinstance(data, dict) else data
@@ -476,7 +482,7 @@ def execute(args):
         items = []
         for manifest in manifests:
             try:
-                attempt = workspace.submit(state, config, manifest, turn_id=os.environ.get("XGENIUS_TURN_ID"))
+                attempt = workspace.submit(state, config, manifest, turn_id=environment_value("TURN_ID"))
                 items.append({"ok": True, "attempt_id": attempt["id"], "status": attempt["status"]})
             except (OSError, ValueError, sqlite3.Error) as error:
                 items.append({"ok": False, "error": str(error)[:4000]})
@@ -489,8 +495,8 @@ def execute(args):
                                (args.id,)).fetchone()
         if row is None:
             raise ValueError("No owned launch exists for this work ID")
-        from xgenius.protocol import LaunchEnvelope
-        from xgenius.worker import launch_directory
+        from labgoblin.protocol import LaunchEnvelope
+        from labgoblin.worker import launch_directory
         envelope = LaunchEnvelope.parse(json.loads(row["envelope"]))
         directory = launch_directory(envelope)
         path = contained(state.root, directory / (
@@ -552,7 +558,7 @@ def main(argv=None):
         if "--json" in argv:
             print(json.dumps(detail, allow_nan=False))
         else:
-            print(f"xgenius: {detail['error']['message']}", file=sys.stderr)
+            print(f"labgoblin: {detail['error']['message']}", file=sys.stderr)
         return 1
 
 

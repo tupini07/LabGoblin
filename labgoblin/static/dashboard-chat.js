@@ -19,7 +19,8 @@
   messages.setAttribute("role", "region");
   messages.tabIndex = 0;
   const status = document.getElementById("chat-status");
-  const token = document.querySelector('meta[name="xgenius-chat-token"]').content;
+  const tokenMeta = document.querySelector('meta[name="labgoblin-chat-token"]');
+  const token = tokenMeta.content;
   let conversation = "";
   let expanded = false;
   let maximized = false;
@@ -28,7 +29,7 @@
   let timer = null;
   let pendingRequest = null;
   const entries = new Map();
-  const storageKey = `xgenius-chat-${token}`;
+  const storageKey = `labgoblin-chat-${token}`;
   const expandedKey = `${storageKey}-expanded`;
   const maximizedKey = `${storageKey}-maximized`;
   function pageContext() {
@@ -65,7 +66,7 @@
   async function request(path, data) {
     const response = await fetch(path, data === undefined ? { cache: "no-store" } : {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Xgenius-Token": token },
+      headers: { "Content-Type": "application/json", "X-LabGoblin-Token": token },
       body: JSON.stringify(data),
     });
     const result = await response.json();

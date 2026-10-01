@@ -7,9 +7,9 @@ import time
 import pytest
 
 from tests.test_state import accept, handoff, state, turn
-from xgenius import briefing, journal
-from xgenius.evidence import SizeLimitError
-from xgenius.protocol import PACKET_BYTES, canonical, identifier
+from labgoblin import briefing, journal
+from labgoblin.evidence import SizeLimitError
+from labgoblin.protocol import PACKET_BYTES, canonical, identifier
 
 
 def goal(state, value=b"Determine whether the synthetic control is reproducible."):

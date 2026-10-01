@@ -8,18 +8,18 @@ import time
 import psutil
 import pytest
 
-from xgenius import backends, worker
-from xgenius.config import initial_config, parse_config
-from xgenius.evidence import publish_bytes, read_json, tail
-from xgenius.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, canonical, identifier
-from xgenius.scheduler import MachineSample, ResourceLedger
-from xgenius.state import State
+from labgoblin import backends, worker
+from labgoblin.config import initial_config, parse_config
+from labgoblin.evidence import publish_bytes, read_json, tail
+from labgoblin.protocol import LaunchEnvelope, LaunchKey, LaunchReceipt, Resources, canonical, identifier
+from labgoblin.scheduler import MachineSample, ResourceLedger
+from labgoblin.state import State
 
 
 @pytest.fixture
 def native_launch(tmp_path):
     cpu_ids = psutil.Process().cpu_affinity()[:2]
-    config = parse_config(initial_config("native-fixture"), tmp_path / "xgenius.toml")
+    config = parse_config(initial_config("native-fixture"), tmp_path / "labgoblin.toml")
     ledger = ResourceLedger.create(
         tmp_path / "ledger.db",
         sampler=lambda gpus: MachineSample(tuple(cpu_ids), 8192, 8192),
@@ -183,7 +183,7 @@ def test_mount_refuses_broad_home_and_socket_paths(tmp_path):
 @pytest.mark.parametrize("kind", ["wsl", "docker"])
 @pytest.mark.parametrize("changed", [False, True])
 def test_recovered_guest_receipt_checks_the_retained_derived_mapping(native_launch, monkeypatch, kind, changed):
-    from xgenius.protocol import fingerprint
+    from labgoblin.protocol import fingerprint
     state, ledger, _ = native_launch
     envelope = guest_envelope(native_launch, kind)
     monkeypatch.setattr(backends, "wsl_path", lambda runner, value: "/mapped/" + Path(value).name)

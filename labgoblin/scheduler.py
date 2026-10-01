@@ -8,8 +8,9 @@ import re
 import sqlite3
 import time
 
-from xgenius.db import connection
-from xgenius.protocol import LEDGER_VERSION, Resources, canonical, fingerprint, identifier, integer, require_version, text
+from labgoblin.db import connection
+from labgoblin.paths import machine_ledger_path
+from labgoblin.protocol import LEDGER_VERSION, Resources, canonical, fingerprint, identifier, integer, require_version, text
 
 
 APPLICATION_ID = 0x58474C33
@@ -41,10 +42,7 @@ CREATE INDEX consumer_runs_phase ON consumer_runs(phase,created);
 
 
 def ledger_path() -> Path:
-    override = os.environ.get("XGENIUS_RESOURCE_DB")
-    if override:
-        return Path(override).resolve()
-    return Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "state")) / "xgenius" / "resources.db"
+    return machine_ledger_path()
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,7 @@ def sample_machine(gpus: tuple[str, ...] = ()) -> MachineSample:
     cpus = tuple(process.cpu_affinity()) if hasattr(process, "cpu_affinity") else tuple(range(os.cpu_count() or 1))
     visible, busy = set(), set()
     if gpus:
-        from xgenius.backends import command
+        from labgoblin.backends import command
         for query, target in (("--query-gpu=uuid", visible), ("--query-compute-apps=gpu_uuid", busy)):
             output = command(["nvidia-smi", query, "--format=csv,noheader"], timeout=10)
             target.update(line.strip() for line in output.splitlines() if line.strip())
@@ -75,8 +73,8 @@ def sample_machine(gpus: tuple[str, ...] = ()) -> MachineSample:
 
 def request_eligible(row: dict) -> tuple[bool, str]:
     """Observe owners outside the ledger writer transaction."""
-    from xgenius.processes import alive
-    from xgenius.state import State
+    from labgoblin.processes import alive
+    from labgoblin.state import State
     try:
         owner = json.loads(row["owner"])
         if owner["kind"] in ("observer", "build"):
@@ -110,7 +108,7 @@ class ResourceLedger:
         with connection(self.path) as conn:
             require_version(conn.execute("PRAGMA user_version").fetchone()[0], LEDGER_VERSION, "machine ledger")
             if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
-                raise ValueError("File is not an xgenius resource ledger")
+                raise ValueError("File is not a LabGoblin resource ledger")
             row = conn.execute("SELECT value FROM meta WHERE key='identity'").fetchone()
             if not row:
                 raise ValueError("Machine ledger initialization is incomplete")
@@ -364,7 +362,7 @@ class ResourceLedger:
             return True
 
     def finish_consumer(self, receipt):
-        from xgenius.protocol import LaunchEnvelope
+        from labgoblin.protocol import LaunchEnvelope
         with self.write() as conn:
             row = conn.execute("SELECT * FROM consumer_runs WHERE token=?", (receipt.key.grant_id,)).fetchone()
             if row is None:
@@ -394,8 +392,8 @@ class ResourceLedger:
                 "scope": "This dashboard process; model/API calls and monetary cost are not capped"}
 
     def recover_consumers(self) -> list[dict]:
-        from xgenius.evidence import read_json
-        from xgenius.protocol import LaunchEnvelope, LaunchReceipt
+        from labgoblin.evidence import read_json
+        from labgoblin.protocol import LaunchEnvelope, LaunchReceipt
         with self.read() as conn:
             pending = [dict(row) for row in conn.execute(
                 "SELECT token,envelope FROM consumer_runs WHERE phase!='quiescent' ORDER BY created LIMIT 128")]

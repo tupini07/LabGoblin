@@ -3,8 +3,8 @@
 import hashlib
 import time
 
-from xgenius.evidence import Capture, SizeLimitError, contained, parse_json
-from xgenius.protocol import HANDOFF_BYTES, Handoff, integer, text
+from labgoblin.evidence import Capture, SizeLimitError, contained, parse_json
+from labgoblin.protocol import HANDOFF_BYTES, Handoff, integer, text
 
 
 COMPACTION_THRESHOLD = 32 * 1024

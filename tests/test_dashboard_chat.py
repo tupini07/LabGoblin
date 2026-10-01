@@ -15,10 +15,12 @@ import uuid
 
 import pytest
 
+from labgoblin.paths import environment_value
+
 from tests.test_dashboard import campaign, complete_job, get, job, notes, serve
-from xgenius.dashboard import _chat_markdown
-from xgenius.dashboard_chat import ChatError, ChatSettings, ObserverService, SDKObserver, _SDKSession, TOOLS, load_chat_settings
-from xgenius.dashboard_data import EvidenceReader
+from labgoblin.dashboard import _chat_markdown
+from labgoblin.dashboard_chat import ChatError, ChatSettings, ObserverService, SDKObserver, _SDKSession, TOOLS, load_chat_settings
+from labgoblin.dashboard_data import EvidenceReader
 
 
 class FakeObserver:
@@ -65,13 +67,13 @@ def finished(observer, cid):
 
 
 def token(base):
-    return re.search(rb'name="xgenius-chat-token" content="([^"]+)"', get(base)[2])[1].decode()
+    return re.search(rb'name="labgoblin-chat-token" content="([^"]+)"', get(base)[2])[1].decode()
 
 
 def post(base, path, payload, csrf="", **headers):
     body = json.dumps(payload).encode()
     request = urllib.request.Request(base + path, data=body, headers={
-        "Content-Type": "application/json", "X-Xgenius-Token": csrf, **headers})
+        "Content-Type": "application/json", "X-LabGoblin-Token": csrf, **headers})
     try:
         response = urllib.request.urlopen(request, timeout=5)
     except urllib.error.HTTPError as error:
@@ -115,7 +117,7 @@ def test_missing_optional_sdk_does_not_block_default_dashboard(campaign, monkeyp
     def missing(name):
         raise importlib.metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr("xgenius.dashboard_chat.importlib.metadata.version", missing)
+    monkeypatch.setattr("labgoblin.dashboard_chat.importlib.metadata.version", missing)
     before = dump(campaign.state)
     with serve(campaign.config.config_path) as base:
         assert get(base)[0] == 200
@@ -219,7 +221,7 @@ def test_failures_busy_and_missing_dependency_are_explicit(campaign, monkeypatch
         assert done["messages"][-1]["state"] == "failed" and "Backend unavailable" in done["messages"][-1]["error"]
     finally:
         observer.close()
-    monkeypatch.setattr("xgenius.dashboard_chat.importlib.metadata.version", lambda _: "0.0.1")
+    monkeypatch.setattr("labgoblin.dashboard_chat.importlib.metadata.version", lambda _: "0.0.1")
     observer = ObserverService(campaign.config.config_path, ChatSettings(enabled=True))
     assert not observer.availability()["ready"]
     with pytest.raises(ChatError, match="Install"):
@@ -244,7 +246,7 @@ def test_chat_http_auth_rendering_and_dashboard_responsiveness(campaign):
         assert post(base, "/chat/message", {"message": "x" * 20001}, csrf)[0] == 413
         assert post(base, "/chat/message", [], csrf)[0] == 400
         invalid = urllib.request.Request(base + "/chat/message", data=b"{broken",
-                                         headers={"Content-Type": "application/json", "X-Xgenius-Token": csrf})
+                                         headers={"Content-Type": "application/json", "X-LabGoblin-Token": csrf})
         with pytest.raises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(invalid)
         assert caught.value.code == 400
@@ -281,7 +283,7 @@ def test_chat_links_cannot_navigate_outside_evidence(target):
 
 @pytest.mark.parametrize("limit", ["tool", "output"])
 def test_limits_cannot_be_reported_as_success(campaign, limit):
-    from xgenius.dashboard_chat import MAX_RESPONSE
+    from labgoblin.dashboard_chat import MAX_RESPONSE
 
     class LimitedObserver:
         async def answer(self, settings, reader, prompt, emit):
@@ -302,7 +304,7 @@ def test_limits_cannot_be_reported_as_success(campaign, limit):
 
 
 def test_conversation_limits_preserve_history_until_explicit_clear(campaign, monkeypatch):
-    from xgenius import dashboard_chat
+    from labgoblin import dashboard_chat
 
     monkeypatch.setattr(dashboard_chat, "MAX_CONVERSATIONS", 1)
     monkeypatch.setattr(dashboard_chat, "MAX_QUESTIONS", 2)
@@ -339,7 +341,7 @@ def test_conversation_limits_preserve_history_until_explicit_clear(campaign, mon
         observer.close()
 
 
-@pytest.mark.skipif(os.environ.get("XGENIUS_BROWSER_TESTS") != "1", reason="Opt in to prepared Playwright/Chromium")
+@pytest.mark.skipif(environment_value("BROWSER_TESTS") != "1", reason="Opt in to prepared Playwright/Chromium")
 def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_path):
     from playwright.sync_api import sync_playwright, expect
 
@@ -349,7 +351,7 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
         db.execute("UPDATE campaign SET progress='wait',reason='Measuring the next controlled comparison'")
     job(campaign)
     with serve(campaign.config.config_path, observer=observer) as base, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, executable_path=os.environ.get("XGENIUS_BROWSER_EXECUTABLE"))
+        browser = playwright.chromium.launch(headless=True, executable_path=environment_value("BROWSER_EXECUTABLE"))
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             errors = []
@@ -448,7 +450,7 @@ def test_browser_chat_streaming_navigation_cancellation_and_retry(campaign, tmp_
             browser.close()
 
 
-@pytest.mark.skipif(os.environ.get("XGENIUS_BROWSER_TESTS") != "1", reason="Opt in to prepared Playwright/Chromium")
+@pytest.mark.skipif(environment_value("BROWSER_TESTS") != "1", reason="Opt in to prepared Playwright/Chromium")
 def test_browser_chat_maximize_preserves_reading_and_conversation(campaign, tmp_path):
     from playwright.sync_api import sync_playwright, expect
 
@@ -460,7 +462,7 @@ def test_browser_chat_maximize_preserves_reading_and_conversation(campaign, tmp_
     driver = FakeObserver(response=response)
     observer = service(campaign, driver)
     with serve(campaign.config.config_path, observer=observer) as base, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, executable_path=os.environ.get("XGENIUS_BROWSER_EXECUTABLE"))
+        browser = playwright.chromium.launch(headless=True, executable_path=environment_value("BROWSER_EXECUTABLE"))
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             errors = []

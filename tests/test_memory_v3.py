@@ -5,9 +5,9 @@ import pytest
 from tests.test_briefing import goal
 from tests.test_state import accept, handoff, state, turn
 from tests.test_controller import fixture, forbid_provider
-from xgenius import agent, briefing, journal
-from xgenius.campaign import Campaign
-from xgenius.scheduler import request_eligible
+from labgoblin import agent, briefing, journal
+from labgoblin.campaign import Campaign
+from labgoblin.scheduler import request_eligible
 
 
 COMPACTOR = r'''
