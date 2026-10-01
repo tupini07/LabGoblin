@@ -1,4 +1,5 @@
 from dataclasses import asdict
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,34 @@ import pytest
 from labgoblin.evidence import read_json, tail
 from labgoblin.payload import command_units, execute_spec, run_process
 from labgoblin.protocol import LaunchEnvelope, LaunchKey, Resources
+
+
+def assert_process_exited(handle):
+    try:
+        process = psutil.Process(handle["pid"])
+        # PID reuse is not a leak; Windows exit can precede process-object disposal.
+        if "created" in handle and process.create_time() != handle["created"]:
+            return
+        process.wait(timeout=5)
+    except psutil.NoSuchProcess:
+        pass
+
+
+@pytest.mark.parametrize("recycled", [False, True])
+def test_exit_check_distinguishes_recycled_pid_from_live_owned_process(monkeypatch, recycled):
+    class Process:
+        def create_time(self):
+            return 2 if recycled else 1
+
+        def wait(self, timeout):
+            raise psutil.TimeoutExpired(timeout, pid=10)
+
+    monkeypatch.setattr(psutil, "Process", lambda pid: Process())
+    if recycled:
+        assert_process_exited({"pid": 10, "created": 1})
+    else:
+        with pytest.raises(psutil.TimeoutExpired):
+            assert_process_exited({"pid": 10, "created": 1})
 
 
 @pytest.fixture
@@ -64,7 +93,7 @@ def test_flooding_payload_still_obeys_deadline_and_cancellation(spec, cancel):
     assert result["elapsed"] < 8
     assert result["logs"]["stdout"]["retained_bytes"] <= spec["log_bytes"]
     handle = read_json(Path(spec["root"]) / "process-handle.json")
-    assert not psutil.pid_exists(handle["pid"])
+    assert_process_exited(handle)
 
 
 def test_missing_executable_is_proven_not_started(spec):
@@ -79,22 +108,23 @@ def test_missing_executable_is_proven_not_started(spec):
 def test_descendants_inherit_exact_assigned_cpu_set_and_are_reaped(spec):
     selected = psutil.Process().cpu_affinity()[-1]
     spec["cpu_ids"] = [selected]
-    child = "import os,time;print(os.getpid(),flush=True);time.sleep(60)"
+    child = ("import json,psutil,time;p=psutil.Process();"
+             "print(json.dumps({'pid':p.pid,'created':p.create_time()}),flush=True);time.sleep(60)")
     parent = ("import ctypes,subprocess,sys;from ctypes import wintypes;"
               "mask=ctypes.c_size_t();system=ctypes.c_size_t();"
               "kernel=ctypes.WinDLL('kernel32');kernel.GetCurrentProcess.restype=wintypes.HANDLE;"
               "kernel.GetProcessAffinityMask.argtypes=[wintypes.HANDLE,ctypes.c_void_p,ctypes.c_void_p];"
               "kernel.GetProcessAffinityMask(kernel.GetCurrentProcess(),ctypes.byref(mask),ctypes.byref(system));"
               "print('mask='+str(mask.value),flush=True);"
-              f"subprocess.Popen([sys.executable,'-c',{child!r}]);"
-              "import time;time.sleep(0.25)")
+              f"child=subprocess.Popen([sys.executable,'-c',{child!r}],stdout=subprocess.PIPE,text=True);"
+              "print(child.stdout.readline(),end='',flush=True)")
     spec["argv"] = [sys.executable, "-c", parent]
     result = run_process(spec)
     assert result["status"] == "completed", result
     output = tail(Path(spec["root"]) / "stdout.log", limit=1024)["text"].splitlines()
     assert output[0] == f"mask={1 << selected}"
     assert len(output) == 2
-    assert not psutil.pid_exists(int(output[1]))
+    assert_process_exited(json.loads(output[1]))
 
 
 def envelope_spec(spec):
