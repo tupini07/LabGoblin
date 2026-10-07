@@ -9,6 +9,7 @@ import sys
 
 from labgoblin.evidence import Capture, contained, hash_file, parse_json, publish_bytes, read_bytes, read_json
 from labgoblin.payload import execute_spec
+from labgoblin import credits
 from labgoblin.protocol import HANDOFF_BYTES, Handoff, LaunchReceipt, PACKET_BYTES, PreExecutionError, canonical, fingerprint
 
 
@@ -96,6 +97,30 @@ def supervise(envelope) -> LaunchReceipt:
     spec["provider"] = envelope.metadata["provider"]["provider"]
     receipt = execute_spec(spec, publish_receipt=False)
     metadata = {**receipt.metadata, "provider": envelope.metadata["provider"], "usage_status": "unavailable"}
+    sdk = envelope.metadata["provider"].get("transport") == "sdk"
+    if sdk:
+        from labgoblin.copilot_worker import validate_usage_record
+        directory = launch_directory(envelope)
+        result_path = directory / "sdk-result.json"
+        if result_path.exists():
+            result = read_json(result_path, 16384)
+            if result.get("key") != asdict(envelope.key) or result.get("envelope_digest") != envelope.digest:
+                raise ValueError("SDK result does not belong to this owned launch")
+            metadata["sdk"] = result
+            expected_codes = {"completed": 0, "timed_out": 124, "cancelled": 130, "failed": 1}
+            if (result.get("status") not in expected_codes
+                    or receipt.status in ("completed", "failed")
+                    and receipt.returncode != expected_codes[result["status"]]):
+                raise ValueError("SDK result conflicts with its observed process outcome")
+            if receipt.status in ("completed", "failed"):
+                receipt = replace(receipt, status=result["status"], reason=result["reason"])
+        progress_path = directory / "usage-progress.json"
+        if progress_path.exists():
+            try:
+                metadata["partial_usage"] = validate_usage_record(
+                    read_json(progress_path, 256 * 1024), envelope, complete=False)
+            except (OSError, ValueError) as error:
+                metadata["partial_usage_error"] = f"{type(error).__name__}: {error}"[:2000]
     usage = None
     usage_path = launch_directory(envelope) / "usage.json"
     if usage_path.exists():
@@ -103,11 +128,25 @@ def supervise(envelope) -> LaunchReceipt:
             usage = read_json(usage_path, 256 * 1024)
             if not isinstance(usage, dict):
                 raise ValueError("Provider usage must be a JSON object")
+            if sdk:
+                validate_usage_record(usage, envelope, complete=True)
+                if (metadata.get("partial_usage") is not None
+                        and credits.usage_nano(usage) < credits.usage_nano(metadata["partial_usage"])):
+                    raise ValueError("Final usage is below its retained partial credit total")
             metadata["usage_status"] = "recorded"
         except (OSError, ValueError) as error:
             usage = None
             metadata["usage_status"] = "invalid"
             metadata["usage_error"] = str(error)[:2000]
+    allowance = envelope.metadata.get("credit_allowance_nano")
+    if allowance is not None and receipt.executed:
+        try:
+            metadata["credit_limit_reached"] = credits.usage_nano(usage) >= allowance
+        except ValueError as error:
+            metadata["usage_status"] = "invalid"
+            metadata["usage_error"] = str(error)
+        if metadata.get("credit_limit_reached") and receipt.status != "completed":
+            receipt = replace(receipt, reason="Copilot AI credit allowance reached; " + receipt.reason)
     if envelope.kind == "canary" and receipt.status == "completed":
         canary = envelope.metadata["canary"]
         try:
@@ -128,7 +167,7 @@ def supervise(envelope) -> LaunchReceipt:
             if (not isinstance(result, dict) or result.get("turn_id") != envelope.metadata["turn_id"]
                     or result.get("packet_id") != envelope.metadata["packet_id"]):
                 raise ValueError("Result does not belong to this turn and packet")
-            if envelope.kind in ("research", "final_analysis"):
+            if envelope.kind in ("research", "reflection", "worker", "final_analysis"):
                 result_capture["handoff_digest"] = fingerprint(asdict(Handoff.parse(result)))
             result_capture["result_digest"] = fingerprint(result)
         except (OSError, ValueError) as error:

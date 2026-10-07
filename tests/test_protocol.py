@@ -31,7 +31,7 @@ def test_local_config_load_does_not_create_state(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["labgoblin.toml"]
 
 
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
+@pytest.mark.parametrize("version", [None, 1, 2, 3, 5, True, "4"])
 def test_old_or_ambiguous_versions_rejected(tmp_path, version):
     raw = initial_config("fixture")
     raw["schema_version"] = version
@@ -100,7 +100,7 @@ def test_config_identity_changes_without_mutating_an_existing_config(tmp_path):
     before = parse_config(raw, tmp_path / "labgoblin.toml")
     raw["agent"]["timeout_seconds"] = 123
     after = parse_config(raw, tmp_path / "labgoblin.toml")
-    assert before.agent.timeout_seconds == 600
+    assert before.agent.timeout_seconds == 1800
     assert after.agent.timeout_seconds == 123
     assert before.revision != after.revision
 

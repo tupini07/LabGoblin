@@ -1,5 +1,6 @@
 """Provider argv adapters and resource-authorized invocation envelopes."""
 
+from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import sys
 
 from labgoblin.backends import command
+from labgoblin import credits
 from labgoblin.evidence import contained, hash_file, require_space
 from labgoblin.payload import command_units, validate_command
 from labgoblin.protocol import LaunchEnvelope, LaunchKey, PACKET_BYTES, Resources, identifier
@@ -18,17 +20,25 @@ CONTROLLED_FLAGS = {
     "-p", "--prompt", "-i", "--interactive", "-r", "--resume", "--continue", "--session-id",
     "--connect", "--fleet", "--share", "--share-gist", "--autopilot", "--plan", "--mode",
     "--remote", "--remote-export", "--acp", "--model", "--reasoning-effort", "--effort",
-    "--usage-output-file", "--output-format", "--sandbox", "--log-dir",
+    "--usage-output-file", "--output-format", "--sandbox", "--log-dir", "--max-ai-credits",
 }
 COPILOT_FLAGS = ("--no-auto-update", "--no-remote", "--no-remote-export", "--no-ask-user")
+SDK_PERMISSION_FLAGS = {
+    "--allow-tool", "--deny-tool", "--allow-url", "--deny-url", "--add-dir",
+    "--allow-all-tools", "--allow-all-paths", "--allow-all-urls",
+    "--disallow-temp-dir", "--assisted-approval",
+}
 
 
-def inspect_provider(agent, *, probe=None) -> dict:
+def inspect_provider(agent, *, probe=None, max_ai_credits=None) -> dict:
     probe = probe or command
     for value in agent.command[1:]:
         flag = value.split("=", 1)[0]
         if flag in CONTROLLED_FLAGS or (value.startswith(("-p", "-r", "-i")) and not value.startswith("--")):
             raise ValueError(f"agent.command cannot override managed invocation flag {flag}")
+        if agent.transport == "sdk" and (flag in SDK_PERMISSION_FLAGS
+                or flag in ("--allow-all", "--yolo") and value != flag):
+            raise ValueError(f"SDK research cannot reinterpret permission flag {flag}; use transport='cli'")
     executable = shutil.which(agent.command[0])
     if executable is None:
         raise ValueError(f"Provider executable does not exist: {agent.command[0]}")
@@ -38,6 +48,9 @@ def inspect_provider(agent, *, probe=None) -> dict:
     prefix = ["--no-auto-update"] if agent.provider == "copilot" else []
     help_text = probe([*arguments, *prefix, "--help"])
     flags = set(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", help_text))
+    if max_ai_credits is not None and (agent.provider != "copilot"
+            or not {"--max-ai-credits", "--usage-output-file"} <= flags):
+        raise ValueError("Copilot credit budgets require --max-ai-credits and --usage-output-file support")
     if "--prompt" not in flags and not re.search(r"(?:^|\s)-p(?:\s|,)", help_text):
         raise ValueError("Provider does not advertise non-interactive prompt support")
     if agent.provider == "copilot":
@@ -58,15 +71,32 @@ def inspect_provider(agent, *, probe=None) -> dict:
     if agent.sandbox and "--sandbox" not in flags:
         raise ValueError("Installed Copilot does not advertise --sandbox; refusing an unsandboxed fallback")
     return {"provider": agent.provider, "command": arguments, "flags": sorted(flags),
+            "transport": agent.transport,
+            "permission_mode": "allow-all" if {"--allow-all", "--yolo"}.intersection(agent.command) else "manual",
             "help_digest": hashlib.sha256(help_text.encode("utf-8")).hexdigest(),
             "configured_model": agent.model or None, "configured_effort": agent.reasoning_effort or None,
             "effective_model": None, "effective_effort": None,
             "launcher_assurance": "declared argv; provider defaults remain unknown"}
 
 
-def invocation_command(adapter: dict, prompt: str, root: Path, *, sandbox=False) -> tuple[str, ...]:
+def sdk_command(envelope, runtime_root):
+    command = (envelope.metadata["sdk_python"], "-I", "-B",
+               str(Path(runtime_root) / "bootstrap.py"), "--research-sdk",
+               str(Path(envelope.root) / "launches" / envelope.key.nonce / "envelope.json"))
+    allowance = envelope.metadata.get("credit_allowance_nano")
+    if allowance is not None:
+        command += ("--max-ai-credits", credits.argument(allowance))
+    return validate_command(command)
+
+
+def invocation_command(adapter: dict, prompt: str, root: Path, *, sandbox=False,
+                       credit_allowance=None) -> tuple[str, ...]:
     arguments = list(adapter["command"])
     flags = set(adapter["flags"])
+    if credit_allowance is not None:
+        if adapter["provider"] != "copilot" or not {"--max-ai-credits", "--usage-output-file"} <= flags:
+            raise ValueError("Copilot credit budgets require --max-ai-credits and --usage-output-file support")
+        arguments.extend(["--max-ai-credits", credits.argument(credit_allowance)])
     if adapter["provider"] == "copilot":
         arguments.extend(COPILOT_FLAGS)
         if "--stream" in flags:
@@ -107,8 +137,18 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
     packet_path = contained(state.root, packet["path"])
     if hash_file(packet_path, PACKET_BYTES) != packet["digest"]:
         raise ValueError("Published provider packet changed")
-    adapter = adapter or inspect_provider(config.agent)
+    adapter = adapter or inspect_provider(config.agent, max_ai_credits=config.campaign.max_ai_credits)
+    if config.research.coaching or config.research.max_tasks:
+        from labgoblin.research_tools import capabilities
+        capabilities()
     root = contained(state.root, Path("turns") / turn_id)
+    cwd = config.root
+    task_deadline = None
+    if turn["scope_id"] != "root":
+        from labgoblin.research_tasks import get
+        task = get(state, turn["scope_id"])
+        cwd = Path(task["root"]) / "work"
+        task_deadline = task["created"] + task["charter"]["max_seconds"]
     nonce = identifier()
     launch_root = root / "launches" / nonce
     result = root / "handoff.json"
@@ -119,11 +159,13 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
         "Do not start another provider, controller, workflow, or interactive session."
     )
     metadata = {
-        "provider": adapter, "turn_id": turn_id, "packet_id": packet["id"],
+        "provider": adapter, "turn_id": turn_id, "packet_id": packet["id"], "scope_id": turn["scope_id"],
         "packet_path": str(packet_path), "packet_digest": packet["digest"],
         "result_path": str(result), "log_bytes": config.storage.log_bytes, "cpu_ids": cpu_ids,
         "last_in_bundle": invocation_id == bundle[-1]["id"],
-        "kind": invocation["kind"],
+        "kind": invocation["kind"], "research_limits": asdict(config.research),
+        "credit_allowance_nano": state.credit_allowance(invocation_id),
+        "task_deadline": task_deadline,
     }
     ledger_path, ledger_id = state.ledger_identity()
     executable_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
@@ -131,7 +173,7 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
         "PATH": str(executable_dir) + os.pathsep + os.environ.get("PATH", ""),
         "LABGOBLIN_PROJECT": str(config.root), "LABGOBLIN_TURN_ID": turn_id,
         "LABGOBLIN_PACKET_ID": packet["id"], "LABGOBLIN_INVOCATION_ID": invocation_id,
-        "LABGOBLIN_RESOURCE_DB": str(ledger_path),
+        "LABGOBLIN_RESOURCE_DB": str(ledger_path), "LABGOBLIN_SCOPE_ID": turn["scope_id"],
     }
     if config.agent.copilot_home:
         environment["COPILOT_HOME"] = str(contained(state.root, config.root / config.agent.copilot_home))
@@ -144,10 +186,15 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
             metadata["canary"] = canary
         else:
             metadata["canary_invocation_id"] = next(row["id"] for row in bundle if row["kind"] == "canary")
-    arguments = invocation_command(adapter, prompt, launch_root, sandbox=config.agent.sandbox)
+    arguments = invocation_command(adapter, prompt, launch_root, sandbox=config.agent.sandbox,
+                                   credit_allowance=metadata["credit_allowance_nano"])
+    if config.agent.transport == "sdk":
+        metadata.update(sdk_python=sys.executable, provider_argv=arguments,
+                        idle_timeout_seconds=config.agent.idle_timeout_seconds,
+                        shutdown_grace_seconds=config.agent.shutdown_grace_seconds)
     metadata["argv_utf16_units"] = command_units(arguments)
     return LaunchEnvelope(
         LaunchKey(state.id, turn["generation"], invocation_id, grant["token"], nonce),
-        invocation["kind"], arguments, str(config.root), str(root), str(state.path),
+        invocation["kind"], arguments, str(cwd), str(root), str(state.path),
         str(ledger_path), ledger_id,
         config.agent.timeout_seconds, resources, config.revision, environment, metadata)

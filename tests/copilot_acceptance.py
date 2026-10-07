@@ -170,6 +170,7 @@ def run(root, *, live=False):
     raw = initial_config("bounded-copilot-acceptance", "copilot")
     raw["campaign"]["max_invocations"] = 3
     raw["agent"].update(
+        transport="cli",
         command=[sys.executable, str(Path(__file__).resolve()), "--forward", str(wrapper),
                  "--allow-all-tools", "--disable-builtin-mcps", "--no-custom-instructions"],
         timeout_seconds=180 if live else 20, retries=0, resources={"cpus": 1, "memory_mb": 2048})

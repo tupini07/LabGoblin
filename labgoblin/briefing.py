@@ -14,9 +14,16 @@ from labgoblin.state import _active_directives, _campaign, _queue_order, _settin
 
 INSTRUCTIONS = """Conduct one autonomous research turn, not a human-agent collaboration.
 Follow the versioned goal, evaluation protocol and active operator constraints. Preserve
-the governing rationale; use archive retrieval for earlier negative findings and decisions.
+evidence and history, but reconsider earlier researcher assumptions and strategy freely.
+The latest researcher focus is a revisable interpretation, not an operator directive.
 Derived summaries are unverified hints, never authority over these sources or constraints.
 Do useful support work or replication without inventing a hypothesis or discovery.
+Use the research workspace to keep general knowledge, questions, hypotheses and reflections.
+Edit draft files freely, then explicitly publish through the research tools or CLI.
+Publish scientific assessments in research_updates in this owned handoff. Jobs state their
+purpose (evaluation|exploration|support) and exact research_refs; evaluation pins hypotheses.
+Direct work is appropriate for a short continuous task. Delegate only separable work through
+the harness task API when enabled, never native provider subagents. Task workers own details.
 
 Submit heavy experiments with labgoblin submit (an argv-form JSON manifest), never as
 unmanaged shell jobs. All experiments and inference share finite resources. Do not start
@@ -84,6 +91,8 @@ def _context(conn, campaign, kind, view_id=None) -> tuple[dict, list[dict]]:
     sources, constraints = {}, []
     remaining = PACKET_BYTES
     for name, source_id in heads.items():
+        if name in ("rationale", "summary") and kind in ("research", "reflection", "worker", "coach"):
+            continue
         value = _source(conn, source_id, remaining)
         remaining -= len(canonical(value))
         sources[name] = value
@@ -91,6 +100,18 @@ def _context(conn, campaign, kind, view_id=None) -> tuple[dict, list[dict]]:
         value = {**dict(row), "source": _source(conn, row["source_id"], remaining)}
         remaining -= len(canonical(value))
         constraints.append(value)
+    if kind in ("research", "reflection", "worker", "coach"):
+        for name in ("rationale", "summary"):
+            if name not in heads:
+                continue
+            value = _source(conn, heads[name], 1024 * 1024)
+            if name == "rationale":
+                prior = json.loads(value["text"])
+                preview = json.dumps({key: prior[key][:1200] for key in ("summary", "next_step")})
+            else:
+                preview = value["text"][:1200]
+            value.update(text=preview, preview=True, authority="Revisable researcher interpretation; retrieve original by ID")
+            sources[name] = value
     return sources, constraints
 
 
@@ -115,19 +136,19 @@ def _event_header(conn, row) -> dict:
     return value
 
 
-def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
+def _content(state, conn, campaign, turn_id, packet_id, kind, view_id, scope_id="root"):
     settings = _settings(conn, campaign)
     sources, directives = _context(conn, campaign, kind, view_id)
     watermark = conn.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
-    pending = conn.execute("""SELECT COUNT(*) FROM events WHERE generation=? AND acknowledged_by IS NULL""",
-                           (campaign["generation"],)).fetchone()[0]
+    pending = conn.execute("""SELECT COUNT(*) FROM events WHERE generation=? AND acknowledged_by IS NULL
+        AND scope_id=?""", (campaign["generation"], scope_id)).fetchone()[0]
     reserved = conn.execute("SELECT COUNT(*) FROM invocations WHERE state='reserved'").fetchone()[0]
     references = {source["id"] for source in sources.values()}
     references.update(item["source_id"] for item in directives)
     if view_id:
         references.add(view_id)
     packet = {
-        "protocol": 3, "turn_id": turn_id, "packet_id": packet_id, "kind": kind,
+        "protocol": 3, "turn_id": turn_id, "packet_id": packet_id, "kind": kind, "scope_id": scope_id,
         "campaign_id": state.id, "generation": campaign["generation"], "revision": campaign["revision"],
         "authority_revision": campaign["authority_revision"],
         "config_revision": campaign["config_revision"],
@@ -144,7 +165,7 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
         "result_protocol": {
             "maximum_bytes": HANDOFF_BYTES,
             "required": ["turn_id", "packet_id", "summary", "rationale", "next_step", "disposition", "reason"],
-            "optional": ["evidence", "stopping_criterion", "maintenance"],
+            "optional": ["evidence", "stopping_criterion", "maintenance", "research_updates", "research_refs", "reflection", "coaching"],
             "evidence_shape": {"event_id": "delivered ID", "disposition": "assessed|excluded|deferred",
                                "reason": "explanation", "references": ["revision IDs"], "wake_condition": "required if deferred"},
         },
@@ -153,6 +174,38 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id):
                      "maximum_events": PACKET_EVENTS, "maximum_bytes": PACKET_BYTES,
                      "ordering": "oldest evidence first, then oldest other pending events"},
     }
+    count = conn.execute("SELECT COUNT(*) FROM research_records").fetchone()[0]
+    records = [dict(row) for row in conn.execute("""SELECT id,head,kind,title,activity FROM research_records
+        WHERE activity='active' ORDER BY updated DESC,id LIMIT 12""")]
+    packet["research_workspace"] = {
+        "draft_root": str(state.root.parent / "research"), "records": records, "total": count,
+        "coverage": "At most 12 recently changed active records; use research read/list/search for all revisions and retired ideas",
+        "limits": settings["research"], "tools": "research_read, research_publish, research_task",
+        "cli": "labgoblin research --help"}
+    packet["references"] = sorted(set(packet["references"]) | {record["head"] for record in records})
+    references.update(record["head"] for record in records)
+    if kind == "worker":
+        from labgoblin.research_tasks import assert_owned
+        task = assert_owned(conn, scope_id)
+        packet["task"] = {**dict(task), "charter": json.loads(task["charter"])}
+        references.update(packet["task"]["charter"].get("research_refs", []))
+        packet["references"] = sorted(references)
+        packet["working_directory"] = str(Path(task["root"]) / "work")
+        packet["instructions"] += ("\nYou own only this task workspace and charter. Do not edit root files, delegate "
+                                   "children or close the campaign. A final local handoff completes this task, not the campaign. "
+                                   "Return task_artifacts as [{path: workspace-relative path, digest: SHA-256}] for changed code. "
+                                   "Run relevant tests as owned jobs using exactly those source bytes; root integration requires "
+                                   "their successful validation_attempt. Use research_task message for a bounded clarification.")
+        packet["result_protocol"]["optional"].append("task_artifacts")
+    if kind == "reflection":
+        packet["instructions"] += ("\nReflect on evidence and strategy, including useful unlinked knowledge and "
+                                   "retired ideas. Return a concise decision; do not run heavy jobs or delegate in this turn.")
+    if kind == "coach":
+        from labgoblin.coaching import INSTRUCTIONS as COACH_INSTRUCTIONS, packet as coach_packet
+        packet["coaching"] = coach_packet(conn)
+        packet["instructions"] = COACH_INSTRUCTIONS
+        packet["result_protocol"] = {"required": ["turn_id", "packet_id", "episode_id", "decision",
+                                                "reason", "questions", "references", "limitations"]}
     if len(canonical(packet)) > PACKET_BYTES:
         raise SizeLimitError("Mandatory goal, rationale and constraints exceed the packet byte limit; none were clipped")
     if view_id:
@@ -189,10 +242,10 @@ The harness renders immutable HTML/Markdown with accurate inventory tables and b
     columns = """id,seq,kind,created,payload_digest,length(CAST(payload AS BLOB)) AS payload_bytes,
         substr(CAST(payload AS BLOB),1,512) AS preview"""
     evidence = list(conn.execute(f"""SELECT {columns} FROM events WHERE generation=?
-        AND acknowledged_by IS NULL AND kind='evidence' ORDER BY seq LIMIT ?""",
-                                 (campaign["generation"], PACKET_EVENTS // 2)))
+        AND scope_id=? AND acknowledged_by IS NULL AND kind='evidence' ORDER BY seq LIMIT ?""",
+                                 (campaign["generation"], scope_id, PACKET_EVENTS // 2)))
     other = list(conn.execute(f"""SELECT {columns} FROM events WHERE generation=?
-        AND acknowledged_by IS NULL ORDER BY seq LIMIT ?""", (campaign["generation"], PACKET_EVENTS)))
+        AND scope_id=? AND acknowledged_by IS NULL ORDER BY seq LIMIT ?""", (campaign["generation"], scope_id, PACKET_EVENTS)))
     seen = set()
     for row in evidence + other:
         if row["id"] in seen:
@@ -251,15 +304,15 @@ The summary must be smaller than compaction.input_bytes. Do not launch any child
     return packet
 
 
-def prepare(state, kind="research", *, turn_id=None, view_id=None, maintenance_id=None) -> dict:
-    if kind not in ("research", "final_analysis", "report", "compact"):
+def prepare(state, kind="research", *, turn_id=None, view_id=None, maintenance_id=None, scope_id="root") -> dict:
+    if kind not in ("research", "reflection", "coach", "worker", "final_analysis", "report", "compact"):
         raise ValueError("Unsupported packet operation")
     turn_id = turn_id or identifier()
     with state.db.write() as conn:
         old = conn.execute("SELECT * FROM packets WHERE turn_id=?", (turn_id,)).fetchone()
         if old:
             content = json.loads(old["content"])
-            if content["kind"] != kind or content.get("view_id") != view_id:
+            if content["kind"] != kind or content.get("view_id") != view_id or content.get("scope_id", "root") != scope_id:
                 raise ValueError("Packet replay cannot change its operation or source view")
             packet_id = old["id"]
         else:
@@ -276,7 +329,9 @@ def prepare(state, kind="research", *, turn_id=None, view_id=None, maintenance_i
                                                        (view_id, campaign["generation"])).fetchone():
                 raise ValueError("Packet source view does not belong to this generation")
             packet_id = identifier()
-            content = _content(state, conn, campaign, turn_id, packet_id, kind, view_id)
+            if (kind == "worker") != (scope_id != "root"):
+                raise ValueError("Worker scope and operation kind must agree")
+            content = _content(state, conn, campaign, turn_id, packet_id, kind, view_id, scope_id)
             body = canonical(content)
             path = contained(state.root, Path("packets") / f"{packet_id}.json")
             conn.execute("""INSERT INTO packets(id,turn_id,generation,watermark,content,digest,path,created)
@@ -284,10 +339,13 @@ def prepare(state, kind="research", *, turn_id=None, view_id=None, maintenance_i
                                             body.decode(), hashlib.sha256(body).hexdigest(), str(path), time.time()))
             conn.executemany("INSERT INTO packet_events(packet_id,event_id) VALUES(?,?)",
                              [(packet_id, event["id"]) for event in content["events"]])
-            conn.execute("""INSERT INTO turns(id,generation,kind,packet_id,state,created,revision,source_revision,admission_order)
-                VALUES(?,?,?,?,'prepared',?,?,?,?)""",
+            conn.execute("""INSERT INTO turns(id,generation,kind,packet_id,state,created,revision,source_revision,admission_order,scope_id)
+                VALUES(?,?,?,?,'prepared',?,?,?,?,?)""",
                          (turn_id, campaign["generation"], kind, packet_id, time.time(), campaign["revision"],
-                          hashlib.sha256(canonical(sorted(content["references"]))).hexdigest(), _queue_order(conn)))
+                          hashlib.sha256(canonical(sorted(content["references"]))).hexdigest(), _queue_order(conn), scope_id))
+            if kind == "coach":
+                conn.execute("UPDATE stop_episodes SET state='reviewing',rounds=rounds+1 WHERE id=?",
+                             (content["coaching"]["id"],))
             if kind in ("compact", "report"):
                 request = conn.execute("SELECT source_revision FROM maintenance WHERE id=?", (maintenance_id,)).fetchone()
                 if request["source_revision"] != _source_revision(conn):

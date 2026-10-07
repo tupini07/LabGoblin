@@ -11,6 +11,7 @@ from labgoblin.protocol import (
     number, require_version, strings, table, text,
 )
 from labgoblin.paths import configuration_path, state_directory
+from labgoblin import credits
 
 
 AGENT_COMMANDS = {
@@ -49,6 +50,7 @@ class CampaignConfig:
     max_gpu_hours: float
     max_seconds: Limit
     max_invocations: Limit
+    max_ai_credits: float | None = None
 
 
 @dataclass(frozen=True)
@@ -56,16 +58,47 @@ class AgentConfig:
     provider: str
     command: tuple[str, ...]
     resources: Resources
-    timeout_seconds: float = 600
+    timeout_seconds: float = 1800
     retries: int = 1
     model: str = ""
     reasoning_effort: str = ""
     sandbox: bool = False
     copilot_home: str = ""
+    transport: str = "cli"
+    idle_timeout_seconds: float = 600
+    shutdown_grace_seconds: float = 30
 
     @property
     def invocation_bundle(self) -> int:
         return 2 if self.sandbox else 1
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    coaching: bool = False
+    coach_credits: float = 100
+    max_parallel_agents: int = 1
+    max_tasks: int = 0
+    task_max_invocations: int = 4
+    task_max_credits: float = 300
+    task_max_seconds: float = 7200
+    invocation_credits: float = 300
+
+
+def parse_research(value, agent) -> ResearchConfig:
+    value = table(value, "research", set(ResearchConfig.__dataclass_fields__))
+    settings = ResearchConfig(**value)
+    boolean(settings.coaching, "research.coaching")
+    integer(settings.max_parallel_agents, "research.max_parallel_agents")
+    integer(settings.max_tasks, "research.max_tasks", zero=True)
+    integer(settings.task_max_invocations, "research.task_max_invocations")
+    number(settings.task_max_seconds, "research.task_max_seconds")
+    for name in ("coach_credits", "task_max_credits", "invocation_credits"):
+        if credits.parse_limit(getattr(settings, name), f"research.{name}") is None:
+            raise ValueError(f"research.{name} must be a finite credit allowance")
+    if (settings.coaching or settings.max_tasks) and (agent.provider != "copilot" or agent.transport != "sdk"):
+        raise ValueError("Coaching and managed delegation require Copilot SDK transport")
+    return settings
 
 
 @dataclass(frozen=True)
@@ -105,11 +138,13 @@ class ChatSettings:
     cpus: int = 1
     memory_mb: int = 2048
     max_invocations: int = 20
+    max_ai_credits: float | None = None
 
 
 def parse_chat_settings(value: dict) -> ChatSettings:
     value = table(value, "dashboard.chat", set(ChatSettings.__dataclass_fields__))
-    settings = ChatSettings(**value)
+    settings = ChatSettings(**{**value, "max_ai_credits": credits.parse_limit(
+        value.get("max_ai_credits"), "dashboard.chat.max_ai_credits")})
     boolean(settings.enabled, "dashboard.chat.enabled")
     for name in ("model", "reasoning_effort", "cli_path"):
         item = text(getattr(settings, name), f"dashboard.chat.{name}", empty=name != "model")
@@ -137,6 +172,7 @@ class LabGoblinConfig:
     config_path: str
     revision: str
     chat: ChatSettings = field(default_factory=ChatSettings)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
 
     @property
     def root(self) -> Path:
@@ -208,7 +244,7 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
     raw = table(raw, "configuration")
     require_version(raw.get("schema_version"), CONFIG_VERSION, "configuration")
     table(raw, "configuration", {"schema_version", "project", "execution", "runners",
-                                "campaign", "agent", "storage", "inputs", "dashboard"})
+                                "campaign", "agent", "storage", "inputs", "dashboard", "research"})
     path = Path(path).resolve()
     project = table(raw.get("project", {}), "project", {"name", "research_goal"})
     goal = text(project.get("research_goal", "research_goal.md"), "project.research_goal")
@@ -227,7 +263,7 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
         environment(execution.get("environment", {}), "execution.environment"))
     campaign = table(raw.get("campaign", {}), "campaign",
                      {"cpus", "memory_mb", "gpus", "max_jobs", "max_gpu_hours",
-                      "max_seconds", "max_invocations"})
+                      "max_seconds", "max_invocations", "max_ai_credits"})
     resources = Resources.parse({k: v for k, v in campaign.items() if k in ("cpus", "memory_mb", "gpus")})
     campaign_config = CampaignConfig(
         resources,
@@ -235,14 +271,26 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
         number(campaign.get("max_gpu_hours"), "campaign.max_gpu_hours", zero=True),
         Limit(number(campaign.get("max_seconds"), "campaign.max_seconds", zero=True)),
         Limit(integer(campaign.get("max_invocations"), "campaign.max_invocations", zero=True)),
+        credits.parse_limit(campaign.get("max_ai_credits"), "campaign.max_ai_credits"),
     )
     agent = table(raw.get("agent", {}), "agent",
                   {"provider", "command", "resources", "timeout_seconds", "retries",
-                   "model", "reasoning_effort", "sandbox", "copilot_home"})
+                   "model", "reasoning_effort", "sandbox", "copilot_home", "transport",
+                   "idle_timeout_seconds", "shutdown_grace_seconds"})
     provider = text(agent.get("provider", "claude"), "agent.provider")
     if provider not in AGENT_COMMANDS:
         raise ValueError("agent.provider must be claude or copilot")
+    if campaign_config.max_ai_credits is not None and provider != "copilot":
+        raise ValueError("campaign.max_ai_credits requires the Copilot provider")
     command = argv(agent.get("command", AGENT_COMMANDS[provider]), "agent.command")
+    transport = agent.get("transport", "sdk" if provider == "copilot" else "cli")
+    if transport not in ("cli", "sdk") or transport == "sdk" and provider != "copilot":
+        raise ValueError("agent.transport must be cli, or sdk with the Copilot provider")
+    timeout = number(agent.get("timeout_seconds", 1800), "agent.timeout_seconds")
+    idle_timeout = number(agent.get("idle_timeout_seconds", 600), "agent.idle_timeout_seconds")
+    grace = number(agent.get("shutdown_grace_seconds", 30), "agent.shutdown_grace_seconds")
+    if transport == "sdk" and (grace < 5 or grace >= timeout):
+        raise ValueError("SDK shutdown_grace_seconds must be at least 5 and less than timeout_seconds")
     agent_resources = Resources.parse(agent.get("resources", {}))
     if agent_resources.gpus:
         raise ValueError("Managed provider resources do not support GPU allocation")
@@ -258,11 +306,11 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
             raise ValueError(f"Sandbox profile must be under this campaign's {sandbox_root} directory")
     agent_config = AgentConfig(
         provider, command, agent_resources,
-        number(agent.get("timeout_seconds", 600), "agent.timeout_seconds"),
+        timeout,
         integer(agent.get("retries", 1), "agent.retries", zero=True),
         text(agent.get("model", ""), "agent.model", empty=True),
         text(agent.get("reasoning_effort", ""), "agent.reasoning_effort", empty=True),
-        sandbox, home,
+        sandbox, home, transport, idle_timeout, grace,
     )
     storage = table(raw.get("storage", {}), "storage", set(StorageConfig.__dataclass_fields__))
     defaults = StorageConfig()
@@ -281,7 +329,8 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
     dashboard = table(raw.get("dashboard", {}), "dashboard", {"chat"})
     return LabGoblinConfig(project_config, execution_config, runners, campaign_config,
                         agent_config, StorageConfig(**limits, volumes=volumes), inputs,
-                        str(path), fingerprint(raw), parse_chat_settings(dashboard.get("chat", {})))
+                        str(path), fingerprint(raw), parse_chat_settings(dashboard.get("chat", {})),
+                        parse_research(raw.get("research", {}), agent_config))
 
 
 def load_config(path: str | Path = ".") -> LabGoblinConfig:
@@ -315,11 +364,17 @@ def restore_config(snapshot: dict, *, revision: str, path: str | Path) -> LabGob
     raw = {"schema_version": CONFIG_VERSION, "project": snapshot["project"],
            "execution": snapshot["execution"], "runners": runners,
            "campaign": {**table(campaign.get("resources"), "snapshot.resources"), **limits,
-                        "max_jobs": campaign.get("max_jobs"), "max_gpu_hours": campaign.get("max_gpu_hours")},
-           "agent": snapshot["agent"], "storage": snapshot["storage"], "inputs": snapshot["inputs"],
-           "dashboard": {"chat": snapshot["chat"]}}
+                        "max_jobs": campaign.get("max_jobs"), "max_gpu_hours": campaign.get("max_gpu_hours"),
+                        "max_ai_credits": campaign.get("max_ai_credits")},
+           "agent": {"transport": "cli", **snapshot["agent"]},
+           "storage": snapshot["storage"], "inputs": snapshot["inputs"],
+           "dashboard": {"chat": snapshot["chat"]}, "research": snapshot["research"]}
     config = replace(parse_config(raw, path), revision=revision)
-    if fingerprint(asdict(config)) != fingerprint(snapshot):
+    normalized = {**snapshot, "campaign": {"max_ai_credits": None, **snapshot["campaign"]},
+                  "agent": {"transport": "cli", "idle_timeout_seconds": 600,
+                            "shutdown_grace_seconds": 30, **snapshot["agent"]},
+                  "chat": {"max_ai_credits": None, **snapshot["chat"]}}
+    if fingerprint(asdict(config)) != fingerprint(normalized):
         raise ValueError("Configuration snapshot does not round-trip through the strict schema")
     return config
 
@@ -333,11 +388,16 @@ def initial_config(name: str, provider: str = "claude", python: str | None = Non
         "execution": {"default_runner": "native", "source_files": []},
         "runners": {"native": {"kind": "native", "python": python or sys.executable}},
         "campaign": {"cpus": 2, "memory_mb": 4096, "gpus": [], "max_jobs": 1,
-                     "max_gpu_hours": 0, "max_seconds": 3600, "max_invocations": 10},
+                     "max_gpu_hours": 0, "max_seconds": 3600, "max_invocations": 10,
+                     "max_ai_credits": "unlimited"},
         "agent": {"provider": provider, "command": list(AGENT_COMMANDS[provider]),
                   "model": "", "reasoning_effort": "",
                   "resources": {"cpus": 1, "memory_mb": 2048},
-                  "timeout_seconds": 600, "retries": 1, "sandbox": False},
+                  "timeout_seconds": 1800, "retries": 1, "sandbox": False,
+                  "transport": "sdk" if provider == "copilot" else "cli",
+                  "idle_timeout_seconds": 600, "shutdown_grace_seconds": 30},
+        "dashboard": {"chat": {"max_ai_credits": "unlimited"}},
+        "research": asdict(ResearchConfig()),
     }
 
 

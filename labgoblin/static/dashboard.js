@@ -85,7 +85,9 @@
       window.document.dispatchEvent(new Event("dashboard:refresh"));
       const nextAnchor = anchor && window.document.getElementById(anchor.id);
       window.scrollTo(0, nextAnchor ? scroll + nextAnchor.getBoundingClientRect().top - anchorTop : scroll);
-      status.textContent = `Page read at ${new Date(frame().read_at * 1000).toISOString()} · Not a live process probe`;
+      const freshness = replacement.dataset.liveMonitor === "true"
+        ? "Local host process sample; payload health is not inferred" : "Not a live process probe";
+      status.textContent = `Page read at ${new Date(frame().read_at * 1000).toISOString()} · ${freshness}`;
       status.classList.remove("error");
     } catch (error) {
       status.textContent = `Refresh failed: ${error.message}. Showing the previous snapshot.`;
@@ -136,7 +138,9 @@
   if (toggle) {
     setInterval(() => {
       const editing = document.activeElement.closest("form, details");
-      if (toggle.checked && !document.hidden && !editing) refresh(true);
+      if (toggle.checked && !document.hidden && !editing) {
+        refresh(window.document.getElementById("main").dataset.liveMonitor !== "true");
+      }
     }, 15000);
   }
 })();

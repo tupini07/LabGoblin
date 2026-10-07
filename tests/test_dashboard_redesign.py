@@ -18,7 +18,7 @@ from tests.test_dashboard import campaign, complete_job, dump, get, job, notes, 
 from tests.test_dashboard_chat import FakeObserver, finished, post, service, token
 from labgoblin import reporting
 from labgoblin.dashboard_data import observation_context, question_context, report_text, snapshot
-from labgoblin.protocol import EvidenceDisposition, Handoff, Resources, canonical
+from labgoblin.protocol import EvidenceDisposition, Handoff, LaunchEnvelope, LaunchKey, Resources, canonical
 
 
 class Document(HTMLParser):
@@ -39,6 +39,180 @@ class Document(HTMLParser):
 
     def context(self):
         return json.loads(next(attrs["data-chat-context"] for tag, attrs in self.attrs if attrs.get("id") == "main"))
+
+
+def monitor_launch(campaign, key="monitor-job"):
+    from labgoblin.processes import own_handle
+    from labgoblin.worker import launch_directory
+
+    aid = job(campaign, key=key, experiment_id=key)
+    spec = json.loads(campaign.state.attempt(aid)["spec"])
+    resources = Resources(spec["cpus"], spec["memory_mb"], ())
+    allocation = campaign.state.allocation(
+        aid, "attempt", {"resources": asdict(resources)}, campaign.state.campaign()["revision"])
+    nonce = uuid.uuid4().hex
+    envelope = LaunchEnvelope(
+        LaunchKey(campaign.state.id, 1, aid, allocation["token"], nonce),
+        "attempt", tuple(spec["argv"]), spec["cwd"], spec["root"], str(campaign.state.path),
+        str(campaign.ledger.path), campaign.ledger.id, spec["seconds"], resources, campaign.config.revision,
+    )
+    handle = json.dumps(own_handle(nonce))
+    with campaign.state.db.write() as conn:
+        conn.execute("""INSERT INTO launches(nonce,work_id,kind,generation,grant_id,envelope,digest,phase,supervisor,created)
+            VALUES(?,?,'attempt',1,?,?,?,'executing',?,?)""",
+                     (nonce, aid, allocation["token"], canonical(asdict(envelope)).decode(),
+                      envelope.digest, handle, time.time() - 90))
+        conn.execute("UPDATE attempts SET status='running' WHERE id=?", (aid,))
+    directory = launch_directory(envelope)
+    (directory / "main").mkdir(parents=True)
+    return aid, nonce, directory
+
+
+def test_live_monitor_samples_host_identity_and_log_activity_without_writes(campaign, monkeypatch):
+    from labgoblin import agent, backends
+    from labgoblin.processes import own_handle
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Observing must not run a backend or provider")
+
+    aid, nonce, directory = monitor_launch(campaign)
+    with campaign.state.db.write() as conn:
+        conn.execute("UPDATE campaign SET controller=?", (json.dumps(own_handle(nonce)),))
+    (directory / "main" / "stdout.log").write_text("main-output", encoding="utf-8")
+    (directory / "supervisor.stderr.log").write_text("<script>supervisor diagnostic</script>", encoding="utf-8")
+    monkeypatch.setattr(agent, "inspect_provider", forbidden)
+    monkeypatch.setattr(backends, "inspect_payload", forbidden)
+    before = dump(campaign.state)
+    with campaign.ledger.read() as conn:
+        ledger_before = list(conn.iterdump())
+    with serve(campaign.config.config_path, chat=False) as base:
+        code, _, body = get(base, "/monitor")
+        assert code == 200
+        text = "".join(Document(body).text)
+        assert "alive" in text and "PID " in text and "1m " in text
+        assert "Latest log write" in text and "supervisor stderr" in text
+        assert "quiet log is not proof of a stall" in text
+        assert "payload health is not inferred" in text
+        assert b'supervisor diagnostic' not in body
+        context = Document(body).context()
+        assert context["url"] == "/monitor" and question_context(context) == context
+        job_body = get(base, "/job?id=" + aid)[2]
+        assert b"supervisor stderr" in job_body and b"&lt;script&gt;supervisor diagnostic" in job_body
+        assert b"<script>supervisor diagnostic" not in job_body
+        assert dump(campaign.state) == before
+        with campaign.ledger.read() as conn:
+            assert list(conn.iterdump()) == ledger_before
+        wrong_identity = own_handle(nonce)
+        wrong_identity["created"] -= 1
+        with campaign.state.db.write() as conn:
+            conn.execute("UPDATE launches SET supervisor=? WHERE nonce=?", (json.dumps(wrong_identity), nonce))
+        assert b">dead</span>" in get(base, "/monitor")[2]
+        monkeypatch.setattr("labgoblin.dashboard.process_state", lambda _: "unknown")
+        assert b">unknown</span>" in get(base, "/monitor")[2]
+        (directory / "main" / "stdout.log").unlink()
+        (directory / "supervisor.stderr.log").unlink()
+        assert b"No nonempty retained output yet" in get(base, "/monitor")[2]
+
+
+def test_live_monitor_bounds_launches_and_reports_invalid_handles(campaign):
+    import tomllib
+    import tomli_w
+    from labgoblin.campaign import Campaign
+    from labgoblin.config import load_config
+
+    path = Path(campaign.config.config_path)
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    raw["campaign"]["max_jobs"] = 30
+    path.write_text(tomli_w.dumps(raw), encoding="utf-8")
+    campaign.config = load_config(path)
+    with Campaign(campaign.config, state=campaign.state, ledger=campaign.ledger) as controller:
+        controller.step(no_agent=True, admit=False)
+    for index in range(22):
+        monitor_launch(campaign, key=f"monitor-{index}")
+    before = dump(campaign.state)
+    with serve(campaign.config.config_path, chat=False) as base:
+        body = get(base, "/monitor")[2]
+        assert b"Owned in-flight launches (20 of 22)" in body
+        assert body.count(b'href="/job?id=') == 20
+        assert dump(campaign.state) == before
+        with campaign.state.db.write() as conn:
+            conn.execute("UPDATE campaign SET controller='{}'")
+        status, _, body = get(base, "/monitor")
+        assert status == 503 and b"PID and creation time" in body
+
+
+def test_credit_meter_does_not_present_reservations_as_spending(campaign):
+    from labgoblin.dashboard import DashboardHandler
+
+    handler = object.__new__(DashboardHandler)
+    handler.budget = campaign.state.budget()
+    handler.budget["ai_credits"].update(
+        configured=100, unlimited=False, used=10, reserved=70, remaining=20)
+    body = handler._budget_summary().encode()
+    meter = next(attrs for tag, attrs in Document(body).attrs
+                 if tag == "meter" and attrs.get("aria-label") == "AI credits (soft cap)")
+    assert float(meter["value"]) == 10
+    assert b"70.000 reserved" in body and b"reserved allowance is not spent" in body
+
+
+def test_monitor_shows_owned_sdk_activity_and_rejects_wrong_nonce(campaign):
+    aid, nonce, directory = monitor_launch(campaign)
+    with campaign.state.db.write() as conn:
+        envelope = json.loads(conn.execute("SELECT envelope FROM launches WHERE nonce=?", (nonce,)).fetchone()[0])
+        envelope["metadata"]["provider"] = {"transport": "sdk"}
+        conn.execute("UPDATE launches SET envelope=? WHERE nonce=?", (json.dumps(envelope), nonce))
+    progress = {
+        "nonce": nonce, "work_id": aid, "phase": "response", "response_in_progress": True,
+        "active_tools": 0, "observed_at": time.time(), "last_response_at": time.time() - 700,
+        "quiet_warning": True,
+    }
+    file = directory / "activity.json"
+    file.write_text(json.dumps(progress), encoding="utf-8")
+    before = dump(campaign.state)
+    with serve(campaign.config.config_path, chat=False) as base:
+        body = get(base, "/monitor")[2]
+        assert b"Provider: response" in body
+        assert b"Response in progress: yes" in body and b"Last response:" in body
+        assert b"not proof of a hang" in body and b"Activity sampled" in body
+        assert dump(campaign.state) == before
+        file.write_text(json.dumps({**progress, "nonce": "wrong"}), encoding="utf-8")
+        body = get(base, "/monitor")[2]
+        assert b"Provider activity unavailable" in body and b"another owned launch" in body
+        assert b"Provider: response" not in body
+        file.unlink()
+        assert b"No provider activity checkpoint yet" in get(base, "/monitor")[2]
+
+@pytest.mark.skipif(environment_value("BROWSER_TESTS") != "1", reason="Opt in to prepared Edge")
+def test_browser_live_monitor_refreshes_without_advancing_research(campaign):
+    from playwright.sync_api import sync_playwright, expect
+
+    monitor_launch(campaign)
+    with serve(campaign.config.config_path, chat=False) as base, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, executable_path=environment_value("BROWSER_EXECUTABLE"))
+        try:
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.clock.install()
+            page.goto(base + "/work")
+            page.get_by_role("link", name="Live monitor", exact=True).click()
+            expect(page.get_by_label("Auto-refresh monitor (15s)")).to_be_checked()
+            campaign.state.blocker("operational-note", "ownership", "New monitor-only observation fixture")
+            before = dump(campaign.state)
+            page.clock.fast_forward(15000)
+            expect(page.locator("main")).to_contain_text("New monitor-only observation fixture")
+            expect(page.locator("#refresh-status")).to_contain_text("Local host process sample")
+            page.get_by_label("Auto-refresh monitor (15s)").uncheck()
+            campaign.state.blocker("second-note", "ownership", "Not refreshed while held")
+            before = dump(campaign.state)
+            page.clock.fast_forward(15000)
+            expect(page.locator("main")).not_to_contain_text("Not refreshed while held")
+            page.get_by_role("button", name="Refresh", exact=True).click()
+            expect(page.locator("main")).to_contain_text("Not refreshed while held")
+            for width in (390, 768, 1440):
+                page.set_viewport_size({"width": width, "height": 844})
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert dump(campaign.state) == before
+        finally:
+            browser.close()
 
 
 def handoff(campaign, *, references=(), summary="The early speedup is not established."):

@@ -14,16 +14,16 @@ import urllib.parse
 
 from markdown_it import MarkdownIt
 
-from labgoblin import journal, reporting
+from labgoblin import journal, reporting, results
 from labgoblin.config import ChatSettings
 from labgoblin.dashboard_chat import ChatError, ObserverService, load_chat_settings
 from labgoblin.dashboard_data import (
     FAILED, RESEARCH_SOURCES, attempt_filter, numeric_metrics,
     observation_context, report_text, snapshot, source_preview, read_text as _read_text,
 )
-from labgoblin.evidence import observation, tail
-from labgoblin.protocol import ACTIVE
-from labgoblin.processes import CampaignLease
+from labgoblin.evidence import contained, observation, read_json, tail
+from labgoblin.protocol import ACTIVE, LaunchEnvelope, boolean, integer, number, text
+from labgoblin.processes import CampaignLease, process_state
 from labgoblin.paths import configuration_path, state_directory
 from labgoblin.scheduler import ResourceLedger
 from labgoblin.state import State
@@ -40,8 +40,8 @@ NAV = (
     ("/", "Brief"), ("/evidence", "Evidence"), ("/work", "Work"), ("/history", "History"),
 )
 SECTIONS = {
-    "/evidence": (("/evidence", "Questions"), ("/artifacts", "Measurements"), ("/compare", "Compare"), ("/goal", "Goal & protocol")),
-    "/work": (("/work", "Now & next"), ("/jobs", "Experiments"), ("/debug", "Recovery"), ("/resources", "Limits & resources"), ("/activity", "Agent turns")),
+    "/evidence": (("/evidence", "Questions"), ("/research", "Research workspace"), ("/artifacts", "Measurements"), ("/compare", "Compare"), ("/goal", "Goal & protocol")),
+    "/work": (("/work", "Now & next"), ("/tasks", "Tasks & coaching"), ("/monitor", "Live monitor"), ("/jobs", "Experiments"), ("/debug", "Recovery"), ("/resources", "Limits & resources"), ("/activity", "Agent turns")),
     "/history": (("/history", "Research history"), ("/journal", "Journal"), ("/reports", "Reports"), ("/changes", "Recorded changes")),
 }
 ROUTE_GROUP = {
@@ -153,6 +153,19 @@ def _meter(label, used, limit, detail):
     return f'<div class="budget"><div><strong>{_escape(label)}</strong><span>{_escape(detail)}</span></div>{progress}</div>'
 
 
+def _log_paths(directory):
+    return [(f"{stage} {stream}", directory / "main" / f"{stream}.log" if stage == "main"
+             else directory / f"supervisor.{stream}.log")
+            for stage in ("main", "supervisor") for stream in ("stdout", "stderr")]
+
+
+def _host_process(encoded):
+    if not encoded:
+        return '<span class="muted">Not recorded; liveness unknown</span>'
+    handle = json.loads(encoded)
+    return _badge(process_state(handle)) + f' <span class="muted">PID {_escape(handle["pid"])}</span>'
+
+
 class DashboardError(Exception):
     def __init__(self, status, message):
         self.status = status
@@ -225,6 +238,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             routes = {
                 "/": ("Research brief", self._overview), "/evidence": ("Evidence", self._evidence),
                 "/work": ("Work", self._work), "/history": ("History", self._history),
+                "/monitor": ("Live monitor", self._monitor),
+                "/research": ("Research workspace", self._research),
+                "/tasks": ("Tasks & coaching", self._tasks),
                 "/compare": ("Compare measurements", self._compare), "/changes": ("Recorded changes", self._changes),
                 "/report": ("Retained report", self._report), "/jobs": ("Experiments", self._jobs),
                 "/job": ("Experiment details", self._job), "/hypotheses": ("Hypotheses", self._hypotheses),
@@ -341,6 +357,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             + f">{label}</a>" for path, label in SECTIONS.get(active, ())) + "</nav>" if active in SECTIONS else ""
         refresh = ('<label class="live-toggle"><input id="live-refresh" type="checkbox"> Check for updates (15s)</label>'
                    if self.path_name in ("/", "/work", "/jobs", "/activity", "/artifacts", "/resources") else "")
+        monitor = self.path_name == "/monitor"
+        if monitor:
+            refresh = '<label class="live-toggle"><input id="live-refresh" type="checkbox" checked> Auto-refresh monitor (15s)</label>'
+        freshness = ("Local host process sample; payload health is not inferred" if monitor else "Not a live process probe")
         current = self.view_snapshot.get("campaign", {})
         frame = {key: self.view_snapshot.get(key) for key in ("read_at", "source_cutoff", "event_cutoff", "change_token")}
         frame.update(campaign=current.get("id"), generation=current.get("generation"))
@@ -374,9 +394,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 <button id="chat-open" type="button" aria-controls="chat-panel" aria-expanded="false">Ask Copilot</button>
 <button id="refresh" type="button">Refresh</button></div></header>
 <div class="refresh-status" id="refresh-status" role="status" aria-live="polite">Page read at
-{datetime.now(timezone.utc):%H:%M:%S} UTC &middot; Not a live process probe</div>
-<main id="main" tabindex="-1" data-snapshot="{_escape(json.dumps(frame))}" data-chat-context="{_escape(json.dumps(context))}">{subnav}{content}</main>
-<footer>Times in UTC &middot; Recorded state, not a live process probe &middot;
+{datetime.now(timezone.utc):%H:%M:%S} UTC &middot; {freshness}</div>
+<main id="main" tabindex="-1" data-live-monitor="{str(monitor).lower()}" data-snapshot="{_escape(json.dumps(frame))}" data-chat-context="{_escape(json.dumps(context))}">{subnav}{content}</main>
+<footer>Times in UTC &middot; {freshness} &middot;
 Manage campaigns through the CLI</footer></div>
 <aside id="chat-panel" class="chat-panel" role="dialog" aria-modal="false" aria-labelledby="chat-title" hidden>
 <div class="chat-heading"><div><span class="eyebrow">READ-ONLY OBSERVER</span><h2 id="chat-title">Dashboard Copilot</h2></div>
@@ -515,10 +535,27 @@ Which conclusions have experimental support?</p></div></div>
             if value["reserved"]:
                 detail += f'; {formatter(value["reserved"])} reserved'
             content += _meter(label, value["used"] + value["reserved"], value["configured"], detail)
+        value = self.budget["ai_credits"]
+        limit = "Unlimited" if value["unlimited"] else f'{value["configured"]:,.3f}'
+        detail = f'{value["used"]:,.3f} reported / {limit}; {value["reserved"]:,.3f} reserved'
+        if value["unknown"]:
+            detail += f'; {value["unknown"]} unknown usage record(s)'
+        if value["estimated"]:
+            detail += (f'; {value["estimated_used"]:,.3f} additional operator-estimated credits'
+                       f' across {value["estimated"]} record(s); remaining allowance is approximate')
+        if value["uncovered_unknown"]:
+            detail += f'; {value["uncovered_unknown"]} without an approved estimate'
+        elif not value["unlimited"]:
+            detail += f'; {value["remaining"]:,.3f} remaining'
+        content += _meter("AI credits (soft cap)", value["used"],
+                          value["configured"] or 0, detail)
         return content + ('<p class="muted">Last admitted limits. Pauses and restarts count toward the elapsed horizon. '
                           'Expiry gates new admission; admitted work keeps its own finite deadline. '
                           'Invocation commitments include armed/uncertain launches, not tokens or money. '
-                          'Ordinary research is also subject to the final-analysis reserve. Observer usage is separate.</p>')
+                          'Credits are reported after responses, so in-flight work can overshoot. Unknown usage without an explicit operator estimate blocks capped inference. '
+                          'Approved estimates count against the same cap but are not verified charges; final recovered usage replaces them. '
+                          'The credit bar shows reported spend only; reserved allowance is not spent and unused allowance returns after reconciliation. '
+                          'Ordinary research reserves final-analysis credits. Observer usage is separate.</p>')
 
     def _closure_summary(self):
         current = self.current
@@ -594,6 +631,98 @@ Which conclusions have experimental support?</p></div></div>
         return content + '<div class="two-column">' + _panel("Admission allowance", self._budget_summary()) + _panel(
             "Latest agent turn (recorded history)", self._turn_summary(turns[0]) if turns else _empty(
                 "No agent turns yet", "No owned reasoning turn is recorded.")) + "</div>"
+
+    def _monitor(self):
+        now = self.view_snapshot["read_at"]
+        content = self._recovery_summary() if self.current["blockers"] else ""
+        content += _panel("Controller & progression", _facts([
+            ("Controller process", _host_process(self.current["controller"])),
+            ("Operator intent", _badge(self.current["operator_mode"])),
+            ("Research progression", _badge(self.current["progress"])),
+            ("Research outcome", _badge(self.current["research_outcome"])),
+            ("Recovery", _link("/debug", f'{len(self.current["blockers"])} unresolved blockers')),
+        ]) + f'<p>{_escape(self.current["reason"] or "No next action recorded.")}</p>'
+            '<p class="muted">Host checks match PID and creation time; alive does not prove useful progress. '
+            'Samples can change immediately. No backend command, model call or recovery action is performed.</p>',
+            _link("/work", "Research plan & history"))
+        where = "l.phase IN ('prepared','armed','executing')"
+        count = self._rows(f"SELECT COUNT(*) n FROM launches l WHERE {where}")[0]["n"]
+        launches = self._rows(f"""SELECT l.*,a.experiment_id,i.turn_id FROM launches l
+            LEFT JOIN attempts a ON a.id=l.work_id LEFT JOIN invocations i ON i.id=l.work_id
+            WHERE {where} ORDER BY l.created DESC,l.nonce LIMIT 20""")
+        rows = []
+        for launch in launches:
+            envelope = LaunchEnvelope.parse(json.loads(launch["envelope"]))
+            directory = launch_directory(envelope)
+            activity = []
+            for label, path in _log_paths(directory):
+                path = contained(self.root, path)
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                if stat.st_size:
+                    activity.append((stat.st_mtime, label, stat.st_size))
+            if activity:
+                modified, label, size = max(activity)
+                output = (_timestamp(modified) + f'<p class="muted">{_escape(label)} &middot; {_size(size)} retained'
+                          f' &middot; {_duration(now - modified)} ago</p>')
+            else:
+                output = '<span class="muted">No nonempty retained output yet</span>'
+            if envelope.metadata.get("provider", {}).get("transport") == "sdk":
+                try:
+                    progress = read_json(contained(self.root, directory / "activity.json"), 16384)
+                    if (not isinstance(progress, dict) or progress.get("nonce") != envelope.key.nonce
+                            or progress.get("work_id") != envelope.key.work_id):
+                        raise ValueError("Activity belongs to another owned launch")
+                    phase = text(progress.get("phase"), "provider phase")
+                    if len(phase) > 64:
+                        raise ValueError("Provider phase exceeds its display bound")
+                    active = boolean(progress.get("response_in_progress"), "response in progress")
+                    tools = integer(progress.get("active_tools"), "active tools", zero=True)
+                    observed = number(progress.get("observed_at"), "activity observation")
+                    last_response = progress.get("last_response_at")
+                    if last_response is not None:
+                        number(last_response, "last response")
+                    quiet = boolean(progress.get("quiet_warning"), "quiet warning")
+                    output += (f'<p><strong>Provider: {_escape(phase)}</strong><br>'
+                               f'Response in progress: {"yes" if active else "no"}; active tools: {tools}<br>'
+                               f'Last response: {_timestamp(last_response)}<br>'
+                               f'Activity sampled {_duration(max(0, now - observed))} ago.</p>')
+                    if quiet:
+                        output += '<p class="muted">Quiet provider: suspected inactivity, not proof of a hang; hard deadline still applies.</p>'
+                except FileNotFoundError:
+                    output += '<p class="muted">No provider activity checkpoint yet.</p>'
+                except (OSError, ValueError) as error:
+                    output += f'<p class="danger">Provider activity unavailable: {_escape(str(error)[:500])}</p>'
+            target = (_link("/job", launch["experiment_id"], id=launch["work_id"]) if launch["experiment_id"]
+                      else _link("/turn", launch["kind"], id=launch["turn_id"]) if launch["turn_id"]
+                      else _escape(launch["kind"]))
+            rows.append([
+                target + f'<code class="identifier">{_escape(launch["work_id"])}</code>',
+                _badge(launch["phase"]), _host_process(launch["supervisor"]),
+                _duration(now - launch["created"]), _duration(envelope.timeout_seconds), output,
+            ])
+        content += _panel(f"Owned in-flight launches ({len(rows)} of {count})",
+                          '<p class="muted">Launch age is since preparation, not measured payload runtime. '
+                          'The timeout is the frozen operation allowance, not an estimated completion time. '
+                          'A quiet log is not proof of a stall. Supervisor liveness does not establish payload or guest health.</p>'
+                          + _table(["Work / logs", "Recorded phase", "Host supervisor", "Launch age", "Timeout", "Latest log write"], rows,
+                                   empty="No in-flight launches recorded",
+                                   explanation="Work may be queued, waiting, paused or finished; this is not a scientific verdict."),
+                          _link("/jobs", "All experiments"))
+        recent = self._rows("""SELECT h.source_id,h.created FROM handoffs h JOIN turns t ON t.id=h.turn_id
+            WHERE t.generation=? ORDER BY h.created DESC LIMIT 1""", (self.current["generation"],))
+        handoff = (_timestamp(recent[0]["created"]) + f'<p>{_duration(now - recent[0]["created"])} ago</p>'
+                   + _link("/journal", "Read the latest accepted handoff", entry=recent[0]["source_id"])
+                   if recent else '<p>No accepted research handoff in this generation yet.</p>')
+        resources = self.budget["resources"]
+        return content + '<div class="two-column">' + _panel("Research credit allowance", self._budget_summary()) + _panel(
+            "Last accepted handoff & resources", handoff + _facts([
+                ("Committed CPUs", f'{resources["committed_cpus"]} / {resources["configured"]["cpus"]}'),
+                ("Committed memory", f'{resources["committed_memory_mb"]} / {resources["configured"]["memory_mb"]} MiB'),
+                ("Experiment slots", f'{self.budget["active_experiments"]} / {self.budget["maximum_experiments"]}'),
+            ]), _link("/resources", "Shared machine & all limits")) + "</div>"
 
     def _history(self):
         count = self._rows("SELECT COUNT(*) n FROM generations")[0]["n"]
@@ -681,16 +810,108 @@ Which conclusions have experimental support?</p></div></div>
         return (content + self._work_logs(row["id"]) + _details("Technical details: frozen provenance",
                 f'<pre>{_escape(json.dumps({k: v for k, v in spec.items() if k not in ("environment", "inputs")}, indent=2))}</pre>'))
 
+    def _research(self):
+        from labgoblin import research_memory
+        reference = self.params.get("id")
+        if reference:
+            value = research_memory.read(self.state, reference)
+            record = value["content"]
+            versions = self._rows("""SELECT source_id,version FROM research_revisions WHERE record_id=?
+                ORDER BY version DESC LIMIT 50""", (record["id"],))
+            content = _panel(record["title"], _facts([
+                ("Kind", _escape(record["kind"])), ("Activity", _badge(record["activity"])),
+                ("Assessed outcome", _badge(record["outcome"]) + " Researcher interpretation, not independent certification"),
+                ("Scope", _escape(record["scope_id"])), ("Exact revision", _escape(value["source_id"])),
+            ]) + f'<div class="markdown">{_markdown(record["body"])}</div>')
+            content += _panel("Exact links", _table(["Relation", "Reference"], [
+                [_escape(link["relation"]), _escape(link["target"])] for link in record["links"]]))
+            content += _panel("Evidence timing", _table(["Attempt", "Association", "Originally pinned revisions"], [
+                [_link("/job", item["attempt_id"], id=item["attempt_id"]), _escape(item["association"]),
+                 " ".join(_link("/research", ref, id=ref) for ref in item["pinned_research_refs"])]
+                for item in record.get("evidence_associations", [])],
+                empty="No attempt associations in this revision",
+                explanation="Post-hoc interpretation never changes an attempt's original registration."))
+            return content + _panel("Revision history (latest 50)", " ".join(
+                _link("/research", f"Revision {row['version']}", id=row["source_id"]) for row in versions))
+        offset = self._int("offset", 0)
+        cutoff = self._int("cutoff") if "cutoff" in self.params else None
+        value = research_memory.index(self.state, query=self.params.get("q", ""), offset=offset, cutoff=cutoff)
+        content = '<p>Published revisions only. Files under research are editable drafts until explicitly published. '
+        content += 'Retired ideas remain searchable; execution failure does not imply refutation.</p>'
+        content += (f'<form class="filters" action="/research"><label>Search all published records'
+                    f'<input name="q" value="{_escape(self.params.get("q", ""))}"></label><button>Search</button></form>')
+        content += _panel(f'Published workspace ({value["total"]})', _table(["Record", "Kind", "Activity", "Revision"], [
+            [_link("/research", row["title"], id=row["source_id"]), _escape(row["kind"]), _badge(row["activity"]),
+             str(row["version"])] for row in value["records"]]))
+        if value["has_more"]:
+            content += _link("/research", "Next records", offset=value["next_offset"], q=self.params.get("q", ""),
+                             cutoff=value["cutoff"])
+        return content
+
+    def _tasks(self):
+        from labgoblin import research_tasks
+        if self.params.get("id"):
+            value = research_tasks.get(self.state, self.params["id"])
+            charter, budget = value["charter"], value["budget"]
+            content = _panel("Worker charter", _facts([
+                ("Task", _escape(value["id"])), ("Parent", "root"), ("State", _badge(value["state"])),
+                ("Charter revision", _escape(value["charter_revision"])),
+                ("Invocation allowance", f'{budget["invocations"]} / {budget["max_invocations"]}'),
+                ("Reported / reserved credits", f'{budget["used"]} / {budget["reserved"]}'),
+                ("Unknown usage", str(budget["unknown"])),
+                ("Credit ceiling", str(budget["configured"])),
+                ("Task deadline", _timestamp(value["created"] + charter["max_seconds"])),
+            ]) + "<h3>Objective</h3>" + _markdown(charter["objective"])
+                + "<h3>Deliverables</h3>" + _markdown(charter["deliverables"]))
+            content += _panel("Dependencies", " ".join(_link("/tasks", ref, id=ref)
+                                for ref in charter.get("dependencies", [])) or "None")
+            content += _panel("Retained charter and findings", _link("/journal", "Initial charter", entry=charter["source_id"])
+                              + (" " + _link("/journal", "Latest amendment", entry=charter["amendment"])
+                                 if charter.get("amendment") else "")
+                              + (" " + _link("/journal", "Worker result", entry=value["result_source"])
+                                 if value["result_source"] else "<p>No owned worker result yet.</p>"))
+            content += _panel("Returned artifacts", _table(["Path", "SHA-256", "Root preimage"], [
+                [_escape(item["path"]), _escape(item["digest"]), _escape(item["base"] or "New file")]
+                for item in json.loads(value["artifacts"])]))
+            return content + _panel("Root integration decision", "<pre>" + _escape(
+                json.dumps(json.loads(value["integrated"]), indent=2) if value["integrated"] else "Not integrated") + "</pre>")
+        count = self._rows("SELECT COUNT(*) n FROM research_tasks")[0]["n"]
+        offset, paging = self._pagination(count)
+        tasks = self._rows("""SELECT id,state,reason,created,result_source,integrated FROM research_tasks
+            ORDER BY created DESC,id LIMIT ? OFFSET ?""", (PAGE_SIZE, offset))
+        content = _panel(f"Flat worker scopes ({count})", _table(
+            ["Task", "State", "Reason", "Result", "Integration"], [
+                [_link("/tasks", row["id"], id=row["id"]), _badge(row["state"]), _escape(row["reason"]),
+                 _link("/journal", "Owned result", entry=row["result_source"]) if row["result_source"] else "Pending",
+                 _escape(json.loads(row["integrated"])["state"]) if row["integrated"] else "Not integrated"]
+                for row in tasks])) + paging
+        episodes = self._rows("SELECT * FROM stop_episodes ORDER BY created DESC LIMIT 20")
+        content += _panel("Stopping reviews (latest 20)", _table(["Episode", "State", "Coach calls", "Reason", "Response"], [
+            [_escape(row["id"]), _badge(row["state"]), str(row["rounds"]), _escape(row["reason"]),
+             _link("/journal", "Exact coach decision", entry=row["result_source"]) if row["result_source"] else "No review result"]
+            for row in episodes]))
+        from labgoblin import credits
+        rows = self._rows("""SELECT l.kind,l.envelope,l.receipt,l.phase FROM launches l WHERE l.kind!='attempt'""")
+        costs = []
+        for role in sorted({row["kind"] for row in rows}):
+            value = credits.summarize((row for row in rows if row["kind"] == role), None)
+            costs.append([_escape(role), str(value["used"]), str(value["reserved"]), str(value["unknown"])])
+        return content + _panel("Campaign role costs", _table(["Role", "Reported credits", "Live reservations", "Unknown"], costs)
+                               + "<p>All roles share campaign limits. Operator estimates remain in the campaign budget; "
+                                 "observer chat has its separate allowance. These are not research-quality scores.</p>")
+
     def _hypotheses(self):
         count = self._rows("SELECT COUNT(*) n FROM hypotheses")[0]["n"]
         offset, paging = self._pagination(count)
         rows = self._rows("""SELECT h.*,COUNT(a.id) attempts FROM hypotheses h LEFT JOIN attempts a ON a.hypothesis_id=h.id
+            OR EXISTS(SELECT 1 FROM attempt_research_refs ar JOIN research_revisions rr ON rr.source_id=ar.source_id
+                WHERE ar.attempt_id=a.id AND rr.record_id=h.id)
             GROUP BY h.id ORDER BY h.created DESC,h.id LIMIT ? OFFSET ?""", (PAGE_SIZE, offset))
         return _panel("Research questions", '<p class="muted">Recorded hypothesis labels are not certified scientific verdicts. '
-                      'A frozen statement means evaluation was admitted, not that the hypothesis was accepted.</p>'
+                      'Frozen attempt revisions mean evaluation was admitted, not that the current hypothesis was accepted.</p>'
                       + _table(["Hypothesis statement", "Recorded label", "Evaluation admission", "Experiments", "Updated"], [
             [_link("/hypothesis", r["statement"][:240], id=r["id"]) + f'<code class="identifier">{_escape(r["id"])}</code>',
-             _badge(r["status"]), "Frozen" if r["frozen"] else "Not yet admitted", str(r["attempts"]), _timestamp(r["updated"])]
+             _badge(r["status"]), "Frozen evaluation revisions" if r["frozen"] else "Not yet admitted", str(r["attempts"]), _timestamp(r["updated"])]
             for r in rows])) + paging
 
     def _hypothesis(self):
@@ -702,7 +923,7 @@ Which conclusions have experimental support?</p></div></div>
         self.context.update(hypothesis_id=hid, label=row["statement"][:160])
         content = _panel("Hypothesis statement", f'<div class="markdown">{_markdown(row["statement"])}</div>' + _facts([
             ("Recorded hypothesis label", _badge(row["status"]) + '<p>Not an independently verified assessment.</p>'),
-            ("Evaluation admission", "Frozen; changed claims require a new ID" if row["frozen"] else "Not yet admitted; a status label alone is not experimental support"),
+            ("Evaluation admission", "Frozen attempt revisions; publish a new research revision to revisit the claim" if row["frozen"] else "Not yet admitted; a status label alone is not experimental support"),
             ("Supersedes", _link("/hypothesis", row["supersedes"], id=row["supersedes"]) if row["supersedes"] else "None"),
         ]))
         if row["conclusion"]:
@@ -710,10 +931,10 @@ Which conclusions have experimental support?</p></div></div>
         metadata = json.loads(row["metadata"])
         if metadata:
             content += _details("Technical claim metadata", f'<pre>{_escape(json.dumps(metadata, indent=2))}</pre>')
-        references = self._rows("""SELECT DISTINCT h.source_id,h.created FROM dispositions d
+        references = self._rows(f"""SELECT DISTINCT h.source_id,h.created FROM dispositions d
             JOIN turns t ON t.id=d.turn_id AND t.state='accepted' JOIN handoffs h ON h.turn_id=t.id
             JOIN json_each(d.reference_ids) refs JOIN observations o ON o.id=refs.value
-            JOIN attempts a ON a.id=o.attempt_id WHERE a.hypothesis_id=? ORDER BY h.created DESC LIMIT 10""", (hid,))
+            JOIN attempts a ON a.id=o.attempt_id WHERE {results.HYPOTHESIS_FILTER} ORDER BY h.created DESC LIMIT 10""", (hid, hid))
         content += _panel("Assessments referencing this hypothesis's observations",
                           '<ul>' + "".join("<li>" + _link("/journal", "Exact recorded assessment", entry=r["source_id"]) + "</li>"
                                           for r in references) + "</ul>" if references else
@@ -721,7 +942,7 @@ Which conclusions have experimental support?</p></div></div>
         matches = journal.search(self.state.db, hid, result_limit=6)
         content += _panel("Related journal context", self._search_results(matches))
         return content + _panel("Recent experiments", self._job_table(self._rows(
-            "SELECT * FROM attempts WHERE hypothesis_id=? ORDER BY created DESC LIMIT 10", (hid,))),
+            f"SELECT a.* FROM attempts a WHERE {results.HYPOTHESIS_FILTER} ORDER BY created DESC LIMIT 10", (hid, hid))),
             _link("/jobs", "All experiments", hypothesis_id=hid))
 
     def _turn_summary(self, turn):
@@ -761,7 +982,6 @@ Which conclusions have experimental support?</p></div></div>
         return content
 
     def _work_logs(self, work_id):
-        from labgoblin.protocol import LaunchEnvelope
         launches = self._rows("SELECT envelope FROM launches WHERE work_id=? ORDER BY created DESC LIMIT 1", (work_id,))
         if not launches:
             return _panel("Retained diagnostics", '<p class="muted">No owned launch or retained stream is registered for this work. '
@@ -769,13 +989,12 @@ Which conclusions have experimental support?</p></div></div>
         envelope = LaunchEnvelope.parse(json.loads(launches[0]["envelope"]))
         directory = launch_directory(envelope)
         content = ""
-        for stage in ("main", "supervisor"):
-            for name in ("stdout", "stderr"):
-                path = directory / stage / f"{name}.log"
-                if path.exists():
-                    value = tail(path, limit=LOG_LIMIT)
-                    content += _details(f"{stage} {name}", '<p class="muted">Bounded retained tail; earlier output may be omitted.</p>'
-                                        f'<pre>{_escape(value["text"])}</pre>')
+        for label, path in _log_paths(directory):
+            path = contained(self.root, path)
+            if path.exists():
+                value = tail(path, limit=LOG_LIMIT)
+                content += _details(label, '<p class="muted">Bounded retained tail; earlier output may be omitted.</p>'
+                                    f'<pre>{_escape(value["text"])}</pre>', f"{work_id}-{label}")
         return _panel("Captured logs", content or '<p class="muted">No retained main/supervisor streams are available.</p>')
 
     def _observations(self, where="", params=(), limit=PAGE_SIZE, offset=0):

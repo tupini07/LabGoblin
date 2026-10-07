@@ -25,7 +25,7 @@ HELP = """--prompt <text>
 --effort <level>
   [possible values: low, high, max]
 --no-auto-update --no-remote --no-remote-export --no-ask-user
---stream --log-level --usage-output-file
+--stream --log-level --usage-output-file --max-ai-credits
 """
 
 DOUBLE = r'''
@@ -44,16 +44,23 @@ result=dict(turn_id=packet["turn_id"],packet_id=packet["packet_id"],summary="Own
 pathlib.Path(paths[1]).write_text(json.dumps(result),encoding="utf-8")
 if "--usage-output-file" in sys.argv:
     usage=pathlib.Path(sys.argv[sys.argv.index("--usage-output-file")+1])
-    usage.write_text(json.dumps(dict(provider_double=True,tokens=7)),encoding="utf-8")
+    value=dict(provider_double=True,tokens=7)
+    if "NANO_USAGE" in globals() and NANO_USAGE is not None:
+        value["totalNanoAiu"]=NANO_USAGE
+    usage.write_text(json.dumps(value),encoding="utf-8")
 print(json.dumps(sys.argv[1:]))
 '''
 
 
-def fixture(tmp_path, provider="copilot", *, sandbox=False):
+def fixture(tmp_path, provider="copilot", *, sandbox=False, credit_limit=None, usage_nano=None, agent_settings=None):
     program = tmp_path / "provider double.py"
-    program.write_text(f"HELP_TEXT={HELP!r}\n" + DOUBLE, encoding="utf-8")
+    program.write_text(f"HELP_TEXT={HELP!r}\nNANO_USAGE={usage_nano!r}\n" + DOUBLE, encoding="utf-8")
     raw = initial_config("provider-fixture", provider)
-    raw["agent"].update(command=[sys.executable, str(program)], resources={"cpus": 1, "memory_mb": 256})
+    if credit_limit is not None:
+        raw["campaign"]["max_ai_credits"] = credit_limit
+    raw["agent"].update(command=[sys.executable, str(program)], transport="cli",
+                        resources={"cpus": 1, "memory_mb": 256})
+    raw["agent"].update(agent_settings or {})
     if sandbox:
         raw["agent"].update(sandbox=True, copilot_home=str(Path(".labgoblin") / "sandbox"))
     config = parse_config(raw, tmp_path / "labgoblin.toml")

@@ -12,7 +12,9 @@ from labgoblin.state import State
 
 @pytest.fixture
 def state(tmp_path):
-    cfg = parse_config(initial_config("fixture", "copilot"), tmp_path / "labgoblin.toml")
+    raw = initial_config("fixture", "copilot")
+    raw["agent"]["transport"] = "cli"
+    cfg = parse_config(raw, tmp_path / "labgoblin.toml")
     result = State.create(cfg, tmp_path / "machine.db")
     result.bind_ledger(tmp_path / "machine.db", "machine")
     return result

@@ -50,6 +50,7 @@ CREATE TABLE attempts(
     id TEXT PRIMARY KEY, generation INTEGER NOT NULL REFERENCES generations(id),
     idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, spec TEXT NOT NULL,
     experiment_id TEXT NOT NULL, hypothesis_id TEXT REFERENCES hypotheses(id),
+    scope_id TEXT NOT NULL DEFAULT 'root',
     status TEXT NOT NULL CHECK(status IN
         ('queued','starting','running','recovery_required','completed','failed',
          'cancelled','timed_out','interrupted','not_started')),
@@ -60,7 +61,7 @@ CREATE TABLE attempts(
     collection_event TEXT REFERENCES events(id),
     validation TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '',
     grant_id TEXT, nonce TEXT, cancel_requested REAL, admission_order INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(generation,idempotency_key)
+    UNIQUE(generation,scope_id,idempotency_key)
 );
 CREATE INDEX attempts_active ON attempts(status,created,id);
 CREATE INDEX attempts_generation ON attempts(generation,status,id);
@@ -68,6 +69,11 @@ CREATE INDEX attempts_hypothesis ON attempts(hypothesis_id,id);
 CREATE INDEX attempts_collection ON attempts(collection,status,created,id);
 CREATE INDEX attempts_cancel ON attempts(status,cancel_requested);
 CREATE INDEX attempts_queue ON attempts(status,admission_order,id);
+CREATE INDEX attempts_scope ON attempts(scope_id,status,collection);
+CREATE TABLE attempt_research_refs(
+    attempt_id TEXT NOT NULL REFERENCES attempts(id), source_id TEXT NOT NULL REFERENCES research_revisions(source_id),
+    PRIMARY KEY(attempt_id,source_id)
+);
 CREATE TABLE allocations(
     token TEXT PRIMARY KEY, generation INTEGER NOT NULL REFERENCES generations(id),
     work_id TEXT NOT NULL, kind TEXT NOT NULL, revision INTEGER NOT NULL,
@@ -100,10 +106,12 @@ CREATE INDEX blockers_unresolved ON blockers(generation,resolved,id);
 CREATE TABLE events(
     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
     generation INTEGER NOT NULL REFERENCES generations(id), kind TEXT NOT NULL,
-    payload TEXT NOT NULL, payload_digest TEXT NOT NULL, created REAL NOT NULL, acknowledged_by TEXT
+    payload TEXT NOT NULL, payload_digest TEXT NOT NULL, created REAL NOT NULL, acknowledged_by TEXT,
+    scope_id TEXT NOT NULL DEFAULT 'root'
 );
 CREATE INDEX events_pending ON events(generation,acknowledged_by,seq);
 CREATE INDEX events_evidence ON events(generation,acknowledged_by,kind,seq);
+CREATE INDEX events_scope ON events(scope_id,generation,acknowledged_by,seq);
 CREATE TABLE packets(
     id TEXT PRIMARY KEY, turn_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL,
     watermark INTEGER NOT NULL, content TEXT NOT NULL, digest TEXT NOT NULL,
@@ -118,17 +126,19 @@ CREATE TABLE turns(
     kind TEXT NOT NULL, packet_id TEXT UNIQUE REFERENCES packets(id),
     state TEXT NOT NULL CHECK(state IN ('prepared','running','accepted','failed','cancelled')),
     created REAL NOT NULL, ended REAL, result TEXT, reason TEXT NOT NULL DEFAULT '',
-    revision INTEGER NOT NULL, source_revision TEXT, admission_order INTEGER NOT NULL DEFAULT 0
+    revision INTEGER NOT NULL, source_revision TEXT, admission_order INTEGER NOT NULL DEFAULT 0,
+    scope_id TEXT NOT NULL DEFAULT 'root'
 );
 CREATE INDEX turns_active ON turns(state,created,id);
-CREATE UNIQUE INDEX turns_single_owner ON turns((1)) WHERE state IN ('prepared','running');
+CREATE UNIQUE INDEX turns_scope_owner ON turns(scope_id) WHERE state IN ('prepared','running');
 CREATE TABLE invocations(
     id TEXT PRIMARY KEY, turn_id TEXT REFERENCES turns(id), generation INTEGER NOT NULL,
     kind TEXT NOT NULL, bundle_id TEXT NOT NULL, bundle_position INTEGER NOT NULL,
     state TEXT NOT NULL CHECK(state IN
         ('reserved','armed','running','completed','failed','uncertain','not_started','cancelled')),
     created REAL NOT NULL, started REAL, ended REAL, usage TEXT,
-    nonce TEXT, reason TEXT NOT NULL DEFAULT '', UNIQUE(bundle_id,bundle_position)
+    nonce TEXT, reason TEXT NOT NULL DEFAULT '', credit_allowance_nano INTEGER,
+    UNIQUE(bundle_id,bundle_position)
 );
 CREATE INDEX invocations_accounting ON invocations(state,generation,kind);
 CREATE INDEX invocations_turn ON invocations(turn_id,bundle_position);
@@ -204,6 +214,36 @@ CREATE TABLE reports(
     outputs TEXT NOT NULL, created REAL NOT NULL
 );
 CREATE UNIQUE INDEX reports_turn ON reports(turn_id) WHERE turn_id IS NOT NULL;
+CREATE TABLE research_records(
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, scope_id TEXT NOT NULL,
+    head TEXT NOT NULL REFERENCES sources(id), version INTEGER NOT NULL,
+    activity TEXT NOT NULL, title TEXT NOT NULL, updated REAL NOT NULL
+);
+CREATE TABLE research_revisions(
+    source_id TEXT PRIMARY KEY REFERENCES sources(id), record_id TEXT NOT NULL,
+    version INTEGER NOT NULL, request_id TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL,
+    UNIQUE(record_id,version)
+);
+CREATE TABLE research_links(
+    source_id TEXT NOT NULL REFERENCES sources(id), target_id TEXT NOT NULL,
+    relation TEXT NOT NULL, PRIMARY KEY(source_id,target_id,relation)
+);
+CREATE TABLE research_tasks(
+    id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, request_digest TEXT NOT NULL,
+    generation INTEGER NOT NULL, authority_revision INTEGER NOT NULL,
+    charter TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+    root TEXT NOT NULL, created REAL NOT NULL, ended REAL, result_source TEXT,
+    max_invocations INTEGER NOT NULL, max_credits_nano INTEGER NOT NULL,
+    wake_after INTEGER NOT NULL DEFAULT 0, integrated TEXT, artifacts TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX research_tasks_active ON research_tasks(state,generation,id);
+CREATE TABLE stop_episodes(
+    id TEXT PRIMARY KEY, generation INTEGER NOT NULL, proposal TEXT NOT NULL,
+    snapshot TEXT NOT NULL, basis TEXT NOT NULL, state TEXT NOT NULL, rounds INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '', result_source TEXT, created REAL NOT NULL
+);
+CREATE UNIQUE INDEX stop_episode_active ON stop_episodes(generation)
+    WHERE state IN ('pending','reflecting','reviewing','needs_operator');
 """
 
 

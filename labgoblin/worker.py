@@ -17,16 +17,20 @@ from labgoblin.state import State
 
 
 RUNTIME_FILES = (
-    "__init__.py", "protocol.py", "config.py", "db.py", "state.py", "evidence.py",
+    "__init__.py", "protocol.py", "config.py", "credits.py", "db.py", "state.py", "evidence.py",
     "processes.py", "scheduler.py", "worker.py", "backends.py", "payload.py",
-    "workspace.py", "agent.py", "agent_policy.py", "agent_worker.py",
+    "workspace.py", "agent.py", "agent_policy.py", "agent_worker.py", "copilot_worker.py",
     "journal.py", "results.py", "reporting.py", "dashboard_data.py", "dashboard_chat.py", "paths.py",
+    "research_memory.py", "research_tasks.py", "research_tools.py", "coaching.py", "briefing.py",
 )
 BOOTSTRAP = b"""from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from labgoblin.processes import bound_diagnostics
 bound_diagnostics()
+if sys.argv[1] == "--research-sdk":
+    from labgoblin.copilot_worker import main
+    raise SystemExit(main(sys.argv[2:]))
 if sys.argv[1] in ("--build-supervisor", "--build-api"):
     from labgoblin.backends import build_main
     raise SystemExit(build_main(sys.argv[1], sys.argv[2]))
@@ -57,9 +61,13 @@ def prepare_runtime(state: State, envelope: LaunchEnvelope, *, root: Path | None
     for name, body in bodies.items():
         publish_bytes(root / "labgoblin" / name, body)
     publish_bytes(root / "bootstrap.py", BOOTSTRAP)
-    return replace(envelope, metadata={**envelope.metadata, "runtime": {
+    frozen = replace(envelope, metadata={**envelope.metadata, "runtime": {
         "id": runtime_id, "root": str(root), **manifest,
     }})
+    if envelope.metadata.get("provider", {}).get("transport") == "sdk":
+        from labgoblin.agent import sdk_command
+        frozen = replace(frozen, argv=sdk_command(frozen, root))
+    return frozen
 
 
 def verify_runtime(state: State, envelope: LaunchEnvelope):

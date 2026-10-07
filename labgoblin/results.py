@@ -13,13 +13,21 @@ from labgoblin.protocol import canonical, identifier, integer
 
 COLUMNS = """a.id,a.generation,a.experiment_id,a.hypothesis_id,a.status,a.created,a.started,
     a.ended,a.exit_code,a.elapsed,a.gpu_hours,a.collection,a.validation,a.reason,a.collection_reason,
-    a.collection_event,h.statement,h.label,e.payload AS collection_payload"""
+    a.collection_event,a.scope_id,
+    COALESCE(json_extract(a.spec,'$.hypothesis_description'),h.statement) AS statement,
+    COALESCE(json_extract(a.spec,'$.purpose'),'support') AS purpose,
+    h.label,e.payload AS collection_payload"""
 JOINS = """FROM attempts a LEFT JOIN hypotheses h ON h.id=a.hypothesis_id
     LEFT JOIN events e ON e.id=a.collection_event"""
+HYPOTHESIS_FILTER = """(a.hypothesis_id=? OR EXISTS(SELECT 1 FROM attempt_research_refs ar
+    JOIN research_revisions rr ON rr.source_id=ar.source_id WHERE ar.attempt_id=a.id AND rr.record_id=?))"""
 
 
 def _project(conn, row) -> dict:
     result = dict(row)
+    result["research_refs"] = [dict(ref) for ref in conn.execute("""SELECT ar.source_id,rr.record_id,rr.version
+        FROM attempt_research_refs ar JOIN research_revisions rr ON rr.source_id=ar.source_id WHERE ar.attempt_id=?""",
+                                                              (result["id"],))]
     payload = result.pop("collection_payload")
     ids = json.loads(payload)["observation_ids"] if payload else []
     records = []
@@ -56,8 +64,8 @@ def page(db, *, generation=None, hypothesis_id=None, limit=25, offset=0) -> dict
         conditions.append("a.generation=?")
         params.append(generation)
     if hypothesis_id is not None:
-        conditions.append("a.hypothesis_id=?")
-        params.append(hypothesis_id)
+        conditions.append(HYPOTHESIS_FILTER)
+        params.extend((hypothesis_id, hypothesis_id))
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
     with db.read() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM attempts a{where}", params).fetchone()[0]
@@ -73,7 +81,9 @@ def hypothesis(db, hypothesis_id: str, *, limit=25, offset=0) -> dict:
         row = conn.execute("SELECT * FROM hypotheses WHERE id=?", (hypothesis_id,)).fetchone()
     if row is None:
         raise ValueError("Unknown hypothesis")
-    return {**dict(row), "metadata": json.loads(row["metadata"]),
+    with db.read() as conn:
+        record = conn.execute("SELECT head,version,activity FROM research_records WHERE id=?", (hypothesis_id,)).fetchone()
+    return {**dict(row), "metadata": json.loads(row["metadata"]), "published": dict(record) if record else None,
             "results": page(db, hypothesis_id=hypothesis_id, limit=limit, offset=offset)}
 
 
@@ -85,6 +95,7 @@ def export(db, target: Path, *, generation=None, max_bytes=256 * 1024 * 1024) ->
     fields = ["id", "generation", "experiment_id", "hypothesis_id", "statement", "status",
               "exit_code", "elapsed", "gpu_hours", "collection", "validation", "reason",
               "collection_reason", "collection_event", "observation_ids", "scientific_acceptance"]
+    fields.extend(("scope_id", "purpose", "research_refs"))
     count = size = 0
     try:
         with db.read() as conn, temporary.open("xb") as stream:
@@ -109,6 +120,8 @@ def export(db, target: Path, *, generation=None, max_bytes=256 * 1024 * 1024) ->
                     payload = data.pop("collection_payload")
                     data["observation_ids"] = json.dumps(json.loads(payload)["observation_ids"] if payload else [])
                     data["scientific_acceptance"] = "not_inferred"
+                    data["research_refs"] = json.dumps([ref[0] for ref in conn.execute(
+                        "SELECT source_id FROM attempt_research_refs WHERE attempt_id=?", (row["id"],))])
                     write(data)
                     count += 1
             stream.flush()

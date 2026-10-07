@@ -22,7 +22,7 @@ from labgoblin.protocol import (
 REQUEST_FIELDS = {
     "key", "runner", "argv", "cwd", "source_files", "cpus", "memory_mb", "gpus",
     "seconds", "environment", "experiment_id", "hypothesis_id", "hypothesis_description",
-    "artifacts", "validators", "input_validators", "hard_memory_limit",
+    "artifacts", "validators", "input_validators", "hard_memory_limit", "purpose", "research_refs",
 }
 
 
@@ -190,6 +190,7 @@ def submit(state, config, request: dict, *, turn_id: str | None = None) -> dict:
 def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
     request = dict(table(request, "work request", REQUEST_FIELDS))
     config, fence = state.configuration(config)
+    scope_id = "root"
     with state.db.read() as conn:
         campaign = conn.execute("SELECT generation,authority_revision FROM campaign").fetchone()
         generation = campaign["generation"]
@@ -197,24 +198,41 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
         source_refs = dict(conn.execute("SELECT name,source_id FROM source_heads WHERE name IN ('goal','protocol','rationale','summary')"))
         source_refs.update({f"directive:{r['id']}": r["source_id"] for r in _active_directives(conn, generation)})
         if turn_id:
-            owner = conn.execute("""SELECT t.generation,t.kind,t.state,p.content FROM turns t
+            owner = conn.execute("""SELECT t.generation,t.kind,t.state,t.scope_id,p.content FROM turns t
                 JOIN packets p ON p.id=t.packet_id WHERE t.id=?""", (turn_id,)).fetchone()
-            if (not owner or owner["generation"] != generation or owner["kind"] != "research"
+            if (not owner or owner["generation"] != generation or owner["kind"] not in ("research", "worker")
                     or owner["state"] not in ("prepared", "running")
-                    or not conn.execute("""SELECT 1 FROM invocations WHERE turn_id=? AND kind='research'
+                    or not conn.execute("""SELECT 1 FROM invocations WHERE turn_id=? AND kind IN ('research','worker')
                         AND state IN ('armed','running')""", (turn_id,)).fetchone()):
                 raise ValueError("Submission does not belong to a currently owned research turn")
             packet = json.loads(owner["content"])
+            scope_id = owner["scope_id"]
+            if scope_id != "root":
+                from labgoblin.research_tasks import assert_owned
+                task = assert_owned(conn, scope_id)
+                task_root = Path(task["root"]) / "work"
+                contained(task_root, config.root / request.get("cwd", "."))
+                for name in request.get("source_files", config.execution.source_files):
+                    contained(task_root, config.root / name)
+                remaining = task["created"] + json.loads(task["charter"])["max_seconds"] - time.time()
+                if request.get("seconds", 300) > remaining:
+                    raise ValueError("Experiment deadline exceeds its task's remaining time allowance")
             if packet.get("config_revision") != config.revision:
                 raise ValueError("Research turn configuration changed; return a handoff before submitting")
             if packet.get("authority_revision") != campaign["authority_revision"]:
                 raise ValueError("Governing authority changed since this research packet; return a handoff before submitting")
             source_refs = {name: value["id"] for name, value in packet["sources"].items()}
             source_refs.update({f"directive:{value['id']}": value["source_id"] for value in packet["directives"]})
-        previous = conn.execute("SELECT id,request_digest FROM attempts WHERE generation=? AND idempotency_key=?",
-                                 (generation, request.get("key"))).fetchone()
+        previous = conn.execute("SELECT id,request_digest FROM attempts WHERE generation=? AND scope_id=? AND idempotency_key=?",
+                                 (generation, scope_id, request.get("key"))).fetchone()
         hypothesis = conn.execute("SELECT statement FROM hypotheses WHERE id=?",
                                    (request.get("hypothesis_id"),)).fetchone()
+        from labgoblin.research_memory import validate_refs
+        research_refs = validate_refs(conn, request.get("research_refs", []), request.get("purpose", "support"))
+        if hypothesis:
+            published = conn.execute("SELECT head FROM research_records WHERE id=?", (request["hypothesis_id"],)).fetchone()
+            if published and published[0] not in research_refs:
+                research_refs = (*research_refs, published[0])
     if previous:
         if previous["request_digest"] != fingerprint(request):
             raise ValueError("Idempotency key already belongs to a different request")
@@ -223,9 +241,14 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
     if hypothesis and not effective.get("hypothesis_description"):
         effective["hypothesis_description"] = hypothesis["statement"]
     spec = prepare_spec(config, effective, owner_id=state.id)
+    if request.get("hypothesis_id") and not hypothesis:
+        state.hypothesis(request["hypothesis_id"], request["hypothesis_description"], turn_id=turn_id)
+        from labgoblin.research_memory import read
+        research_refs = (*research_refs, read(state, request["hypothesis_id"])["source_id"])
     spec["request"] = request
     spec.update(source_refs=source_refs, generation=generation,
-                authority_revision=campaign["authority_revision"], submitted_by=turn_id, configuration_fence=fence)
+                authority_revision=campaign["authority_revision"], submitted_by=turn_id, configuration_fence=fence,
+                scope_id=scope_id, research_refs=research_refs, purpose=request.get("purpose", "support"))
     publish_bytes(Path(spec["root"]) / "spec.json", canonical(spec))
     attempt_id = state.enqueue(spec)
     return state.attempt(attempt_id)
@@ -278,13 +301,19 @@ def prepare_envelope(state, config, attempt_id: str, grant: dict) -> LaunchEnvel
     execution = {**spec, "validators": [resolve(value) for value in spec["validators"]],
                  "input_validators": [resolve(value) for value in spec["input_validators"]]}
     path, ledger_id = state.ledger_identity()
+    task_deadline = None
+    if attempt["scope_id"] != "root":
+        from labgoblin.research_tasks import get
+        task = get(state, attempt["scope_id"])
+        task_deadline = task["created"] + task["charter"]["max_seconds"]
     return LaunchEnvelope(
         LaunchKey(state.id, attempt["generation"], attempt_id, grant["token"], identifier()), "attempt",
         tuple(resolve(spec["argv"])), spec["cwd"], spec["root"], str(state.path), str(path), ledger_id,
         spec["seconds"], Resources(spec["cpus"], spec["memory_mb"], tuple(spec["gpus"])),
         config.revision, spec["environment"],
         {"runner": runner, "cpu_ids": json.loads(grant["native_cpus"]) if runner["kind"] == "native" else None,
-         "execution": execution, "spec_digest": fingerprint(spec), "log_bytes": config.storage.log_bytes})
+         "execution": execution, "spec_digest": fingerprint(spec), "log_bytes": config.storage.log_bytes,
+         "task_deadline": task_deadline})
 
 
 def verify_sources(execution: dict):

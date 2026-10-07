@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-from labgoblin import agent, agent_worker, backends, briefing, journal, reporting, worker, workspace
+from labgoblin import agent, agent_worker, backends, briefing, credits, journal, reporting, worker, workspace
 from labgoblin.config import load_config
 from labgoblin.evidence import atomic_json, require_space
 from labgoblin.processes import own_handle, process_state
@@ -72,10 +72,16 @@ class Campaign:
         self.state.blocker(key, category, detail, work_id)
         errors.append({"category": category, "work_id": work_id, "error": detail})
 
-    def _turn(self):
+    def _turn(self, scope_id="root"):
         with self.state.db.read() as conn:
-            row = conn.execute("SELECT * FROM turns WHERE state IN ('prepared','running') LIMIT 1").fetchone()
+            row = conn.execute("SELECT * FROM turns WHERE scope_id=? AND state IN ('prepared','running') LIMIT 1",
+                               (scope_id,)).fetchone()
             return dict(row) if row else None
+
+    def _turns(self):
+        with self.state.db.read() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM turns WHERE state IN ('prepared','running') ORDER BY admission_order,id")]
 
     def _invocations(self, turn_id):
         with self.state.db.read() as conn:
@@ -98,6 +104,8 @@ class Campaign:
 
     def reconcile(self) -> dict:
         errors = []
+        from labgoblin.research_tasks import reconcile
+        reconcile(self.state)
         self._cancel_requests(errors)
         recovered = {"recovered": [], "unresolved": []}
         try:
@@ -125,9 +133,10 @@ class Campaign:
         return {**recovered, "collected": collected, "errors": errors}
 
     def _finish_turn(self, errors):
-        turn = self._turn()
-        if not turn:
-            return
+        for turn in self._turns():
+            self._finish_owned_turn(turn, errors)
+
+    def _finish_owned_turn(self, turn, errors):
         invocations = self._invocations(turn["id"])
         if not invocations or any(i["state"] in ("armed", "running", "uncertain", "reserved") for i in invocations):
             return
@@ -149,9 +158,10 @@ class Campaign:
         errors.append({"category": "provider_result", "work_id": turn["id"], "error": reason})
 
     def _retire_pending_turn(self, *, no_agent):
-        turn = self._turn()
-        if not turn:
-            return
+        for turn in self._turns():
+            self._retire_owned_turn(turn, no_agent=no_agent)
+
+    def _retire_owned_turn(self, turn, *, no_agent):
         if any(i["kind"] == turn["kind"] and i["state"] == "completed" for i in self._invocations(turn["id"])):
             return
         current = self.state.campaign()
@@ -159,6 +169,12 @@ class Campaign:
             explicit = conn.execute("SELECT 1 FROM maintenance WHERE turn_id=? AND origin='operator' AND state='running'",
                                     (turn["id"],)).fetchone()
         closed = not explicit and (current["generation_state"] != ("sealed" if turn["kind"] == "final_analysis" else "open"))
+        if turn["scope_id"] != "root":
+            from labgoblin.research_tasks import get, signal_cancel
+            task = get(self.state, turn["scope_id"])
+            closed = closed or task["state"] not in ("queued", "research", "waiting")
+            if closed or current["operator_mode"] in ("stopping", "stopped"):
+                signal_cancel(self.state, turn["scope_id"])
         with self.state.db.read() as conn:
             packet = json.loads(conn.execute("SELECT content FROM packets WHERE id=?", (turn["packet_id"],)).fetchone()[0])
         if (no_agent or current["operator_mode"] not in (("ready", "running", "stopped") if explicit else ("ready", "running"))
@@ -222,7 +238,7 @@ class Campaign:
             return None
         grant = self._grant(turn["id"], turn["kind"], self.config.agent.resources, native=True)
         if self.adapter_revision != self.config.revision:
-            self.adapter = agent.inspect_provider(self.config.agent)
+            self.adapter = agent.inspect_provider(self.config.agent, max_ai_credits=self.config.campaign.max_ai_credits)
             self.adapter_revision = self.config.revision
         envelope = agent.prepare(self.state, self.config, turn["id"], invocation["id"], grant, adapter=self.adapter)
         return worker.start(self.state, envelope)
@@ -292,7 +308,10 @@ class Campaign:
                 elapsed, calls = budget["elapsed_admission_seconds"], budget["managed_invocations"]
                 no_time = not elapsed["unlimited"] and elapsed["remaining"] == 0
                 no_calls = not calls["unlimited"] and calls["remaining"] < (2 if settings["agent"]["sandbox"] else 1)
-                if no_agent or no_time or no_calls:
+                credit = budget["ai_credits"]
+                no_credits = not credit["unlimited"] and (credit["uncovered_unknown"] or
+                    credit["remaining_nano"] < credits.MIN_SESSION * (2 if settings["agent"]["sandbox"] else 1))
+                if no_agent or no_time or no_calls or no_credits:
                     reason = "Final analysis disabled by no-agent policy" if no_agent else "No final-analysis admission allowance remains"
                     self.state.close_generation(view["id"], "unassessed", reason)
                 elif admit:
@@ -354,6 +373,11 @@ class Campaign:
         self._retire_pending_turn(no_agent=no_agent)
         self.state.converge_stop()
         budget = self.state.budget()
+        if not budget["ai_credits"]["unlimited"] and budget["ai_credits"]["uncovered_unknown"]:
+            self._error(errors, "credit-accounting", "budget",
+                        ValueError("AI credit usage is unknown; further admission is blocked"))
+        else:
+            self.state.resolve_blocker("credit-accounting")
         allowance = budget["managed_invocations"]
         if allowance["unlimited"] or allowance["remaining"] >= 2 * config.agent.invocation_bundle:
             self.state.resolve_blocker("invocation-budget")
@@ -368,6 +392,24 @@ class Campaign:
         current = self.state.campaign()
         if admit and not current["blockers"]:
             turn = self._turn()
+            if not no_agent and current["generation_state"] == "open":
+                from labgoblin import coaching, research_tasks
+                if turn is None:
+                    with self.state.db.read() as conn:
+                        episode = coaching.pending(conn)
+                    if episode and episode["state"] == "pending":
+                        try:
+                            briefing.prepare(self.state, "coach")
+                            turn = self._turn()
+                        except ERRORS as error:
+                            self._error(errors, "coaching-preparation", "coaching", error)
+                free = config.research.max_parallel_agents - len(self._turns())
+                for scope_id in research_tasks.ready(self.state)[:max(0, free)]:
+                    try:
+                        briefing.prepare(self.state, "worker", scope_id=scope_id)
+                    except ERRORS as error:
+                        research_tasks.cancel(self.state, scope_id, f"Task preparation failed: {error}")
+                        errors.append({"category": "task_preparation", "work_id": scope_id, "error": str(error)})
             if not no_agent and turn is None and current["generation_state"] != "sealed":
                 journal.automatic_compaction(self.state)
                 maintenance = self.state.pending_maintenance()
@@ -386,7 +428,11 @@ class Campaign:
                         errors.append({"category": "maintenance", "work_id": maintenance["id"], "error": str(error)})
             if not no_agent and turn is None and current["generation_state"] == "open" and self.state.reasoning_due():
                 try:
-                    briefing.prepare(self.state)
+                    with self.state.db.read() as conn:
+                        reflection = conn.execute("""SELECT 1 FROM events WHERE scope_id='root'
+                            AND kind='reflection' AND acknowledged_by IS NULL AND seq>?""",
+                                                  (current["wake_after"],)).fetchone()
+                    briefing.prepare(self.state, "reflection" if reflection else "research")
                     turn = self._turn()
                 except ERRORS as error:
                     self._error(errors, "packet", "packet", error)
@@ -396,8 +442,8 @@ class Campaign:
             choices = []
             if attempt and current["generation_state"] == "open":
                 choices.append((attempt["admission_order"], "attempt", dict(attempt)))
-            if turn and not no_agent:
-                choices.append((turn["admission_order"], "turn", turn))
+            if not no_agent:
+                choices.extend((candidate["admission_order"], "turn", candidate) for candidate in self._turns())
             for _, kind, work in sorted(choices, key=lambda item: item[0]):
                 try:
                     launched = self._launch_attempt(work) if kind == "attempt" else self._launch_turn(work)
@@ -414,7 +460,10 @@ class Campaign:
                             with self.state.db.read() as conn:
                                 view_id = conn.execute("SELECT view_id FROM generations WHERE id=?", (current["generation"],)).fetchone()[0]
                             self.state.close_generation(view_id, "unassessed", str(error))
-                    if current["generation_state"] == "open" and (error.dimension == "elapsed"
+                    if kind == "turn" and work["scope_id"] != "root" and error.dimension in ("task_invocations", "task_time", "ai_credits"):
+                        waiting.append({"work_id": work["id"], "reason": str(error)})
+                        continue
+                    if current["generation_state"] == "open" and (error.dimension in ("elapsed", "ai_credits")
                             or (error.dimension == "invocations" and self.state.campaign()["invocations"])):
                         self.state.close_admission(str(error))
                     elif error.dimension == "gpu_hours":
@@ -499,9 +548,11 @@ class Campaign:
                         settling = conn.execute("""SELECT 1 FROM attempts WHERE collection='pending'
                             AND status IN ('completed','failed','cancelled','timed_out','interrupted','not_started') LIMIT 1""").fetchone()
                         settling = settling or conn.execute("SELECT 1 FROM allocations WHERE state='release_pending' LIMIT 1").fetchone()
-                    if current["blockers"] or (not live and not self._turn() and not settling and (current["operator_mode"] != "running"
+                        tasks = conn.execute("""SELECT 1 FROM research_tasks WHERE state IN ('queued','research','waiting')
+                            AND generation=? LIMIT 1""", (current["generation"],)).fetchone()
+                    if current["blockers"] or (not live and not self._turns() and not settling and (current["operator_mode"] != "running"
                                      or current["generation_state"] == "closed"
-                                     or (not queued and (no_agent or (not self.state.reasoning_due() and not maintenance))))):
+                                     or (not queued and (no_agent or (not tasks and not self.state.reasoning_due() and not maintenance))))):
                         return result
                     time.sleep(poll_seconds)
             except KeyboardInterrupt:

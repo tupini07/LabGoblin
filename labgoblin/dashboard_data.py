@@ -51,6 +51,11 @@ def _source(path: str, label: str, **params) -> dict:
 
 
 TOOLS = {
+    "research_workspace": ("Read published research records or one exact revision, never mutable drafts.", {
+        "id": {"type": "string", "maxLength": 128}, "query": {"type": "string", "maxLength": 256},
+        "offset": {"type": "integer", "minimum": 0},
+    }),
+    "research_scopes": ("Read bounded worker/task and stopping-review state; cannot control either.", {}),
     "campaign_status": ("Read fresh recorded campaign state, budgets and experiment counts.", {}),
     "list_experiments": ("Find recent experiments by status or name. Returns at most 20 records.", {
         "status": {"type": "string", "maxLength": 40},
@@ -72,7 +77,7 @@ TOOLS = {
         "id": {"type": "string", "maxLength": 128},
         "offset": {"type": "integer", "minimum": 0},
     }),
-    "hypothesis_detail": ("Read an immutable evaluated claim and bounded experiment history, including the complete denominator.", {
+    "hypothesis_detail": ("Read the current claim and version-pinned experiment history, including the complete denominator.", {
         "id": {"type": "string", "maxLength": 256},
         "offset": {"type": "integer", "minimum": 0},
     }),
@@ -91,7 +96,9 @@ TOOL_REQUIRED = {
     "get_experiment": ["id"], "research_document": ["document"], "archive_search": ["query"],
     "source_entry": ["id"], "hypothesis_detail": ["id"], "source_view": ["id"], "evidence_observation": ["id"],
 }
-RESEARCH_SOURCES = {"goal", "protocol", "handoff", "journal_import", "summary", "directive"}
+RESEARCH_SOURCES = {"goal", "protocol", "handoff", "journal_import", "summary", "directive",
+                    "research_record", "worker_handoff", "coaching", "coaching_resolution",
+                    "task_charter", "task_message", "task_amendment", "task_integration"}
 FAILED = ("failed", "timed_out", "interrupted", "not_started")
 ATTENTION = "(a.status IN ('failed','timed_out','interrupted','not_started','recovery_required') OR a.validation='invalid' OR a.collection='failed')"
 
@@ -112,8 +119,8 @@ def attempt_filter(status="", needle="", hypothesis="", generation=None):
         where.append("(instr(lower(a.experiment_id),lower(?))>0 OR instr(lower(a.id),lower(?))>0)")
         args.extend((needle, needle))
     if hypothesis:
-        where.append("a.hypothesis_id=?")
-        args.append(hypothesis)
+        where.append(results.HYPOTHESIS_FILTER)
+        args.extend((hypothesis, hypothesis))
     if generation is not None:
         where.append("a.generation=?")
         args.append(generation)
@@ -133,6 +140,9 @@ def snapshot(state, conn):
     changes["turns"] = [tuple(row) for row in conn.execute(
         "SELECT state,COUNT(*) FROM turns GROUP BY state")]
     changes["reports"] = tuple(conn.execute("SELECT COUNT(*),MAX(created) FROM reports").fetchone())
+    changes["research"] = tuple(conn.execute("SELECT COUNT(*),MAX(updated) FROM research_records").fetchone())
+    changes["tasks"] = [tuple(row) for row in conn.execute("SELECT id,state,integrated FROM research_tasks")]
+    changes["coaching"] = [tuple(row) for row in conn.execute("SELECT id,state,rounds FROM stop_episodes")]
     return {
         "campaign": current,
         "budget": state.budget(now, connection=conn),
@@ -260,7 +270,7 @@ def question_context(value):
             raise ValueError(f"Dashboard context {key} is outside its supported range")
     if "url" in value:
         target = urllib.parse.urlsplit(value["url"])
-        allowed = {"/", "/evidence", "/work", "/history", "/jobs", "/job", "/hypotheses", "/hypothesis",
+        allowed = {"/", "/evidence", "/work", "/monitor", "/history", "/jobs", "/job", "/hypotheses", "/hypothesis",
                    "/activity", "/turn", "/artifacts", "/observation", "/reports", "/report", "/view",
                    "/resources", "/journal", "/goal", "/debug", "/changes", "/compare"}
         if target.scheme or target.netloc or target.path not in allowed or "\\" in value["url"]:
@@ -303,7 +313,25 @@ class EvidenceReader:
             raise ValueError("Choose journal or goal")
         db = self.state.db
         sources = []
-        if name == "campaign_status":
+        if name == "research_workspace":
+            from labgoblin import research_memory
+            if arguments.get("id"):
+                data = research_memory.read(self.state, arguments["id"])
+                sources.append(_source("/research", "Exact research revision", id=data["source_id"]))
+            else:
+                data = research_memory.index(self.state, query=arguments.get("query", ""),
+                                             offset=arguments.get("offset", 0), limit=10)
+                sources.append(_source("/research", "Published research workspace"))
+        elif name == "research_scopes":
+            with db.read() as conn:
+                data = {"tasks": [dict(row) for row in conn.execute("""SELECT id,state,substr(reason,1,500) AS reason,result_source,
+                            json_extract(integrated,'$.state') AS integration_state
+                            FROM research_tasks ORDER BY created DESC LIMIT 20""")],
+                        "coaching": [dict(row) for row in conn.execute("""SELECT id,state,rounds,substr(reason,1,500) AS reason,result_source
+                            FROM stop_episodes ORDER BY created DESC LIMIT 10""")],
+                        "coverage": "Latest twenty tasks and ten stopping episodes; no commands or mutable files"}
+            sources.append(_source("/tasks", "Tasks and coaching"))
+        elif name == "campaign_status":
             current = self.state.campaign()
             with db.read() as conn:
                 settings = json.loads(conn.execute("SELECT content FROM configs WHERE id=?", (current["config_revision"],)).fetchone()[0])

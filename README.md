@@ -14,8 +14,9 @@ not a drop-in replacement for the original SLURM harness.** This independently
 developed local-runtime edition lives at [tupini07/LabGoblin](https://github.com/tupini07/LabGoblin).
 Original authorship, MIT copyright and historical reports remain credited below.
 
-**Version 2 is a clean break.** Configuration, campaign state, the machine ledger
-and worker protocol use schema 3. Old formats are rejected, not migrated.
+**Fresh campaigns use configuration and campaign schema 4.** The shared machine
+ledger and frozen-worker protocol remain at version 3. Old campaign formats are
+rejected, not migrated; retain their compatible installation to inspect them.
 Cluster/SSH/SBATCH/Singularity operations are removed. Never replace an old
 machine ledger while its workers might still be running; establish quiescence
 with the old installation before setting up a fresh runtime.
@@ -78,12 +79,38 @@ The generated agent allowance is a starter estimate, not a measured provider
 requirement. Existing incompatible ledgers block admission rather than hiding
 older reservations behind a new file.
 
+The [research workspace and coaching guide](docs/research-loop.md) describes
+revisable hypotheses, unlinked knowledge, explicit reflection and optional flat
+worker tasks. Coaching challenges premature stopping without choosing scientific
+methods. Coaching and delegation are opt-in, share campaign budgets, and do not
+enable recursive managers or change existing campaigns.
+
 The starter campaign limits are **one hour and ten managed provider invocations**.
 For a long investigation, review them deliberately. `max_seconds = 0` and
 `max_invocations = 0` mean unlimited admission time and unlimited managed
 invocations respectively; no other zero means unlimited. Every operation still
 has a finite deadline, and an open generation reserves its final analysis.
 Managed invocations are not API-call, token, or spending caps.
+
+Research turns default to a **30-minute hard deadline**. Copilot research uses
+the local CLI through its SDK, recording response/tool activity and partial
+credit checkpoints. In-progress responses and tools are not mistaken for idle
+sessions; a bounded shutdown grace captures final usage before forced termination.
+Activity never extends the hard limit. Claude retains the CLI transport.
+
+For Copilot, set `campaign.max_ai_credits = 1000` to bound cumulative research
+usage with a **soft credit cap**. New configs expose this as `"unlimited"` until
+you choose a limit. Values must be at least 30 credits; `0` is not unlimited here.
+Usage survives restarts and reopening, includes retries/maintenance/final analysis,
+and reserves final-analysis allowance. In-flight responses can overshoot.
+Missing usage blocks capped inference by default rather than counting as zero.
+Recovered final usage can be appended with the operator-only `reconcile-credits`
+command; partial usage cannot clear an unknown record or rewrite a receipt.
+If final usage cannot be recovered, an operator can explicitly approve a separate
+`estimate-credits` budget charge. It counts against the existing cap but remains
+labeled as estimated, never verified usage; the remaining allowance is approximate.
+`dashboard.chat.max_ai_credits` is a separate campaign-scoped chat allowance,
+also retained across dashboard restarts. Setup remains outside both allowances.
 
 **All TOML changes require restarting the controller, including budgets.**
 A run loads one snapshot; separate-process submissions use that snapshot too.

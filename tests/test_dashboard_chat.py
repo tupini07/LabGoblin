@@ -8,12 +8,14 @@ import re
 import sys
 import threading
 import time
+import tomllib
 from types import SimpleNamespace
 import urllib.error
 import urllib.request
 import uuid
 
 import pytest
+import tomli_w
 
 from labgoblin.paths import environment_value
 
@@ -87,7 +89,9 @@ def test_settings_are_enabled_by_default_and_validated(campaign):
     assert load_chat_settings(str(path)).enabled
     assert load_chat_settings(str(path), enabled=True).enabled
     assert not load_chat_settings(str(path), enabled=False).enabled
-    original = path.read_text(encoding="utf-8")
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    raw.pop("dashboard", None)
+    original = tomli_w.dumps(raw)
     path.write_text(original + '\n[dashboard.chat]\nenabled = true\nmodel = "test-model"\nreasoning_effort = "high"\n',
                     encoding="utf-8")
     settings = load_chat_settings(str(path))
@@ -104,8 +108,9 @@ def test_settings_are_enabled_by_default_and_validated(campaign):
 def test_chat_flag_overrides_configured_choice(campaign, configured, override):
     path = Path(campaign.config.config_path)
     if configured is not None:
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write("\n[dashboard.chat]\nenabled = " + str(configured).lower() + "\n")
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        raw.setdefault("dashboard", {}).setdefault("chat", {})["enabled"] = configured
+        path.write_text(tomli_w.dumps(raw), encoding="utf-8")
     expected = override if override is not None else configured if configured is not None else True
     assert load_chat_settings(str(path), enabled=override).enabled is expected
 
@@ -579,8 +584,9 @@ def test_browser_chat_maximize_preserves_reading_and_conversation(campaign, tmp_
             browser.close()
 
 
+@pytest.mark.parametrize("max_ai_credits", [None, 100])
 @pytest.mark.parametrize("failure", ["", "startup", "answer", "abort", "disconnect", "delete", "stop"])
-def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
+def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure, max_ai_credits):
     copilot = pytest.importorskip("copilot")
     from copilot.generated.rpc import PermissionDecisionDeniedByRules
     captures = {}
@@ -588,11 +594,19 @@ def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
     class Session:
         session_id = "owned-observer-session"
 
+        def __init__(self):
+            self.rpc = SimpleNamespace(usage=SimpleNamespace(get_metrics=self.metrics))
+
+        async def metrics(self):
+            value = 14_244_520_000 if captures.get("sent") else 0
+            return SimpleNamespace(to_dict=lambda: {"totalNanoAiu": value})
+
         def on(self, callback):
             captures["callback"] = callback
 
         async def send_and_wait(self, prompt, **kwargs):
             assert "Fresh read-only campaign snapshot" in prompt
+            captures["sent"] = True
             if failure in ("answer", "abort"):
                 raise RuntimeError("Answer failed")
             captures["callback"](SimpleNamespace(
@@ -643,7 +657,7 @@ def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
     if failure:
         with pytest.raises(RuntimeError):
             asyncio.run(_SDKSession().answer(
-                ChatSettings(cli_path=sys.executable), EvidenceReader(campaign.config.config_path),
+                ChatSettings(cli_path=sys.executable, max_ai_credits=max_ai_credits), EvidenceReader(campaign.config.config_path),
                 "Why?", lambda *args: None))
         assert captures["stopped"]
         if failure != "startup":
@@ -652,11 +666,13 @@ def test_sdk_session_policy_and_cleanup(campaign, monkeypatch, failure):
             assert captures["forced"]
         return
     result = asyncio.run(_SDKSession().answer(
-        ChatSettings(cli_path=sys.executable), EvidenceReader(campaign.config.config_path), "Why?",
+        ChatSettings(cli_path=sys.executable, max_ai_credits=max_ai_credits), EvidenceReader(campaign.config.config_path), "Why?",
         lambda kind, value: events.append((kind, value))))
     json.dumps(events)
     assert result == "Read-only answer"
     options = captures["session"]
+    assert options["session_limits"] == (None if max_ai_credits is None else {"max_ai_credits": max_ai_credits})
+    assert ("credit_usage", {"totalNanoAiu": 14_244_520_000}) in events
     assert captures["client"]["mode"] == "empty"
     assert set(options["available_tools"].to_list()) == {"custom:" + name for name in TOOLS}
     for name in ("enable_config_discovery", "enable_file_hooks", "enable_host_git_operations",

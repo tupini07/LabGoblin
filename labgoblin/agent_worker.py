@@ -28,7 +28,7 @@ def read_result(state, turn_id: str) -> dict:
     result = parse_json(capture.body)
     if not isinstance(result, dict) or result.get("turn_id") != turn_id or result.get("packet_id") != turn["packet_id"]:
         raise ValueError("Provider result does not belong to its exact turn and packet")
-    if turn["kind"] in ("research", "final_analysis"):
+    if turn["kind"] in ("research", "reflection", "worker", "final_analysis"):
         Handoff.parse(result)
     return {"content": result, "bytes": capture.body, "digest": capture.digest,
             "invocation_id": row["id"], "provider_receipt": receipt}
@@ -43,6 +43,9 @@ def accept_result(state, turn_id: str) -> dict:
     elif kind == "report":
         from labgoblin.reporting import publish_report
         publish_report(state, value["content"].get("view_id"), value=value["content"], invocation_id=value["invocation_id"])
+    elif kind == "coach":
+        from labgoblin.coaching import accept
+        accept(state, value["content"], invocation_id=value["invocation_id"])
     else:
         state.accept_handoff(Handoff.parse(value["content"]), invocation_id=value["invocation_id"])
     return value["content"]

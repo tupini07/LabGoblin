@@ -54,13 +54,14 @@ def test_every_toml_category_stays_loaded_until_new_controller_run(tmp_path):
         raw["storage"] = {"capture_bytes": 512000, "log_bytes": 1024}
         raw["agent"].update(model="changed-model", reasoning_effort="high", timeout_seconds=30, retries=2)
         raw["campaign"].update(cpus=1, memory_mb=3072, max_jobs=2, max_gpu_hours=4,
-                               max_seconds=0, max_invocations=0, gpus=["GPU-declared"])
+                               max_seconds=0, max_invocations=0, gpus=["GPU-declared"], max_ai_credits=1000)
         raw["dashboard"] = {"chat": {"model": "changed-observer", "enabled": False}}
         Path(original.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
         candidate = load_config(original.config_path)
         controller.step(no_agent=True, admit=False)
         assert state.configuration()[0] == original
         assert state.budget()["managed_invocations"]["configured"] == 10
+        assert state.budget()["ai_credits"]["unlimited"]
         assert controller.config == original
         Path(original.config_path).write_text("bad [TOML", encoding="utf-8")
         assert not controller.step(no_agent=True, admit=False)["errors"]
@@ -74,6 +75,7 @@ def test_every_toml_category_stays_loaded_until_new_controller_run(tmp_path):
         assert state.configuration()[0] == candidate
         assert state.budget()["managed_invocations"]["unlimited"]
         assert state.budget()["elapsed_admission_seconds"]["unlimited"]
+        assert state.budget()["ai_credits"]["configured"] == 1000
         assert controller.config == candidate
 
 

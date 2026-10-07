@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import uuid
 
 from labgoblin.config import ChatSettings, parse_chat_settings
+from labgoblin import credits
 from labgoblin.dashboard_data import EvidenceReader, TOOLS, TOOL_REQUIRED, observed_at, question_context
 from labgoblin.evidence import atomic_json, publish_bytes, read_bytes, read_json
 from labgoblin.processes import background_options, own_handle, unlink_file
@@ -141,6 +142,8 @@ class _SDKSession:
                     session_id="labgoblin-observer-" + uuid.uuid4().hex,
                     model=settings.model, reasoning_effort=settings.reasoning_effort or None,
                     available_tools=allowed, tools=tools, streaming=True,
+                    session_limits=({"max_ai_credits": settings.max_ai_credits}
+                                    if settings.max_ai_credits is not None else None),
                     system_message={"mode": "replace", "content": SYSTEM_MESSAGE},
                     on_permission_request=lambda request, context: PermissionDecisionDeniedByRules(rules=[]),
                     hooks={"on_pre_tool_use": guard},
@@ -162,7 +165,15 @@ class _SDKSession:
                                        "output_tokens": data.output_tokens, "id": str(event.id)})
 
                 session.on(on_event)
+                if settings.max_ai_credits is not None:
+                    metrics = await asyncio.wait_for(session.rpc.usage.get_metrics(), 10)
+                    if credits.usage_nano(metrics.to_dict()) != 0:
+                        raise RuntimeError("Fresh observer session has unexpected prior credit usage")
                 result = await session.send_and_wait(prompt, timeout=settings.timeout_seconds)
+                metrics = await asyncio.wait_for(session.rpc.usage.get_metrics(), 10)
+                usage = metrics.to_dict()
+                credits.usage_nano(usage)
+                emit("credit_usage", usage)
                 if result is None or not result.data.content:
                     raise RuntimeError("Copilot finished without an answer")
                 if len(result.data.content) > MAX_RESPONSE:
@@ -195,15 +206,20 @@ class SDKObserver:
     def __init__(self):
         self.id = uuid.uuid4().hex
         self.ledger = None
+        self.campaign_id = None
 
     def connect(self, reader):
         path, identity = reader.state.ledger_identity()
         self.ledger = ResourceLedger(path, expected_id=identity or None)
         self.ledger.capacity()
+        self.campaign_id = reader.state.id
         return self.ledger
 
-    def usage(self):
-        return self.ledger.observer_usage(self.id) if self.ledger else {"committed": 0, "phases": {}}
+    def usage(self, max_ai_credits=None):
+        if not self.ledger:
+            return {"committed": 0, "phases": {}}
+        return {**self.ledger.observer_usage(self.id),
+                "ai_credits": self.ledger.observer_credit_budget(self.campaign_id, max_ai_credits)}
 
     async def answer(self, settings, reader, prompt, emit):
         from labgoblin.worker import prepare_runtime
@@ -250,13 +266,18 @@ class SDKObserver:
                 emit("status", {"text": grant["reason"] or "Waiting for machine capacity"})
                 await asyncio.sleep(0.25)
             directory.mkdir(parents=True, exist_ok=False)
-            publish_bytes(directory / "request.json", canonical({
-                "settings": asdict(settings), "config_path": reader.config_path, "prompt": prompt}))
+            allowance = credits.available(ledger.observer_credit_budget(reader.state.id, settings.max_ai_credits))
+            request = {
+                "settings": asdict(replace(settings, max_ai_credits=None if allowance is None else allowance / credits.NANO)),
+                "config_path": reader.config_path, "prompt": prompt}
+            publish_bytes(directory / "request.json", canonical(request))
             envelope = LaunchEnvelope(
                 LaunchKey(self.id, 1, token, token, token), "observer", (sys.executable,),
                 str(directory), str(directory), str(reader.state.path), str(ledger.path), ledger.id,
                 settings.timeout_seconds, resources, fingerprint(asdict(settings)),
-                metadata={"cpu_ids": json.loads(grant["native_cpus"]), "sdk_version": SDK_VERSION})
+                metadata={"cpu_ids": json.loads(grant["native_cpus"]), "sdk_version": SDK_VERSION,
+                          "max_ai_credits": settings.max_ai_credits, "credit_allowance_nano": allowance,
+                          "credit_campaign_id": reader.state.id, "request_digest": fingerprint(request)})
             envelope = prepare_runtime(reader.state, envelope, root=directory.parent)
             bootstrap = Path(envelope.metadata["runtime"]["root"]) / "bootstrap.py"
             envelope = replace(envelope, argv=(sys.executable, "-I", "-B", str(bootstrap),
@@ -313,6 +334,9 @@ def worker_main(mode, path):
         with (directory / "events.jsonl").open("xb", buffering=0) as stream:
             def emit(kind, value):
                 nonlocal total
+                if kind == "credit_usage":
+                    credits.usage_nano(value)
+                    atomic_json(directory / "usage.json", value)
                 line = canonical({"kind": kind, "value": value}) + b"\n"
                 total += len(line)
                 if total > 2 * 1024 * 1024:
@@ -321,6 +345,9 @@ def worker_main(mode, path):
 
             try:
                 request = read_json(request_path, 128 * 1024)
+                envelope = LaunchEnvelope.parse(read_json(directory / "envelope.json"))
+                if fingerprint(request) != envelope.metadata["request_digest"]:
+                    raise ValueError("Observer request changed after credit authorization")
                 if importlib.metadata.version("github-copilot-sdk") != SDK_VERSION:
                     raise RuntimeError("Observer SDK version differs from the frozen adapter")
                 result = asyncio.run(_SDKSession().answer(
@@ -346,7 +373,20 @@ def worker_main(mode, path):
             "token": envelope.key.nonce, "cancel_path": str(Path(envelope.root) / "cancel.json"),
             "cpus": envelope.resources.cpus, "memory_mb": envelope.resources.memory_mb,
             "gpus": [], "seconds": envelope.timeout_seconds, "log_bytes": 65536,
-            "cpu_ids": envelope.metadata["cpu_ids"], "provider": "copilot"})
+            "cpu_ids": envelope.metadata["cpu_ids"], "provider": "copilot"}, publish_receipt=False)
+        usage = None
+        metadata = {**receipt.metadata, "usage_status": "unavailable"}
+        usage_path = Path(envelope.root) / "usage.json"
+        if usage_path.exists():
+            try:
+                usage = read_json(usage_path, 256 * 1024)
+                credits.usage_nano(usage)
+                metadata["usage_status"] = "recorded"
+            except (OSError, ValueError) as error:
+                usage = None
+                metadata.update(usage_status="invalid", usage_error=_safe_error(error))
+        receipt = replace(receipt, usage=usage, metadata=metadata)
+        publish_bytes(Path(envelope.root) / "backend-receipt.json", canonical(asdict(receipt)))
         ledger.finish_consumer(receipt)
         return 0 if receipt.status == "completed" else 1
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
@@ -396,18 +436,22 @@ class ObserverService:
                 capacity = ledger.capacity()
                 if self.settings.cpus > capacity["cpus"] or self.settings.memory_mb > capacity["memory_mb"]:
                     reason = "Observer resource allowance exceeds the configured machine capacity."
-                elif self.driver.usage()["committed"] >= self.settings.max_invocations:
+                elif self.driver.usage(self.settings.max_ai_credits)["committed"] >= self.settings.max_invocations:
                     reason = "This dashboard's observer invocation allowance is exhausted."
+                else:
+                    credits.available(self.driver.usage(self.settings.max_ai_credits)["ai_credits"])
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 reason = "Observer machine admission is unavailable: " + _safe_error(error)
         return {"enabled": self.settings.enabled, "ready": not reason, "reason": reason,
                 "model": self.settings.model, "reasoning_effort": self.settings.reasoning_effort,
                 "timeout_seconds": self.settings.timeout_seconds, "max_questions": MAX_QUESTIONS,
                 "max_invocations": self.settings.max_invocations,
-                "usage": self.driver.usage() if isinstance(self.driver, SDKObserver) else {"committed": 0},
+                "max_ai_credits": self.settings.max_ai_credits,
+                "usage": self.driver.usage(self.settings.max_ai_credits) if isinstance(self.driver, SDKObserver) else {"committed": 0},
                 "notice": "On demand; uses your Copilot service. Shares operational summaries and journal/goal text, "
                           "not raw logs, datasets or artifact bodies. No steering or campaign edits. "
-                          "Chat usage is separate from research turns; it is not free or a hard spending cap."}
+                          "Chat credit allowance is separate from research and persists across dashboard restarts. "
+                          "Credits are a post-response soft cap, not a hard billing ceiling."}
 
     def send(self, conversation_id: str, request_id: str, message: str, *, context=None) -> dict:
         if not isinstance(message, str) or not message.strip() or len(message) > 4000:
@@ -514,6 +558,8 @@ class ObserverService:
                         entry["status"] = "Reading " + value["name"].replace("_", " ")
                     elif kind == "status":
                         entry["status"] = value["text"]
+                    elif kind == "credit_usage":
+                        entry["ai_credits"] = credits.usage_nano(value) / credits.NANO
                     elif kind == "limit":
                         entry["error"] = value["error"]
                         self.cancel_event.set()

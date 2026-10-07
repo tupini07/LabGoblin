@@ -254,6 +254,10 @@ def run_process(spec):
     cancel = Path(spec["cancel_path"])
     atomic_json(root / "payload-handle.json", {**identity(), "token": token})
     started = time.monotonic()
+    deadline = started + spec["seconds"]
+    task_deadline = spec.get("envelope", {}).get("metadata", {}).get("task_deadline")
+    if task_deadline is not None:
+        deadline = min(deadline, started + number(task_deadline, "task deadline") - time.time())
     process = None
     streams = []
     code = None
@@ -262,9 +266,13 @@ def run_process(spec):
     status, reason = "not_started", "Payload was not started"
     stream_stats = {}
     previous_affinity = None
+    cooperative = spec.get("envelope", {}).get("metadata", {}).get("provider", {}).get("transport") == "sdk"
+    cancel_started = None
     try:
         if cancel.exists():
             status, reason = "cancelled", "Cancellation requested before payload start"
+        elif deadline <= time.monotonic():
+            status, reason = "timed_out", "Task deadline expired before payload start"
         else:
             if os.name != "nt":
                 if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
@@ -280,6 +288,8 @@ def run_process(spec):
             for name in ("stdout", "stderr"):
                 streams.append(BoundedSpool(root / f"{name}.log", spec["log_bytes"]))
             env = process_environment(spec)
+            if cooperative:
+                env["LABGOBLIN_OPERATION_DEADLINE"] = str(deadline)
             if os.name == "nt":
                 process = WindowsPayload(command, spec["cwd"], env,
                                          streams[0].writer, streams[1].writer, spec)
@@ -306,9 +316,13 @@ def run_process(spec):
                     "observed_memory_mb": memory,
                 })
                 if cancel.exists():
-                    status, reason = "cancelled", "Cancellation requested"
-                    break
-                if time.monotonic() - started >= spec["seconds"]:
+                    if cancel_started is None:
+                        cancel_started = time.monotonic()
+                    grace = spec["envelope"]["metadata"].get("shutdown_grace_seconds", 0) if cooperative else 0
+                    if time.monotonic() - cancel_started >= grace:
+                        status, reason = "cancelled", "Cancellation requested; shutdown grace expired"
+                        break
+                if time.monotonic() >= deadline:
                     status, reason = "timed_out", "Operation deadline exceeded"
                     break
                 if os.name != "nt" and memory > spec["memory_mb"]:

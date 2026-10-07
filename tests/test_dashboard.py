@@ -90,7 +90,7 @@ def test_log_tail_preserves_long_single_lines(tmp_path):
 def test_all_empty_routes_local_assets_and_broken_current_config_are_read_only(campaign):
     before = dump(campaign.state)
     with serve(campaign.config.config_path) as base:
-        for path in ("/", "/jobs", "/hypotheses", "/activity", "/artifacts", "/reports", "/resources", "/journal", "/goal", "/debug"):
+        for path in ("/", "/monitor", "/research", "/tasks", "/jobs", "/hypotheses", "/activity", "/artifacts", "/reports", "/resources", "/journal", "/goal", "/debug"):
             status, headers, body = get(base, path)
             assert status == 200, (path, body.decode())
             assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]

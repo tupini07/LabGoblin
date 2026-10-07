@@ -9,6 +9,7 @@ import sqlite3
 import time
 
 from labgoblin.db import connection
+from labgoblin import credits
 from labgoblin.paths import machine_ledger_path
 from labgoblin.protocol import LEDGER_VERSION, Resources, canonical, fingerprint, identifier, integer, require_version, text
 
@@ -343,6 +344,15 @@ class ResourceLedger:
                     WHERE g.owner_id=? AND g.kind='observer'""", (key.campaign_id,)).fetchone()[0]
                 if used >= max_invocations:
                     raise ValueError("Dashboard observer invocation allowance exhausted; no automatic retries")
+                limit = envelope.metadata.get("max_ai_credits")
+                campaign_id = json.loads(grant["owner"]).get("campaign_id")
+                if limit is not None:
+                    credits.parse_limit(limit, "observer AI credit allowance")
+                    if not campaign_id or envelope.metadata.get("credit_campaign_id") != campaign_id:
+                        raise ValueError("Observer credit allowance lacks its exact campaign scope")
+                    allowance = credits.available(self.observer_credit_budget(campaign_id, limit, connection=conn))
+                    if envelope.metadata.get("credit_allowance_nano") != allowance:
+                        raise ValueError("Observer credit allowance changed before arming; retry admission")
             conn.execute("INSERT INTO consumer_runs(token,envelope,digest,phase,created) VALUES(?,?,?,'armed',?)",
                          (key.grant_id, canonical(asdict(envelope)).decode(), envelope.digest, time.time()))
 
@@ -389,7 +399,16 @@ class ResourceLedger:
                 FROM consumer_runs r JOIN grants g ON g.token=r.token
                 WHERE g.owner_id=? AND g.kind='observer' GROUP BY r.phase""", (owner_id,))}
         return {"committed": sum(counts.values()), "phases": counts,
-                "scope": "This dashboard process; model/API calls and monetary cost are not capped"}
+                "scope": "Invocation count is per dashboard process; AI credit accounting is separate"}
+
+    def observer_credit_budget(self, campaign_id, limit, *, connection=None):
+        from contextlib import nullcontext
+        with self.read() if connection is None else nullcontext(connection) as conn:
+            rows = conn.execute("""SELECT r.envelope,r.receipt,r.phase FROM consumer_runs r
+                JOIN grants g ON g.token=r.token WHERE g.kind='observer'
+                AND json_extract(g.owner,'$.campaign_id')=?""", (campaign_id,))
+            return {**credits.summarize(rows, limit),
+                    "scope": "Dashboard chat for this campaign across dashboard restarts; excludes research and setup"}
 
     def recover_consumers(self) -> list[dict]:
         from labgoblin.evidence import read_json

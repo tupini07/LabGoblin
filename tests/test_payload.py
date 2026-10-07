@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 
 import psutil
 import pytest
@@ -51,6 +52,20 @@ def spec(tmp_path):
             "log_bytes": 1024, "environment": {}, "cancel_path": str(tmp_path / "cancel")}
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_task_absolute_deadline_survives_absent_controller(spec, expired):
+    spec["argv"] = [sys.executable, "-c", "import time;time.sleep(10)"]
+    spec["envelope"] = {"metadata": {"task_deadline": time.time() + (-1 if expired else 0.4)}}
+    started = time.monotonic()
+    result = run_process(spec)
+    assert result["status"] == "timed_out"
+    assert result["executed"] is not expired
+    assert time.monotonic() - started < 5
+    handle = Path(spec["root"]) / "process-handle.json"
+    if handle.exists():
+        assert_process_exited(read_json(handle))
+
+
 def test_real_payload_retains_bounded_output_and_reaps(spec):
     spec["argv"] = [sys.executable, "-c",
                     "import sys;sys.stdout.write('x'*200000);sys.stderr.write('y'*150000)"]
@@ -94,6 +109,43 @@ def test_flooding_payload_still_obeys_deadline_and_cancellation(spec, cancel):
     assert result["logs"]["stdout"]["retained_bytes"] <= spec["log_bytes"]
     handle = read_json(Path(spec["root"]) / "process-handle.json")
     assert_process_exited(handle)
+
+
+def test_cooperative_provider_gets_bounded_time_to_flush_after_cancel(spec):
+    spec["envelope"] = {"metadata": {
+        "provider": {"transport": "sdk"}, "shutdown_grace_seconds": 2}}
+    script = (
+        "import os,pathlib,time,sys\n"
+        "deadline=float(os.environ['LABGOBLIN_OPERATION_DEADLINE'])\n"
+        "assert deadline>time.monotonic()\n"
+        f"cancel=pathlib.Path({spec['cancel_path']!r})\n"
+        "while not cancel.exists(): time.sleep(.01)\n"
+        "time.sleep(.2)\n"
+        "print('final usage flushed',flush=True)\n"
+        "sys.exit(130)\n"
+    )
+    spec["argv"] = [sys.executable, "-c", script]
+    timer = threading.Timer(0.5, lambda: Path(spec["cancel_path"]).touch())
+    timer.start()
+    try:
+        result = run_process(spec)
+    finally:
+        timer.join()
+    assert result["returncode"] == 130, result
+    assert "final usage flushed" in tail(Path(spec["root"]) / "stdout.log")["text"]
+    assert result["elapsed"] < 5
+    assert_process_exited(read_json(Path(spec["root"]) / "process-handle.json"))
+
+
+def test_cooperative_hung_provider_cannot_extend_hard_deadline(spec):
+    spec["envelope"] = {"metadata": {
+        "provider": {"transport": "sdk"}, "shutdown_grace_seconds": 5}}
+    spec["seconds"] = 0.5
+    spec["argv"] = [sys.executable, "-c", "import os\nwhile True: os.write(1,b'activity\\n')"]
+    result = run_process(spec)
+    assert result["status"] == "timed_out"
+    assert result["elapsed"] < 5
+    assert_process_exited(read_json(Path(spec["root"]) / "process-handle.json"))
 
 
 def test_missing_executable_is_proven_not_started(spec):

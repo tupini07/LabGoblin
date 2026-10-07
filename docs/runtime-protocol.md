@@ -1,7 +1,7 @@
 # Local runtime contract
 
-LabGoblin 2 uses configuration, campaign database, machine-ledger and worker
-protocol version 3. These versions are checked independently. Old formats are
+LabGoblin uses configuration/campaign database version 4 and machine-ledger/
+worker protocol version 3. These versions are checked independently. Old formats are
 not migrated: initialize a fresh local campaign. An incompatible existing
 machine ledger must not be replaced while old work may still be running.
 
@@ -11,7 +11,7 @@ file set into their identity; every source/bootstrap hash is verified. Missing
 or old namespaces are rejected, not interpreted as a compatibility format.
 No new helper is substituted for an admitted frozen one. Windows Job Object/
 container names, Docker ownership labels/build tags and sandbox markers use
-LabGoblin names. SQL application IDs and schema versions are unchanged.
+LabGoblin names. The shared ledger retains its identity, application ID and version.
 See [names and existing installations](local-research.md#names-and-existing-installations).
 
 Only native, WSL2 and local Docker workers are supported. Each runner declares
@@ -44,6 +44,15 @@ are revalidated, not silently rewritten, and old research packets cannot submit
 under a newly activated configuration. Dashboard settings have a separate
 process-start lifetime.
 
+Research workspace publication and role scheduling are specified in
+[the research-loop guide](research-loop.md). One controller owns all scopes;
+root research/reflection/coaching/maintenance remains serialized, while workers
+have distinct turn slots and event acknowledgements. All invocation receipts
+are charged once to campaign accounting; per-task and per-call ceilings do not
+create additional budget. Late or cancelled worker evidence cannot advance root
+strategy. Coach results require the same owned result capture and packet identity
+as other roles. Failed review never authorizes sealing.
+
 Explicit local image builds and observers share the machine ledger's
 `consumer_runs` authorization/claim/receipt mechanism, not campaign invocation
 accounting. Builds reserve container resources plus their API client, freeze an
@@ -65,6 +74,52 @@ limits remain positive and finite. Zero GPU-hours means no GPU work. Invocation
 accounting includes campaign research, retries, maintenance, final analysis and
 model-executing canaries, not internal API calls or monetary cost. Observer usage
 is separate.
+
+`campaign.max_ai_credits` and `dashboard.chat.max_ai_credits` accept `"unlimited"`
+(the generated default) or at least 30 Copilot AI credits. Credit limits are
+post-response soft caps, not hard billing ceilings. Copilot research launch
+envelopes freeze an allowance checked again in the arming transaction and enforce
+it through SDK session limits (or `--max-ai-credits` for explicit CLI transport).
+The frozen SDK wrapper command also carries the checked allowance. Normal inference preserves the final-analysis and
+remaining canary bundle minimums. Receipts retain `totalNanoAiu`; integer nano-unit
+aggregation avoids counting premium multipliers or replaying charges. Unknown
+usage without an operator-approved estimate blocks capped inference, and proven
+non-starts cost zero. Accounting spans
+all generations and controller restarts without changing immutable receipts.
+
+Research defaults to a 1800-second hard deadline. Copilot's owned SDK payload
+records bounded activity checkpoints and periodic provider aggregate usage.
+Only meaningful response/tool lifecycle events update progress; a heartbeat or
+log write is not progress. The 600-second idle watchdog applies only when no
+response/tool is active. Quiet active work is flagged, not declared hung.
+Nothing extends the hard deadline. A 30-second grace reserved inside that
+deadline allows abort, provider-idle confirmation and final metrics retrieval;
+the enclosing native owner remains responsible for exact-tree termination.
+Partial checkpoints never become final receipts simply because a process died.
+
+An operator-only credit reconciliation validates an identity-bound final provider
+aggregate against the quiescent launch and any retained partial lower bound.
+The evidence and reason are appended as a `credit_reconciliation` source, outside
+scientific source revisions. The original receipt remains immutable; equal
+replays are idempotent and conflicts fail. Accounting uses one final amount per
+invocation, across restarts and generations. Reconciliation is not a research
+handoff, credit-limit increase, controller restart or permission to guess usage.
+
+When final usage is unavailable, `estimate-credits` requires explicit operator
+confirmation and a reason for one quiescent, executed, unknown Copilot invocation.
+Its immutable `credit_estimate` source binds the launch and original receipt.
+The budget retains the unknown record, separately exposes the additional estimated
+amount, and blocks admission for any unknown invocation without an approved estimate.
+An estimate cannot be below retained partial usage; it does not change the cap or
+scientific revisions. Final reconciliation replaces it in accounting without deleting
+its audit history. Remaining allowance with estimates is approximate, not a verified bill.
+
+Observer envelopes reserve from a distinct campaign-scoped allowance in the
+machine ledger; dashboards cannot spend the same reservation concurrently.
+Observer SDK metrics are retained before session deletion and published in the
+final consumer receipt before release. Unknown interrupted usage stays unknown.
+Dashboard restarts preserve credit usage, unlike their per-process invocation
+count. The setup interview remains outside both credit allowances.
 
 Managed reasoning has an explicit resource request within the campaign envelope.
 The generated 2,048 MiB allowance is a starter configuration, not a measurement

@@ -29,7 +29,7 @@ protocol/constraints, then type the displayed Apply phrase or continue correctin
 `/cancel` or EOF leaves the campaign untouched. No experiment code is generated,
 no machine capacity is created, and initialization does not start research.
 
-Applied setup creates schema-3 state and a shared owned section in `CLAUDE.md`,
+Applied setup creates schema-4 state and a shared owned section in `CLAUDE.md`,
 preserving unrelated text. `instructions --target copilot` explicitly updates
 the owned section in `.github/copilot-instructions.md` when that file takes
 precedence. Nothing changes global provider settings.
@@ -141,7 +141,7 @@ performed. `doctor --runner NAME --provider` checks the selected runner and
 model-free provider help, not all optional runners or a billable canary.
 
 ```toml
-schema_version = 3
+schema_version = 4
 
 [project]
 name = "local-study"
@@ -175,13 +175,17 @@ max_jobs = 1
 max_gpu_hours = 0
 max_seconds = 3600
 max_invocations = 10
+max_ai_credits = "unlimited"
 
 [agent]
 provider = "copilot"
 command = ["copilot", "--allow-all"]
 model = ""
 reasoning_effort = ""
-timeout_seconds = 600
+timeout_seconds = 1800
+transport = "sdk"
+idle_timeout_seconds = 600
+shutdown_grace_seconds = 30
 retries = 1
 sandbox = false
 
@@ -220,6 +224,37 @@ argv arrays, not shell strings. Claude defaults to `claude --dangerously-skip-pe
 and its child environment removes `ANTHROPIC_API_KEY` for subscription auth.
 Windows batch shims must be replaced by a direct executable argv.
 
+### Research-turn timeouts
+
+`agent.timeout_seconds` defaults to **1800 seconds** and remains a hard bound
+on the entire owned research/maintenance operation, not on separately submitted
+experiments. Copilot defaults to `transport = "sdk"`: the installed CLI still
+provides its normal tools and instructions, but a frozen, resource-owned SDK
+driver observes response starts, completed responses, streamed reasoning/text
+and tool execution. Claude uses `transport = "cli"`; Copilot can explicitly use
+that transport for custom CLI-only adapters, without SDK activity or graceful
+usage capture. Existing admitted snapshots retain their original transport.
+The SDK explicitly preserves a configured `--allow-all`/`--yolo` permission
+mode; otherwise unanswered permission requests are denied, not left waiting
+for a terminal. Narrower command-line permission rules (`--deny-tool`,
+`--allow-tool`, URL/path overrides, assisted approval) currently require
+`transport = "cli"` and are rejected by the SDK adapter rather than ignored.
+
+SDK `idle_timeout_seconds` defaults to 600. An inactive session with no response
+or tool in progress is cancelled after that interval without meaningful progress.
+A pending response or long-running tool is **not** proof of a hang, and is allowed
+to continue up to the hard deadline. A quiet pending operation is reported as a
+warning, not silently granted unlimited time. Log writes and transport heartbeats
+do not reset the progress clock or extend the hard deadline.
+
+`shutdown_grace_seconds` defaults to 30 (at least 5, and less than the hard limit).
+The driver reserves this time **inside** the hard deadline to abort, wait for
+provider idle, retrieve final usage and close the runtime. Operator cancellation
+also permits at most this grace, bounded by the original deadline. The native
+owner still force-retires the process tree at the hard limit. A crash, unresponsive
+provider or failed final metrics query can still leave usage unknown; no timeout
+heuristic proves a complete bill. Dashboard observer timeouts are unchanged.
+
 ## Budgets and control
 
 `max_seconds = 0` is an unlimited campaign admission horizon;
@@ -230,7 +265,74 @@ per-operation limits remain strictly positive.
 Elapsed time begins with the first admitted campaign operation, includes
 shutdown/pauses, never decreases on clock rollback, and does not reset on
 reopen. Expiry gates new admission, not an already admitted operation's deadline.
-Changing TOML limits is recorded at the next admission; it does not reopen work.
+Changing TOML limits takes effect at controller restart; it does not reopen work.
+
+For Copilot research, `campaign.max_ai_credits = 1000` sets a cumulative soft
+credit allowance. Omit it or use `"unlimited"` to disable the cap; zero is invalid.
+The CLI must advertise both `--max-ai-credits` and `--usage-output-file`.
+Claude does not support this Copilot-credit setting. Credits are not premium
+request multipliers, tokens or invocations.
+
+Each launch receives the remaining allowance after reservations. Copilot requires
+at least 30 credits per session; ordinary research reserves another 30 for final
+analysis (a sandbox canary adds its own 30-credit minimum). Insufficient remaining
+credits close admission rather than being rounded up. The provider accounts for its
+subagents and credit-consuming compaction. Responses already in flight can exceed
+the cap; this is not a guaranteed billing ceiling.
+
+Authoritative usage is retained in owned receipts, including failed invocations,
+and is counted exactly once across retries, controller restarts and generations.
+Missing or invalid `totalNanoAiu` is unknown, never zero: a capped campaign blocks
+further admission unless an operator explicitly approves an estimate as described
+below. Raising the limit does not erase unknown usage. Inspect the
+owned receipt/diagnostics; explicitly choosing `"unlimited"` removes that protection,
+it does not repair the accounting. A proven non-start consumes no credits.
+Already-admitted jobs retain their frozen execution and are not cancelled by a
+credit limit. `budget --json`, status and the dashboard distinguish reported,
+reserved and unknown usage. Limits cover managed provider activity, not unrelated
+sessions or model services called outside the harness.
+
+SDK launches write identity-bound `activity.json`, `usage-progress.json` and,
+only after the provider has settled, `usage.json` in their owned launch directory.
+Partial usage is a known lower bound, not a final total; the budget includes it
+in reported spend but keeps the invocation unknown and blocks capped admission.
+
+If final authoritative metrics are recovered later, an operator can append them:
+
+```powershell
+labgoblin reconcile-credits --id INVOCATION_ID --file FINAL_USAGE_JSON --confirm CAMPAIGN_ID --reason "Recovered final provider metrics" --json
+```
+
+The file must be a final `usage.json`-shaped record: top-level `totalNanoAiu`,
+and `_labgoblin` containing the exact `campaign_id`, `invocation_id`, `nonce`,
+`envelope_digest`, provider `session_id`, `complete: true` and
+`basis: "provider-session-metrics"`. For a legacy CLI launch, an operator must
+obtain and bind genuinely final provider metrics; do not relabel a partial sum
+as complete or substitute an estimate. The command requires a terminal owned
+invocation, refuses conflicting replays or totals below retained partial usage,
+and retains the input bytes, receipt digest and operator reason as a separate
+immutable accounting source. It neither rewrites receipts nor accepts a handoff,
+restarts research, changes the allowance or erases an unresolved usage gap.
+
+If final usage cannot be recovered, an operator can instead explicitly approve a
+budget estimate for that invocation:
+
+```powershell
+labgoblin estimate-credits --id INVOCATION_ID --credits 1000 --confirm CAMPAIGN_ID --reason "Operator approved a conservative estimate for the interrupted invocation" --json
+```
+
+This is a distinct, audited `credit_estimate` source, not fabricated provider
+usage. It requires a quiescent executed invocation without final metrics, cannot
+be below retained partial usage, and refuses conflicting replays. The estimated
+total includes any known partial usage; only its additional portion appears as
+`estimated_used`. `used` stays reported usage, `accounted_used` includes the estimate,
+and the existing cap is unchanged. The unknown record remains visible, but no
+longer blocks admission when covered by explicit operator approval. Other unknown
+invocations still block. Remaining allowance is approximate because the actual
+charge could differ. Later final reconciliation replaces the estimate in budget
+calculations while preserving both audit records. This command neither restarts
+research nor changes scientific authority; dashboard restart loads the updated
+estimate display.
 
 Invocation accounting covers research, retries, report, compact, final analysis
 and model-executing sandbox canaries. A canary/main bundle reserves both calls
@@ -415,6 +517,17 @@ allowances and shared capacity without implying token or monetary budgets.
 Machine requests are paginated; capacity totals include every granted
 reservation, not just the current page.
 
+**Work > Live monitor** samples the recorded controller and in-flight host
+supervisors by PID plus creation time, without backend commands or recovery.
+It shows up to 20 launches, preparation age, frozen operation timeouts, latest
+nonempty log-write times, the last accepted handoff, resources and credit usage.
+SDK research adds the provider phase, response-in-progress flag, active tool
+count, last response timestamp, checkpoint age and quiet-operation warnings.
+These are local observations of a specific launch, not a scientific verdict.
+An alive supervisor does not prove payload health; a quiet log does not establish
+a stall. Follow each work link for bounded main and supervisor diagnostics.
+The credit meter shows reported spend only, not reserved launch allowances.
+
 **History** holds generation outcomes, paginated/folded journal entries,
 registered reports and source-change intervals. Reports open as safe,
 digest-verified Markdown, with bounded byte pages for large outputs and explicit
@@ -437,6 +550,12 @@ process. **Refresh** updates explicitly, retaining journal folds and reading
 position where possible. Read times describe the page's recorded-state snapshot;
 shared-ledger reads are separate. Ordinary browsing does not invoke a provider,
 mutate campaign records, reconcile work or acknowledge events.
+
+The dedicated **Live monitor** instead auto-refreshes its operational samples
+every 15 seconds while visible and not editing. Uncheck **Auto-refresh monitor**
+to hold a sample for inspection. Historical and research-reading pages retain
+the nonreplacing update behavior; monitor samples are observations, not retained
+scientific evidence or an automatic intervention policy.
 
 ### Dashboard Copilot observer
 
@@ -469,10 +588,17 @@ timeout_seconds = 120
 cpus = 1
 memory_mb = 2048
 max_invocations = 20
+max_ai_credits = "unlimited"
 ```
 
-These are separate from `[agent]`. The positive allowance applies to the current
-dashboard process; usage does not spend campaign invocations. Waiting is visible
+These are separate from `[agent]`. The positive invocation allowance applies to
+the current dashboard process; usage does not spend campaign invocations.
+Set `max_ai_credits = 100` for a separate chat soft cap. Chat credits are shared by
+dashboards for this campaign and persist across dashboard restarts in the machine
+ledger, without writing research state. Reservations prevent concurrent dashboards
+from receiving the same allowance. Unknown usage after an interrupted answer
+blocks further capped chat; SDK session limits have the same post-response caveat.
+Setup is not charged to either campaign allowance. Waiting is visible
 and cancellable. Native ownership includes the SDK and its descendants, and
 failed shutdown keeps the grant. No silent model retry occurs.
 

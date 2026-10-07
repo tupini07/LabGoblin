@@ -29,6 +29,8 @@ def render_handoff(value: Handoff) -> str:
              "", "### Next step", value.next_step, "", f"**{value.disposition}:** {value.reason}"]
     if value.stopping_criterion:
         lines.extend(["", "### Stopping criterion", value.stopping_criterion])
+    if value.research_refs:
+        lines.extend(["", "### Research context (not a support claim)", ", ".join(value.research_refs)])
     if value.evidence:
         lines.extend(["", "### Evidence dispositions"])
         for item in value.evidence:
@@ -56,7 +58,7 @@ def entry(db, source_id: str, *, limit=1024 * 1024) -> dict:
         raise ValueError("Retained source revision was modified")
     result = {**dict(row), "text": body.decode("utf-8"), "metadata": parse_json(row["metadata"].encode()),
               "retrieved_at": time.time(), "truncated": False}
-    if row["kind"] == "handoff":
+    if row["kind"] in ("handoff", "worker_handoff"):
         content = parse_json(body)
         handoff = Handoff.parse(content)
         result.update(handoff=content, markdown=render_handoff(handoff))
@@ -95,7 +97,7 @@ def page(db, *, limit=20, offset=0, cutoff=None) -> dict:
     with db.read() as conn:
         cutoff = conn.execute("SELECT COALESCE(MAX(seq),0) FROM sources").fetchone()[0] if cutoff is None else integer(
             cutoff, "journal source cutoff", zero=True)
-        where = "WHERE kind IN ('handoff','journal_import','summary','directive') AND seq<=?"
+        where = "WHERE kind IN ('handoff','worker_handoff','journal_import','summary','directive','coaching','task_integration') AND seq<=?"
         total = conn.execute(f"SELECT COUNT(*) FROM sources {where}", (cutoff,)).fetchone()[0]
         rows = conn.execute(f"""SELECT id,seq,kind,origin,digest,created,length(body) AS bytes,
             substr(CAST(body AS TEXT),1,240) AS preview FROM sources {where}
@@ -151,7 +153,8 @@ def search(db, query: str, *, after=0, cutoff=None, scan_limit=64, result_limit=
             cutoff, "archive source cutoff", zero=True)
         rows = conn.execute("""SELECT id,seq,kind,origin,digest,created,length(body) AS bytes,
             substr(body,1,?) AS preview FROM sources WHERE seq>? AND seq<=?
-            AND kind IN ('goal','protocol','handoff','journal_import','summary','directive')
+            AND kind IN ('goal','protocol','handoff','worker_handoff','journal_import','summary','directive',
+                         'research_record','coaching','task_message','task_integration','task_amendment')
             ORDER BY seq LIMIT ?""", (HANDOFF_BYTES, after, cutoff, scan_limit + 1)).fetchall()
     matches, searched = [], []
     cursor = after

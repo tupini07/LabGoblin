@@ -103,7 +103,7 @@ def test_mandatory_context_is_not_silently_clipped(state):
         assert conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 0
 
 
-def test_current_rationale_is_exact_and_journal_is_the_owned_projection(state):
+def test_focus_is_a_preview_and_exact_rationale_remains_retrievable(state):
     goal(state)
     current = turn(state)
     accepted = handoff(current, rationale="Negative result: the control was contaminated; repeat independently.")
@@ -113,7 +113,9 @@ def test_current_rationale_is_exact_and_journal_is_the_owned_projection(state):
     projected = journal.entry(state.db, rationale["id"])
     assert accepted.rationale in projected["markdown"]
     assert projected["handoff"]["turn_id"] == current.turn_id
-    assert json.loads(rationale["text"]) == projected["handoff"]
+    assert rationale["preview"] is True
+    assert json.loads(rationale["text"]) == {"summary": accepted.summary, "next_step": accepted.next_step}
+    assert rationale["digest"] == projected["digest"]
     assert journal.page(state.db)["total"] == 1
 
 

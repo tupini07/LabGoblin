@@ -24,6 +24,7 @@ INSTRUCTIONS = f"""{SECTION_START}
 
 Read the controller's versioned packet before acting. It contains the goal,
 operator constraints, governing rationale, event cutoff and owned result format.
+Researcher strategy is revisable; operator constraints are not.
 Use `labgoblin status --json`, `labgoblin budget --json`, and exact `labgoblin evidence`
 or `labgoblin journal entry` retrieval. Previews and searches have bounded coverage.
 
@@ -33,6 +34,16 @@ and hypothesis ID/statement, CPU/RAM/GPU request, finite `seconds`, and relative
 `artifacts`. Write outputs to LABGOBLIN_OUTPUT_DIR; metrics.json is a finite numeric
 JSON object. Access declared inputs through LABGOBLIN_INPUT_NAME. Do not run heavy
 work outside the queue or wait for it while holding a reasoning grant.
+
+Use the research workspace for knowledge, questions, hypotheses and reflection.
+General knowledge need not name a hypothesis. Draft files are not accepted records:
+publish JSON drafts with `labgoblin research publish --file research/draft.json`.
+Read/list/search exact published revisions with `labgoblin research`.
+Jobs specify `purpose` (evaluation, exploration, support) and exact `research_refs`;
+evaluation pins a published hypothesis revision. Revise or retire ideas without
+rewriting past evidence. Put scientific assessments in handoff `research_updates`.
+Request reflection/coaching in the handoff. If enabled, delegate only through
+`research_task` or `labgoblin research task`; workers cannot delegate further.
 
 Write exactly one JSON handoff to the supplied result path. Explain observations,
 what changed and why, the governing next step, evidence dispositions, and a
@@ -76,7 +87,7 @@ def preflight(root: Path, *, existing_config=False):
     if present(paths.config) and not existing_config:
         raise FileExistsError("Configuration already exists; init only creates a fresh local campaign")
     if existing_config and not paths.config.is_file():
-        raise FileNotFoundError("--existing-config requires an existing schema-3 labgoblin.toml")
+        raise FileNotFoundError("--existing-config requires an existing schema-4 labgoblin.toml")
     if paths.state.exists() and any(paths.state.iterdir()):
         raise FileExistsError("Campaign state is not empty; old formats are not migrated")
     if root.resolve() != root or paths.state.resolve() != paths.state:
@@ -270,7 +281,7 @@ def apply(prepared: PreparedInit) -> dict:
                 state.source("instruction_backup", change.before, origin="initialization",
                              metadata={"path": str(change.path)})
         unlink_file(marker)
-        return {"campaign_id": state.id, "project": str(root), "schema_version": 3, "mode": "trusted",
+        return {"campaign_id": state.id, "project": str(root), "schema_version": 4, "mode": "trusted",
                 "assisted": draft.assisted, "approval": prepared.digest, "warnings": list(prepared.warnings),
                 "starter_limits": draft.configuration["campaign"],
                 "next": "Review readiness with labgoblin doctor --provider --json; configure compatible machine "

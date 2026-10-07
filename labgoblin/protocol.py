@@ -8,8 +8,8 @@ import re
 import uuid
 
 
-CONFIG_VERSION = 3
-DATABASE_VERSION = 3
+CONFIG_VERSION = 4
+DATABASE_VERSION = 4
 LEDGER_VERSION = 3
 WORKER_VERSION = 3
 PACKET_BYTES = 64 * 1024
@@ -17,7 +17,7 @@ PACKET_EVENTS = 64
 HANDOFF_BYTES = 16 * 1024
 ACTIVE = ("queued", "starting", "running", "recovery_required")
 TERMINAL = ("completed", "failed", "cancelled", "timed_out", "interrupted", "not_started")
-PROVIDER_KINDS = ("research", "final_analysis", "report", "compact", "canary", "observer")
+PROVIDER_KINDS = ("research", "reflection", "coach", "worker", "final_analysis", "report", "compact", "canary", "observer")
 
 
 class PreExecutionError(RuntimeError):
@@ -307,6 +307,11 @@ class Handoff:
     stopping_criterion: str = ""
     maintenance: tuple[str, ...] = ()
     assessment: dict | None = None
+    research_updates: tuple[dict, ...] = ()
+    reflection: bool = False
+    coaching: bool = False
+    task_artifacts: tuple[dict, ...] = ()
+    research_refs: tuple[str, ...] = ()
 
     def __post_init__(self):
         for name in ("turn_id", "packet_id", "summary", "rationale", "next_step", "reason"):
@@ -318,6 +323,21 @@ class Handoff:
             raise ValueError("Evidence event IDs must be unique")
         if set(self.maintenance) - {"report", "compact"}:
             raise ValueError("Only report and compact maintenance may be requested")
+        boolean(self.reflection, "reflection")
+        boolean(self.coaching, "coaching")
+        strings(self.research_refs, "handoff research_refs", empty=True)
+        if not isinstance(self.task_artifacts, (list, tuple)) or len(self.task_artifacts) > 20:
+            raise ValueError("task_artifacts must contain at most 20 returned files")
+        for artifact in self.task_artifacts:
+            table(artifact, "task artifact", {"path", "digest"})
+            text(artifact.get("path"), "task artifact path")
+            digest = text(artifact.get("digest"), "task artifact digest")
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                raise ValueError("Task artifact digest must be a lowercase SHA-256")
+        if not isinstance(self.research_updates, (list, tuple)):
+            raise ValueError("research_updates must be an array")
+        for update in self.research_updates:
+            table(update, "research update")
         if self.assessment is not None:
             value = table(self.assessment, "closure assessment",
                           {"view_id", "inventory_digest", "assess_all", "exclusions", "limitations"})

@@ -28,7 +28,7 @@ def fixture(tmp_path, *, max_invocations=10, retries=0, program=DOUBLE):
     raw = initial_config("controller-fixture", "copilot")
     raw["execution"]["source_files"] = ["experiment.py"]
     raw["campaign"]["max_invocations"] = max_invocations
-    raw["agent"].update(command=[sys.executable, str(provider)], retries=retries,
+    raw["agent"].update(command=[sys.executable, str(provider)], retries=retries, transport="cli",
                         timeout_seconds=10, resources={"cpus": 1, "memory_mb": 256})
     config = parse_config(raw, project / "labgoblin.toml")
     cpus = tuple(psutil.Process().cpu_affinity()[:2])

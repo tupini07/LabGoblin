@@ -1,6 +1,6 @@
 # Examples
 
-`local-synthetic` is the supported schema-3 onboarding example. It contains only
+`local-synthetic` is the supported fresh-schema onboarding example. It contains only
 generated numeric data and can run without inference, a GPU or network access.
 
 `auto-cleanrl-report` and `auto-craftax-report` are **historical xgenius v1

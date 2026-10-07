@@ -87,12 +87,12 @@ def test_strict_observer_config_is_separate_from_research_envelope(tmp_path):
             parse_config(raw, config.config_path)
 
 
-def authorization(config, state, ledger, *, owner=None, command=None):
+def authorization(config, state, ledger, *, owner=None, command=None, campaign_id=None):
     owner = owner or uuid.uuid4().hex
     token = uuid.uuid4().hex
     resources = Resources(1, 256)
     ledger.request(token, owner, token, "observer", resources,
-                   {"kind": "observer", "handle": own_handle(owner)}, native=True)
+                   {"kind": "observer", "handle": own_handle(owner), "campaign_id": campaign_id}, native=True)
     grant = ledger.reserve(token)
     root = ledger.path.parent / "observers" / owner / token
     root.mkdir(parents=True)

@@ -8,8 +8,8 @@ do not assume `CLAUDE.md` wins or overwrite unrelated instructions.
 
 LabGoblin is a local autonomous research harness, not a general workflow engine.
 Python 3.11+, native Windows, prepared WSL2 and local Linux Docker are supported.
-The schema-3 configuration, campaign DB, machine ledger and worker protocol are
-separately versioned. There is no old-schema reader or campaign migration.
+Configuration/campaign schemas are version 4; machine ledger and worker protocol
+remain version 3. They are separately checked; there is no campaign migration.
 `paths.py` resolves only LabGoblin names; there are no old-name aliases or frozen
 helper compatibility readers. Never rewrite admitted envelopes or receipts.
 Do not reintroduce cluster commands, implicit image pulls or environment installs.
@@ -38,6 +38,8 @@ authorization and a persisted invocation allowance outside the test campaign.
 | `agent.py`, `agent_policy.py`, `agent_worker.py` | Uniform admitted Claude/Copilot invocations and fixed maintenance. |
 | `workspace.py`, `evidence.py` | Bounded source copies, input assurance and immutable captured evidence. |
 | `briefing.py`, `journal.py` | Exact bounded packets, one owned delta, protected directives and retained history. |
+| `research_memory.py`, `research_tools.py` | Explicit draft publication, immutable revisions and common CLI/SDK boundaries. |
+| `research_tasks.py`, `coaching.py` | Flat scope ownership/integration and non-prescriptive pre-stop review. |
 | `results.py`, `reporting.py` | Read-only projections, complete source inventories and immutable reports. |
 | `cli.py`, `dashboard*.py`, `static` | Structured local commands and read-only dashboard/observer. |
 
@@ -63,10 +65,31 @@ authorization and a persisted invocation allowance outside the test campaign.
   mutate research. Archival reset requires quiescence and exclusive reader access.
 - Only campaign admission time and managed invocations accept `0` as unlimited.
   Ordinary work cannot consume a finite generation's final-analysis reserve.
+- Copilot credits use `"unlimited"` or a >=30 soft cap. Aggregate owned receipt
+  `totalNanoAiu`, never premium multipliers. Unknown spend blocks capped inference
+  unless an operator explicitly approves an audited estimate. Estimates count
+  against the cap but stay separate from reported usage and scientific revisions;
+  preserve credit usage across restarts and final-analysis/canary reservations.
+  Observer credits are a separate campaign-scoped machine-ledger allowance.
+- Copilot research defaults to the owned SDK transport and a 1800-second hard
+  deadline. Activity distinguishes pending responses/tools from idle sessions;
+  the shutdown grace is inside that deadline. Partial usage never proves final
+  spend. Credit reconciliation appends attributed evidence, never rewrites receipts.
 - Accepted handoff, exact evidence dispositions, next action and journal entry
   commit together. Human text or unrelated file changes cannot satisfy a turn.
-- Evaluated hypothesis statements, captured observations and report sources are
-  immutable. A new statement/recollection gets a new identity.
+- Published research revisions, captured observations and report sources are
+  immutable. Revise a hypothesis by advancing its head; attempts keep exact
+  pinned revisions. Retiring a record never deletes evidence. General knowledge
+  need not be attached to a hypothesis.
+- Serialize root decisions and allow one active turn per scope. Worker events
+  cannot acknowledge root events; worker summaries cannot overwrite root strategy.
+  Native agents remain trusted, not filesystem-isolated by these service checks.
+- Coaching is campaign-owned, read-only and non-prescriptive. Intercept a stop
+  before sealing; missing/stale/failed review is not acceptance. Bounded pushback
+  leads to researcher reflection or an explicit operator decision, not endless debate.
+- Every role shares campaign credits, invocation limits and machine resources.
+  Reserve finite task/call allowances transactionally; native provider spawning
+  is not an alternative to managed delegation. Recursive spawning is rejected.
 - Summaries are derived hints. Never delete retained sources, active operator
   authority or governing rationale during compaction.
 - Closure seals its denominator. At most one additional analysis, no automatic

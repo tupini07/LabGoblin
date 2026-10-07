@@ -42,7 +42,7 @@ def test_init_preserves_docs_and_never_initializes_machine_capacity(tmp_path, ca
     copilot.write_text("# Existing Copilot rules", encoding="utf-8")
     ledger = tmp_path / "isolated-machine.db"
     code, data = call(capsys, "--project", tmp_path, "init", "--agent", "copilot", "--ledger", ledger, "--json")
-    assert code == 0 and data["schema_version"] == 3
+    assert code == 0 and data["schema_version"] == 4
     assert not ledger.exists()
     assert "Keep these." in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     assert copilot.read_text(encoding="utf-8") == "# Existing Copilot rules"

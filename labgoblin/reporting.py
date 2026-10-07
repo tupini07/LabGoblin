@@ -75,6 +75,8 @@ def seal_view(state, *, kind="report", selected=None, selection_reason="Complete
             a.started,a.ended,a.nonce,a.request_digest,
             json_extract(a.spec,'$.hypothesis_description') AS statement,
             json_extract(a.spec,'$.source_refs') AS source_refs,
+            json_extract(a.spec,'$.research_refs') AS research_refs,
+            json_extract(a.spec,'$.purpose') AS purpose,a.scope_id,
             e.payload AS collection_payload
             FROM attempts a {join} LEFT JOIN events e ON e.id=a.collection_event
             WHERE a.generation=? ORDER BY a.id""", (campaign["generation"],))
@@ -86,8 +88,9 @@ def seal_view(state, *, kind="report", selected=None, selection_reason="Complete
                 payload = record.pop("collection_payload")
                 observations = json.loads(payload)["observation_ids"] if payload else []
                 record["source_refs"] = json.loads(record["source_refs"]) if record["source_refs"] else {}
+                record["research_refs"] = json.loads(record["research_refs"]) if record["research_refs"] else []
                 conn.executemany("INSERT OR IGNORE INTO view_sources(view_id,source_id) VALUES(?,?)",
-                                 [(view_id, value) for value in record["source_refs"].values()])
+                                 [(view_id, value) for value in [*record["source_refs"].values(), *record["research_refs"]]])
                 record["selected"] = selected is None or row["id"] in selected
                 if selected is not None and record["selected"]:
                     selected_found.add(row["id"])

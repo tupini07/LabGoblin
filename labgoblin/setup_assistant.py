@@ -29,6 +29,18 @@ the configuration authority. Explain decisions without a mandatory questionnaire
 Setup always uses Copilot, independently of agent.provider/model/reasoning_effort.
 Preserve explicit operator choices. Zero max_seconds/max_invocations means unlimited
 campaign admission; per-operation seconds remain finite. There is no setup usage cap.
+Campaign max_ai_credits and dashboard.chat.max_ai_credits are separate post-response
+soft caps; use "unlimited" or a number >=30. Finite campaign credits require Copilot.
+Research reserves final-analysis credits. Do not equate credits with invocations.
+Explain the research workspace: unlinked knowledge, revisable questions/hypotheses,
+published immutable revisions and optional reflection. Coaching and flat delegation
+are disabled in starter settings and require Copilot SDK when enabled. Show the
+finite research coach/task/per-call credits, task time/invocations and agent/task
+concurrency limits in the preview. All consume the campaign budget, not extra money.
+The coach challenges process, never prescribes science. Do not enable recursion.
+Research defaults to a 1800-second hard deadline. Copilot uses the owned SDK transport,
+with a 600-second inactive-session allowance and a 30-second shutdown grace inside
+the hard deadline. In-progress responses/tools are not classified as idle hangs.
 No machine ledger or resources have been configured; never claim the campaign can run.
 Do not generate experiments, scripts, manifests, findings, handoffs or research results.
 Goal/protocol may describe hypotheses and evaluations, never invent completed evidence.
@@ -254,7 +266,7 @@ class SetupTools:
                     or shutil.which(config.agent.command[0]) != shutil.which(expected[0])):
                 raise ValueError("Setup only probes the standard provider command, not custom command arguments")
             scope = {"command": list(config.agent.command), "operation": "--help only; never inference"}
-            action = lambda: agent.inspect_provider(config.agent)
+            action = lambda: agent.inspect_provider(config.agent, max_ai_credits=config.campaign.max_ai_credits)
         elif name == "storage":
             scope = {"volumes": asdict(config.storage)["volumes"]}
             action = lambda: watermarks(config.storage)

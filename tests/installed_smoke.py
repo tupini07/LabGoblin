@@ -57,7 +57,7 @@ def run(root):
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
-            for route in ("/", "/jobs", "/resources", "/journal", "/reports", "/static/dashboard.js", "/static/dashboard.css"):
+            for route in ("/", "/research", "/tasks", "/jobs", "/resources", "/journal", "/reports", "/static/dashboard.js", "/static/dashboard.css"):
                 with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{route}", timeout=5) as response:
                     assert response.status == 200 and response.read()
         finally:

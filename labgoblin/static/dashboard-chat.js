@@ -122,8 +122,11 @@
       const reported = message.usage.filter(item => item.input_tokens !== null && item.output_tokens !== null);
       const usage = entry.querySelector(".chat-usage");
       usage.textContent = reported.length
-        ? `Reported tokens: ${reported.reduce((n, u) => n + u.input_tokens, 0).toLocaleString()} in / ${reported.reduce((n, u) => n + u.output_tokens, 0).toLocaleString()} out · ${reported[reported.length - 1].model}. Financial usage is not capped here.`
+        ? `Reported tokens: ${reported.reduce((n, u) => n + u.input_tokens, 0).toLocaleString()} in / ${reported.reduce((n, u) => n + u.output_tokens, 0).toLocaleString()} out · ${reported[reported.length - 1].model}.`
         : "Provider usage not reported yet; not zero. Separate from research-turn accounting.";
+      usage.textContent += Number.isFinite(message.ai_credits)
+        ? ` AI credits: ${message.ai_credits.toLocaleString(undefined, { maximumFractionDigits: 6 })}.`
+        : " AI credit usage is not yet known.";
       entry.querySelector(".chat-error").textContent = message.error || (message.state === "cancelled" ? "Answer cancelled; partial text may be incomplete." : "");
     }
     const last = state.messages[state.messages.length - 1];
@@ -138,6 +141,11 @@
       const result = await request("/chat/status" + (conversation ? `?conversation_id=${encodeURIComponent(conversation)}` : ""));
       ready = result.ready;
       document.getElementById("chat-notice").textContent = result.notice;
+      const credits = result.usage?.ai_credits;
+      if (credits) {
+        document.getElementById("chat-notice").textContent +=
+          ` Chat credits: ${credits.used.toLocaleString()} reported / ${credits.unlimited ? "unlimited" : credits.configured.toLocaleString()}; ${credits.reserved.toLocaleString()} reserved; ${credits.unknown} unknown.`;
+      }
       document.getElementById("chat-model").textContent = `Model: ${result.model}${result.reasoning_effort ? ` · Effort: ${result.reasoning_effort}` : ""} · Deadline: ${result.timeout_seconds}s`;
       if (result.conversation) render(result.conversation);
       if (!ready) setStatus(result.reason, true);

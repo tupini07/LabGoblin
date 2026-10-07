@@ -87,6 +87,9 @@ def doctor(root, args):
     config = check("configuration", lambda: load_config(root))
     if config:
         checks[-1]["result"] = {"revision": config.revision, "scope": "Disk candidate; requires controller restart"}
+        if config.research.coaching or config.research.max_tasks:
+            from labgoblin.research_tools import capabilities
+            check("research-roles", capabilities)
         name = args.runner or config.execution.default_runner
         if name not in config.runners:
             checks.append({"check": "runner", "ok": False, "error": f"Unknown runner: {name}"})
@@ -94,7 +97,8 @@ def doctor(root, args):
             check("runner:" + name, lambda: backends.validate_runner(asdict(config.runners[name])))
         check("storage", lambda: watermarks(config.storage))
         if args.provider:
-            check("provider-help-only", lambda: agent.inspect_provider(config.agent))
+            check("provider-help-only", lambda: agent.inspect_provider(
+                config.agent, max_ai_credits=config.campaign.max_ai_credits))
     return {"checks": checks, "failed": sum(not item["ok"] for item in checks),
             "inference": "never", "scope": "Selected backend and optionally provider help; no canaries, image pulls or installations"}
 
@@ -148,7 +152,7 @@ def parser():
     def command(name, help):
         return commands.add_parser(name, help=help, parents=[common])
 
-    init = command("init", "Create fresh schema-3 local campaign state")
+    init = command("init", "Create fresh schema-4 local campaign state")
     init.add_argument("--agent", choices=("claude", "copilot"), default="claude")
     init.add_argument("--non-interactive", action="store_true", help="Use starter settings without Copilot authentication or inference")
     init.add_argument("--setup-model", help="Model for the setup conversation, not the research campaign")
@@ -203,6 +207,16 @@ def parser():
     batch.add_argument("--file", type=Path, required=True)
     command("status", "Observe campaign state without reconciliation or inference")
     command("budget", "Observe finite/unlimited admission budgets")
+    credit_reconcile = command("reconcile-credits", "Append audited final provider usage without rewriting receipts")
+    credit_reconcile.add_argument("--id", required=True, help="Exact interrupted invocation ID")
+    credit_reconcile.add_argument("--file", type=Path, required=True, help="Final, identity-bound SDK usage record")
+    credit_reconcile.add_argument("--confirm", required=True, help="Exact campaign ID")
+    credit_reconcile.add_argument("--reason", required=True)
+    credit_estimate = command("estimate-credits", "Approve an audited budget estimate, not a final usage record")
+    credit_estimate.add_argument("--id", required=True, help="Exact interrupted invocation ID")
+    credit_estimate.add_argument("--credits", type=float, required=True, help="Estimated total credits for this invocation")
+    credit_estimate.add_argument("--confirm", required=True, help="Exact campaign ID")
+    credit_estimate.add_argument("--reason", required=True)
     reconcile = command("reconcile", "Recover recorded launches without loading current TOML")
     reconcile.add_argument("--state-dir", type=Path)
     for name in ("logs", "errors"):
@@ -261,6 +275,17 @@ def parser():
     hypothesis.add_argument("--statement")
     hypothesis.add_argument("--label", default="")
     hypothesis.add_argument("--supersedes")
+    research = command("research", "Explicit research publication, revision retrieval, search and flat tasks")
+    research.add_argument("action", choices=("list", "search", "read", "history", "publish", "export", "task", "status", "coach"))
+    research.add_argument("--id")
+    research.add_argument("--file", type=Path, help="JSON draft under research/, or task operation request")
+    research.add_argument("--query", default="")
+    research.add_argument("--limit", type=int, default=20)
+    research.add_argument("--offset", type=int, default=0)
+    research.add_argument("--cutoff", type=int)
+    research.add_argument("--output", type=Path)
+    research.add_argument("--decision", choices=("continue", "accept_stop"))
+    research.add_argument("--reason")
     return root
 
 
@@ -272,6 +297,9 @@ def _record_retrieval(state, reference_id):
 
 def execute(args):
     root = Path(args.project).resolve()
+    turn_id = environment_value("TURN_ID")
+    if turn_id and args.command in ("init", "run", "pause", "resume", "stop", "reopen", "reconcile", "machine", "instructions", "dashboard"):
+        raise ValueError("Research roles cannot operate campaign controllers or machine configuration")
     if args.command == "init":
         return initialize(args)
     if args.command == "doctor":
@@ -280,7 +308,7 @@ def execute(args):
     if args.command == "validate":
         config = load_config(paths.config)
         result = workspace.prepare_spec(config, read_json(args.spec, 65536), validate_only=True) if args.spec else {
-            "valid": True, "revision": config.revision, "schema_version": 3, "inference": "never"}
+            "valid": True, "revision": config.revision, "schema_version": 4, "inference": "never"}
         return {**result, "configuration_scope": "Disk candidate; not activated"}
     if args.command == "dashboard":
         from labgoblin.dashboard import run_dashboard
@@ -312,6 +340,33 @@ def execute(args):
         return {"ledger_id": ledger.id, "path": str(ledger.path), "capacity": ledger.capacity(), "grants": ledger.rows(),
                 "consumer_recovery": recovery, "errors": [row for row in recovery if row.get("error")]}
     state = State.open(args.state_dir if args.command == "reconcile" and args.state_dir else paths.state)
+    if args.command == "research":
+        from labgoblin import research_memory, research_tools
+        if args.action == "publish":
+            if args.file is None:
+                raise ValueError("Publication requires --file pointing to a JSON draft under research")
+            return research_memory.publish_file(state, args.file, turn_id=turn_id)
+        if args.action == "export":
+            if not args.id or args.output is None:
+                raise ValueError("Export requires --id and --output")
+            return research_memory.export(state, args.id, args.output, turn_id=turn_id)
+        if args.action == "task":
+            if args.file is None:
+                raise ValueError("Task operation requires --file")
+            return research_tools.task(state, read_json(args.file, 32768), turn_id=turn_id)
+        if args.action == "coach":
+            if turn_id:
+                raise ValueError("Request coaching in your handoff; only the operator resolves a review")
+            from labgoblin.coaching import resolve
+            return resolve(state, args.id, args.decision, args.reason)
+        request = {"operation": "record" if args.action == "read" else args.action}
+        if args.id:
+            request["id"] = args.id
+        if args.action in ("list", "search", "history"):
+            request.update(query=args.query, offset=args.offset, limit=args.limit)
+            if args.cutoff is not None:
+                request["cutoff"] = args.cutoff
+        return research_tools.read(state, request, turn_id=turn_id)
     if args.command == "build":
         if environment_value("TURN_ID"):
             raise ValueError("Image builds are explicit operator operations, not nested research-turn work")
@@ -336,6 +391,13 @@ def execute(args):
         recovery = Campaign(state=state).reconcile()
         return {**value, "campaign": state.campaign(), "recovery": recovery, "errors": recovery["errors"]}
     if args.command == "cancel":
+        if turn_id:
+            from labgoblin.research_memory import actor
+            with state.db.read() as conn:
+                owner = actor(conn, turn_id, write=True)
+                target = state.attempt(args.id)
+                if owner["scope_id"] != "root" and owner["scope_id"] != target["scope_id"]:
+                    raise ValueError("Workers may cancel only their own attempts")
         value = state.cancel_attempt(args.id)
         recovery = Campaign(state=state).reconcile()
         return {**value, "attempt": state.attempt(args.id), "recovery": recovery, "errors": recovery["errors"]}
@@ -343,6 +405,17 @@ def execute(args):
         return {"campaign": state.campaign(), "budget": state.budget(), "results": results.page(state.db)}
     if args.command == "budget":
         return state.budget()
+    if args.command == "reconcile-credits":
+        if environment_value("TURN_ID"):
+            raise ValueError("Credit reconciliation is an explicit operator operation, not a research action")
+        value = state.reconcile_credit(args.id, read_bytes(args.file, 256 * 1024),
+                                       confirm=args.confirm, reason=args.reason)
+        return {**value, "ai_credits": state.credit_budget()}
+    if args.command == "estimate-credits":
+        if environment_value("TURN_ID"):
+            raise ValueError("Credit estimation is an explicit operator operation, not a research action")
+        value = state.estimate_credit(args.id, args.credits, confirm=args.confirm, reason=args.reason)
+        return {**value, "ai_credits": state.credit_budget()}
     if args.command == "steer":
         if environment_value("TURN_ID"):
             raise ValueError("A research turn cannot author or revoke operator constraints")
@@ -464,7 +537,8 @@ def execute(args):
                             limit=args.limit, offset=args.offset)
     if args.command == "hypothesis":
         if args.action == "set":
-            state.hypothesis(args.id, args.statement, label=args.label, supersedes=args.supersedes)
+            state.hypothesis(args.id, args.statement, label=args.label, supersedes=args.supersedes,
+                             turn_id=environment_value("TURN_ID"))
         return results.hypothesis(state.db, args.id)
     raise ValueError(f"Unknown command: {args.command}")
 
