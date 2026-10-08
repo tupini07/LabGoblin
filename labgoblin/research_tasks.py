@@ -7,8 +7,9 @@ import sqlite3
 import time
 
 from labgoblin import credits
+from labgoblin.config import parse_task_seconds
 from labgoblin.evidence import Capture, contained, hash_file, publish_bytes, require_space
-from labgoblin.protocol import BudgetExhausted, canonical, fingerprint, identifier, integer, number, strings, table, text
+from labgoblin.protocol import BudgetExhausted, canonical, fingerprint, identifier, integer, strings, table, text
 from labgoblin.research_memory import actor, validate_refs
 from labgoblin.state import _campaign, _check_configuration_fence, _event, _json, _settings, _source
 
@@ -16,10 +17,20 @@ from labgoblin.state import _campaign, _check_configuration_fence, _event, _json
 ACTIVE = ("queued", "research", "waiting")
 
 
+def deadline(task) -> float | None:
+    charter = task["charter"]
+    if isinstance(charter, str):
+        charter = json.loads(charter)
+    seconds = charter["max_seconds"]
+    return None if seconds is None else task["created"] + seconds
+
+
 def create(state, request, *, turn_id=None):
+    if "max_credits" in table(request, "task charter"):
+        raise ValueError("Task credits use the shared campaign.max_ai_credits pool; remove task max_credits")
     request = dict(table(request, "task charter", {
         "request_id", "objective", "deliverables", "source_files", "research_refs",
-        "max_invocations", "max_credits", "max_seconds", "dependencies"}))
+        "max_invocations", "max_seconds", "dependencies"}))
     for field in ("request_id", "objective", "deliverables"):
         text(request.get(field), field)
     if len(canonical(request)) > 16384:
@@ -40,12 +51,11 @@ def create(state, request, *, turn_id=None):
     if not settings.max_tasks:
         raise ValueError("Delegation is disabled; configure finite research task limits first")
     calls = integer(request.get("max_invocations", settings.task_max_invocations), "task max_invocations")
-    allowance = credits.nano_limit(credits.parse_limit(
-        request.get("max_credits", settings.task_max_credits), "task max_credits"))
-    if allowance is None or calls > settings.task_max_invocations or allowance > credits.nano_limit(settings.task_max_credits):
-        raise ValueError("Task allowance exceeds its configured finite ceiling")
-    seconds = number(request.get("max_seconds", settings.task_max_seconds), "task max_seconds")
-    if seconds > settings.task_max_seconds:
+    if calls > settings.task_max_invocations:
+        raise ValueError("Task invocation allowance exceeds its configured finite ceiling")
+    seconds = (parse_task_seconds(request["max_seconds"], "task max_seconds")
+               if "max_seconds" in request else settings.task_max_seconds)
+    if settings.task_max_seconds is not None and (seconds is None or seconds > settings.task_max_seconds):
         raise ValueError("Task time allowance exceeds configured ceiling")
     task_id = identifier()
     root = config.root / "research" / "tasks" / task_id
@@ -71,15 +81,15 @@ def create(state, request, *, turn_id=None):
         pins[relative] = capture.digest
     (root / "work").mkdir(parents=True, exist_ok=True)
     charter = {**request, "source_hashes": pins, "max_invocations": calls,
-               "max_credits": allowance / credits.NANO, "max_seconds": seconds, "parent": "root"}
+               "credit_scope": "campaign", "max_seconds": seconds, "parent": "root"}
     publish_bytes(root / "charter.json", canonical(charter))
     try:
-        return _commit_task(state, request, charter, root, task_id, fence, settings, calls, allowance, turn_id)
+        return _commit_task(state, request, charter, root, task_id, fence, settings, calls, turn_id)
     except (ValueError, OSError, sqlite3.Error) as error:
         raise ValueError(f"Task preparation was not admitted; retained draft at {root}: {error}") from error
 
 
-def _commit_task(state, request, charter, root, task_id, fence, settings, calls, allowance, turn_id):
+def _commit_task(state, request, charter, root, task_id, fence, settings, calls, turn_id):
     with state.db.write() as conn:
         _check_configuration_fence(conn, fence)
         owner = actor(conn, turn_id, write=True)
@@ -103,7 +113,7 @@ def _commit_task(state, request, charter, root, task_id, fence, settings, calls,
         conn.execute("""INSERT INTO research_tasks(id,request_id,request_digest,generation,authority_revision,
             charter,state,root,created,max_invocations,max_credits_nano) VALUES(?,?,?,?,?,?,'queued',?,?,?,?)""",
                      (task_id, request["request_id"], fingerprint(request), campaign["generation"],
-                      campaign["authority_revision"], _json(charter), str(root), time.time(), calls, allowance))
+                      campaign["authority_revision"], _json(charter), str(root), time.time(), calls, 0))
         _event(conn, campaign["generation"], "task_start", {"task_id": task_id}, scope_id=task_id)
     return get(state, task_id)
 
@@ -135,7 +145,10 @@ def budget(conn, task_id):
     task = conn.execute("SELECT * FROM research_tasks WHERE id=?", (task_id,)).fetchone()
     rows = conn.execute("""SELECT l.envelope,l.receipt,l.phase FROM launches l JOIN invocations i ON i.nonce=l.nonce
         JOIN turns t ON t.id=i.turn_id WHERE t.scope_id=?""", (task_id,))
-    value = credits.summarize(rows, task["max_credits_nano"] / credits.NANO)
+    # Zero marks shared-pool tasks; preserve positive ceilings on historical charters.
+    limit = task["max_credits_nano"] / credits.NANO if task["max_credits_nano"] else None
+    value = credits.summarize(rows, limit)
+    value["credit_scope"] = "legacy_task" if limit is not None else "campaign"
     pending = conn.execute("""SELECT COALESCE(SUM(i.credit_allowance_nano),0) FROM invocations i
         JOIN turns t ON t.id=i.turn_id WHERE t.scope_id=? AND i.state='reserved'""", (task_id,)).fetchone()[0]
     value["reserved_nano"] += pending
@@ -155,7 +168,8 @@ def assert_owned(conn, task_id, *, admission=False):
     if (not task or task["state"] not in ACTIVE or task["generation"] != campaign["generation"]
             or task["authority_revision"] != campaign["authority_revision"]):
         raise ValueError("Task is inactive or its governing authority changed")
-    if time.time() >= task["created"] + json.loads(task["charter"])["max_seconds"]:
+    expires = deadline(task)
+    if expires is not None and time.time() >= expires:
         raise BudgetExhausted("task_time", "Task elapsed-time allowance exhausted")
     if admission:
         value = budget(conn, task_id)
@@ -165,7 +179,7 @@ def assert_owned(conn, task_id, *, admission=False):
     return task
 
 
-def accept_in(conn, turn, handoff, source_id, watermark):
+def accept_in(conn, turn, handoff, source_id, watermark, *, preflight=False):
     task = conn.execute("SELECT * FROM research_tasks WHERE id=?", (turn["scope_id"],)).fetchone()
     if not task:
         raise ValueError("Worker result has no task")
@@ -205,7 +219,8 @@ def accept_in(conn, turn, handoff, source_id, watermark):
         if capture.digest != item["digest"]:
             raise ValueError("Returned task artifact differs from its owned handoff digest")
         output = Path(task["root"]) / "returned" / capture.digest
-        publish_bytes(output, capture.body)
+        if not preflight:
+            publish_bytes(output, capture.body)
         artifacts.append({"path": relative, "digest": capture.digest, "base": base.get(relative),
                           "captured": str(output), "bytes": len(capture.body)})
     conn.execute("UPDATE research_tasks SET artifacts=? WHERE id=?", (_json(artifacts), task["id"]))
@@ -269,9 +284,10 @@ def reconcile(state):
         charter = json.loads(task["charter"])
         failed = [ref for ref in charter.get("dependencies", [])
                   if get(state, ref)["state"] in ("failed", "cancelled")]
+        expires = deadline(task)
         reason = ("Task prerequisite failed or was cancelled: " + ", ".join(failed) if failed else
                   "Task governing authority changed" if task["authority_revision"] != current["authority_revision"] else
-                  "Task elapsed-time allowance exhausted" if time.time() >= task["created"] + charter["max_seconds"] else "")
+                  "Task elapsed-time allowance exhausted" if expires is not None and time.time() >= expires else "")
         if reason:
             cancel(state, task["id"], reason)
 

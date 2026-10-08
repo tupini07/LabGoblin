@@ -208,14 +208,15 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
             packet = json.loads(owner["content"])
             scope_id = owner["scope_id"]
             if scope_id != "root":
-                from labgoblin.research_tasks import assert_owned
+                from labgoblin.research_tasks import assert_owned, deadline
                 task = assert_owned(conn, scope_id)
                 task_root = Path(task["root"]) / "work"
                 contained(task_root, config.root / request.get("cwd", "."))
                 for name in request.get("source_files", config.execution.source_files):
                     contained(task_root, config.root / name)
-                remaining = task["created"] + json.loads(task["charter"])["max_seconds"] - time.time()
-                if request.get("seconds", 300) > remaining:
+                seconds = number(request.get("seconds", 300), "seconds")
+                expires = deadline(task)
+                if expires is not None and seconds > expires - time.time():
                     raise ValueError("Experiment deadline exceeds its task's remaining time allowance")
             if packet.get("config_revision") != config.revision:
                 raise ValueError("Research turn configuration changed; return a handoff before submitting")
@@ -303,9 +304,8 @@ def prepare_envelope(state, config, attempt_id: str, grant: dict) -> LaunchEnvel
     path, ledger_id = state.ledger_identity()
     task_deadline = None
     if attempt["scope_id"] != "root":
-        from labgoblin.research_tasks import get
-        task = get(state, attempt["scope_id"])
-        task_deadline = task["created"] + task["charter"]["max_seconds"]
+        from labgoblin.research_tasks import deadline, get
+        task_deadline = deadline(get(state, attempt["scope_id"]))
     return LaunchEnvelope(
         LaunchKey(state.id, attempt["generation"], attempt_id, grant["token"], identifier()), "attempt",
         tuple(resolve(spec["argv"])), spec["cwd"], spec["root"], str(state.path), str(path), ledger_id,

@@ -138,7 +138,7 @@ def test_duplicate_control_cannot_undo_new_intent(state):
 
 
 @pytest.mark.parametrize("disposition,progress", [
-    ("continue", "research"), ("wait", "wait"), ("blocked", "blocked"), ("finalize", "finalize"),
+    ("continue", "research"), ("wait", "blocked"), ("blocked", "blocked"), ("finalize", "blocked"),
 ])
 def test_paused_result_retains_owned_progression(state, disposition, progress):
     current = turn(state)

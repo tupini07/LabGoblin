@@ -19,6 +19,7 @@ def run(root):
     from labgoblin.dashboard import DashboardServer
     from labgoblin.scheduler import ResourceLedger
     from labgoblin.state import State
+    from labgoblin import supervisor_memos
 
     assert sys.flags.isolated, "Run this installed-package check with python -I"
     assert Path(labgoblin.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()), "Source import leakage"
@@ -45,6 +46,8 @@ def run(root):
     command("batch-submit", "--file", str(project / "batch.json"))
     command("run", "--no-agent")
     state = State.open(project / ".labgoblin")
+    with state.db.read() as conn:
+        assert supervisor_memos.status(conn)["latest"] is None
     status = command("status")
     means = {item["experiment_id"]: item["metrics"]["mean"] for item in status["results"]["attempts"]}
     assert means == {"baseline": 4, "replication": 4, "shift": 5}, means
@@ -57,7 +60,7 @@ def run(root):
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
-            for route in ("/", "/research", "/tasks", "/jobs", "/resources", "/journal", "/reports", "/static/dashboard.js", "/static/dashboard.css"):
+            for route in ("/", "/memos", "/research", "/tasks", "/jobs", "/resources", "/journal", "/reports", "/static/dashboard.js", "/static/dashboard.css"):
                 with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{route}", timeout=5) as response:
                     assert response.status == 200 and response.read()
         finally:

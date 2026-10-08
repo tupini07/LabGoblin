@@ -123,6 +123,8 @@ def publish_in(conn, request, owner):
             label=excluded.label,status=excluded.status,conclusion=excluded.conclusion,updated=excluded.updated""",
                      (record_id, body, title, "proposed" if outcome == "unassessed" else outcome,
                       "" if outcome == "unassessed" else body, time.time(), time.time()))
+    from labgoblin.supervisor_memos import record_changed_in
+    record_changed_in(conn, old, content, source_id, owner)
     return source_id
 
 

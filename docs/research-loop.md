@@ -70,6 +70,57 @@ records. Search covers published bodies at a stable cutoff, including retired
 records, with explicit pagination. It does not search unpublished files or raw
 datasets. Zero matches and a short index do not prove absence.
 
+## Human-supervisor memos
+
+The root researcher authors short updates during ordinary research, reflection
+or final-analysis turns. The harness coalesces accepted assessments, hypothesis
+retirements, published strategy/reflection changes, operational blockers and
+operator requests. Ordinary notes and journal entries do not each demand a memo.
+Retirement does not imply refutation. Workers return findings to the root; they
+do not publish campaign-wide supervisor conclusions.
+
+The dashboard **Brief** leads with the latest memo and a separately sampled
+controller/accounting panel. Detailed internal rationale remains intact under
+expandable working context. **History > Supervisor memos** retains all versions,
+timestamps, generations and evidence/provenance links. Missing, invalid and stale
+updates are explicit; old-generation memos never become new plans.
+
+The packet supplies `supervisor_memo.path`, a prior memo pointer, bounded pending
+requests and an exact format. Write the optional JSON sidecar there, not inside
+the scientific handoff. Fields are `turn_id`, `packet_id`, `bottom_line`,
+`changes`, `uncertainty`, `next_step`, `decision_needed` and `references`.
+Use plain language, roughly 150-250 words (maximum 300 across narrative fields,
+8192 UTF-8 bytes total), and up to twelve exact underlying evidence IDs. Say
+explicitly when no operator decision is needed. Do not replace evidence with
+another memo or claim a snapshot describes live process health or spending.
+
+The provider captures the sidecar independently into its owned receipt.
+Publication requires an accepted root handoff, unchanged governing authority
+and delivered/retrieved references. Invalid or absent memos leave valid science
+accepted and reporting pending; no new provider call, automatic report job,
+budget or approval gate is created. A successful memo covers only delivered or
+retrieved requests within its packet cutoff, plus milestones from its own turn.
+Later requests and unread pages remain pending. Retrieve further pages through
+`research_read` operation `memos`, or the corresponding CLI:
+
+```powershell
+labgoblin research memos --json
+labgoblin research memos --offset 8 --limit 8 --json
+labgoblin research memos --id MEMO_SOURCE_ID --json
+labgoblin research request-memo --id supervisor-update-1 --reason "Explain progress and remaining uncertainty" --json
+```
+
+The last command is operator-only and idempotent by ID and generation. It queues
+communication for the next eligible ordinary root turn; it does not wake a
+blocked/closed campaign or launch a reporting turn. Replies, scope changes and
+exceptions use existing explicit operator directives/controls. Silence is not
+approval, and dashboard observer chat remains read-only.
+
+Memo sources and requests are derived communication, not scientific progress,
+new evidence or a reason to reset coaching/compaction guards. Existing scientific
+handoff bytes/digests, schema-4 campaign state and previously frozen work remain
+valid. No live campaign is upgraded simply by installing a newer development tree.
+
 ## Reflection and coaching
 
 Root handoffs can request `"reflection": true` with a continuation decision or
@@ -79,18 +130,30 @@ heavy jobs or commission workers during that reflection turn. It may continue,
 pivot, revisit an old idea or substantiate a limitation without fabricating an
 experiment. It is distinct from archive compaction.
 
-With coaching enabled, `blocked`, `finalize`, or an empty `wait` is a stopping
+Root `blocked`/`finalize` proposals name `stop_basis`: `goal_satisfied`,
+`operator_needed`, or `discretionary`. A missing basis in a legacy result is
+treated as discretionary, without rewriting historical receipts. Retiring a
+branch is an ordinary continuation/reflection decision, not campaign closure.
+Goal satisfaction requires the original criterion and exact delivered evidence
+or published research revision references; a classifier is not proof of success.
+
+With coaching enabled, a discretionary stop or genuinely empty `wait` is a
 proposal, not immediate approval. Live owned experiments/tasks settle first.
+Completion evidence arriving after the packet was prepared wakes normal
+research instead of invoking a coach; repeating an empty wait without new
+evidence still enters review. Explicit access/authority dependencies go to the
+operator with the specific missing permission/input, not a speculative workaround.
 A fresh empty-mode coach can only retrieve retained evidence and return one of:
 
 | Decision | Meaning |
 |---|---|
 | `request_reflection` | Ask at most four process questions; the researcher chooses the next scientific action. |
-| `accept_stop` | Accept the process justification, not certify scientific success. |
+| `accept_stop` | Permit an evidence-linked `goal_satisfied` proposal to enter finalization, not certify scientific success. |
 | `needs_operator` | Preserve an unresolved decision explicitly. |
 
 The coach distinguishes constraints from assumptions and challenges
-generalization from one failed branch. It must not choose experiments, models,
+generalization from one failed branch. It asks what an incremental step could
+teach, not whether one experiment solves every remaining deficiency. It must not choose experiments, models,
 hypotheses or new scope. Prompt constraints do not prove perfect compliance:
 behavioral evaluation must check actual output.
 
@@ -100,9 +163,16 @@ review is never acceptance. Exact generation, authority, configuration, evidence
 and result identities are retained. Operator stop, unknown accounting and safety
 limits take precedence. Successful closure still needs the sealed inventory's
 ordinary final assessment; blocked is not success.
-New attempts, evidence, active claims or explicitly published reflection/strategy
-bodies can establish a new episode. Knowledge-note, journal and summary churn
-alone cannot reset the two-review bound.
+Only changed authority/configuration, attempts, captured observations or retained
+journal imports establish a new review basis. Rewording hypotheses, reflection,
+strategy or summaries cannot reset the two-review bound. The full review snapshot
+also fences published research revisions while a coach is running.
+
+The service does not let a coach approve discretionary partial closure, uncertain
+marginal value or "no single step completes the goal." Such acceptance becomes
+`needs_operator`; disabling coaching does not bypass this stopping authority.
+Hard limits and operator stops remain independent. No minimum experiment/pivot
+count, compulsory delegation or requirement to spend the full budget is imposed.
 
 ```powershell
 labgoblin research status --json
@@ -112,6 +182,41 @@ labgoblin research coach --id EPISODE --decision continue --reason "Operator dec
 Operator resolution only applies to an exact unresolved, settled episode.
 `accept_stop` rejects a changed evidence/authority snapshot. A researcher cannot
 authorize its own operator resolution.
+
+### Preflight, final correction and memory overhead
+
+SDK `research_preflight` and `labgoblin research preflight --file HANDOFF.json`
+validate the calling turn's complete proposed handoff through the acceptance
+path in a rolled-back transaction. They do not publish records, acknowledge
+events, capture worker artifacts, accept a result or seal admission. Actual
+acceptance still requires the exact owned completion receipt. Assessed
+`research_updates` require their own `links`, while `research_refs` names only
+exact published research revisions.
+
+For SDK final analysis, a parseable invalid final draft gets at most one
+automatic structure/reference correction in the **same session, allowance and
+deadline**, before result capture. Original drafts and validation errors are
+retained. The correction cannot change scientific text, outcomes, dispositions,
+limitations or remove assessments. Evidence must already be retained; the sealed
+inventory cannot change. Invalid JSON, stale ownership, exhausted allowance,
+cancellation or another invalid result ends honestly unassessed. CLI transports
+use explicit preflight; they do not gain an extra provider invocation.
+
+Archive size no longer triggers automatic paid compaction: fresh packets already
+bound focus/summary previews and offer exact retrieval. Operator or researcher
+requests remain available, deduplicated by source revision. New compaction
+packets omit the redundant full current handoff and cap the derived summary at
+4096 UTF-8 bytes, retaining originals and retrieval pointers. Previously admitted
+packets retain their frozen limits; unstarted automatic requests are cancelled.
+
+The iterative-loop wording takes inspiration from
+[karpathy/autoresearch's program](https://github.com/karpathy/autoresearch/blob/master/program.md):
+compare, experiment, inspect actual results, retain or discard an idea, and
+choose the next question; revisit near misses and prefer simplicity when
+supported. LabGoblin does **not** adopt an unconditional "never stop" rule,
+fixed five-minute jobs, a single metric/file, destructive Git resets or relaxed
+permissions. Long managed jobs, scientific uncertainty and operator limits
+remain first-class.
 
 ## Adaptive direct work or flat workers
 
@@ -130,7 +235,6 @@ or a JSON operation with `labgoblin research task --file operation.json`.
     "research_refs": [],
     "dependencies": [],
     "max_invocations": 3,
-    "max_credits": 200,
     "max_seconds": 3600
   }
 }
@@ -147,11 +251,23 @@ Preparation failures retain a marked, unpublished directory rather than
 pretending a task was admitted. A replay uses the original database task;
 interrupted or competing preparation directories are never scheduled implicitly.
 
-Tasks use the campaign's runner/input/resource settings; their finite elapsed
-allowance starts at creation, including dependency/capacity wait. Provider and
-experiment envelopes retain that absolute deadline, enforced by
-the payload owner even without a running controller. The per-operation deadline
-may end work sooner. Dependencies
+Tasks use the campaign's runner/input/resource settings. Their elapsed allowance
+defaults to `research.task_max_seconds` (7200 seconds in starter settings).
+Set it to `"unlimited"` to remove the aggregate lifetime ceiling, including
+dependency/capacity waits and time spent in long compute jobs. A charter can omit
+`max_seconds` to inherit that setting, or request positive seconds or `"unlimited"`
+within the configured ceiling. Zero and explicit null requests are invalid;
+persisted unlimited charters/configuration snapshots use JSON null.
+
+A finite task allowance starts at creation, including waits. Submissions reject
+jobs exceeding the remaining allowance. Provider and experiment envelopes retain
+that absolute deadline, enforced by the payload owner even without a running
+controller. Unlimited tasks have no aggregate deadline, but every job and reasoning
+turn still needs a positive finite deadline. Long jobs (for example, a six-hour
+compile) run under their own deadline while the worker yields and resumes on the
+completion event; waiting requires no live LLM call or polling invocations.
+Existing charters and frozen launches keep their original limits across restarts.
+Dependencies
 must already exist in the generation, making cycles impossible. Failed/cancelled
 dependencies converge to an explicit cancelled task. Task cancellation requests
 owned launch retirement but never releases uncertain grants.
@@ -187,29 +303,44 @@ actions outside the API. Input isolation depends on the selected runner.
 
 Starter settings keep coaching/delegation disabled. Enabling them requires
 Copilot SDK transport; ordinary Claude/CLI research retains the shared CLI
-publication interface. Set finite allowances deliberately:
+publication interface. Set the total research allowance and concurrency/time limits deliberately:
 
 ```toml
+[campaign]
+max_ai_credits = 20000
+
 [research]
 coaching = true
-coach_credits = 100
 max_parallel_agents = 2
 max_tasks = 4
 task_max_invocations = 4
-task_max_credits = 300
 task_max_seconds = 7200
-invocation_credits = 300
 ```
 
 These are example ceilings, not authorization to spend on an existing campaign.
 `max_tasks = 0` disables delegation; `max_parallel_agents` includes root/coach
 and workers. CPU/RAM and the shared ledger can serialize work even with a higher
-agent limit. Per-task/per-call budgets partition the campaign allowance; they
-are not additional money. Every canary, worker, reflection, coach, report and
-compaction counts. Ordinary admission retains final-analysis and configured
-coaching reserves. Unused proven reservations return; missing usage stays
+agent limit. `campaign.max_ai_credits` is the only research credit setting.
+Tasks have no separate credit ceiling; their usage is still reported individually.
+Every canary, worker, reflection, coach, report and compaction draws from that pool.
+
+The controller automatically reserves provider-call allowances transactionally.
+After protecting the provider's 30-credit minimum for final analysis and the
+remaining coaching/reflection steps, it divides available credits among remaining
+configured reasoning slots. A canary gets only the provider minimum. Reservations
+are temporary commitments, not spending or independent per-task budgets; returned
+unused allowance can fund later turns of any task. Unlimited campaign credits
+do not introduce a hidden per-task or ordinary-call cap.
+Unused proven reservations return; missing usage stays
 unknown and cannot be automatically estimated. Credit caps remain post-response
 soft caps, not guaranteed billing caps.
+
+Remove the former `research.coach_credits`, `task_max_credits` and
+`invocation_credits` fields from TOML, and `max_credits` from new task requests.
+They produce explicit configuration/request errors instead of silently ignored
+limits. Historical snapshots remain readable without rewriting them; already
+reserved invocations and positive ceilings in old task charters remain binding.
+New tasks are marked as using the campaign pool.
 
 All TOML changes require controller restart. Existing armed envelopes remain
 unchanged. Dashboard observer/setup usage remains separate from research roles.

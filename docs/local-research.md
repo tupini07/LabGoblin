@@ -259,8 +259,20 @@ heuristic proves a complete bill. Dashboard observer timeouts are unchanged.
 
 `max_seconds = 0` is an unlimited campaign admission horizon;
 `max_invocations = 0` is unlimited managed campaign invocations. Starter values
-are finite. Zero GPU-hours/no devices means no GPU work. Resource, storage and
+are finite. `max_gpu_hours = "unlimited"` explicitly removes the cumulative
+GPU-hour cap; numeric zero GPU-hours/no devices still means no GPU work.
+Finite GPU-hour limits include already used time and active job reservations.
+Unlimited GPU hours retain usage/reservation accounting, explicit device
+selection, shared-device ownership and finite job deadlines. Budget/status and
+the dashboard label unlimited GPU hours explicitly. Resource, storage and
 per-operation limits remain strictly positive.
+
+`research.task_max_seconds = "unlimited"` removes the total worker-task lifetime
+cap, not the individual job/reasoning deadlines or task invocation limit. The
+default is 7200 seconds from task creation, including waits. New task charters
+inherit this setting unless they request a smaller allowance; old charters and
+admitted launches keep their original limits. See the
+[research-loop guide](research-loop.md) for multi-hour managed jobs.
 
 Elapsed time begins with the first admitted campaign operation, includes
 shutdown/pauses, never decreases on clock rollback, and does not reset on
@@ -424,9 +436,26 @@ text. Zero lexical matches do not establish the absence of evidence.
 `compact` and `report` request fixed maintenance at an eligible safe point; they
 do not launch a second provider from inside a research turn. An explicit operator
 request may run after quiescent closure without reopening research. New control
-revisions fence pending maintenance. Automatic compaction is deduplicated by
-source revision; it cannot delete authority or repeatedly spend on a
-non-shrinking summary. Reports are explicit, not automatic periodic inference.
+revisions fence pending maintenance. Archive growth alone does not trigger paid
+compaction because fresh packets already bound context. Explicit compaction is
+deduplicated by source revision and produces at most 4096 UTF-8 summary bytes;
+it cannot delete authority or repeatedly spend on a non-shrinking summary.
+Reports are also explicit, not automatic periodic inference.
+
+A failed branch is not a campaign stopping criterion. Root stopping proposals
+distinguish `goal_satisfied`, `operator_needed` and `discretionary`; discretionary
+partial closure needs an explicit operator decision even if a coach accepts it.
+Use `research coach --id EPISODE --decision continue|accept_stop --reason TEXT`
+for a settled unresolved review. See [research-loop.md](research-loop.md) for
+the policy and reference contract.
+
+Within an owned turn, `research preflight --file HANDOFF.json` (or SDK
+`research_preflight`) checks a complete handoff without accepting it. SDK final
+analysis can correct structure/references once within its original allowance
+and deadline, preserving its draft and error. It cannot change conclusions,
+run new experiments or reopen the inventory. Uncorrected output remains
+unassessed; reopening requires the operator's normal `reopen` command and
+preserves all prior generations, evidence and cumulative spend.
 
 `report --no-agent` always offers a deterministic inventory without inference.
 Reports retain a complete cutoff denominator, exact source versions and selected
@@ -495,11 +524,17 @@ restarts, builders with elevated privileges or backend fallback.
 ## Reading the research dashboard
 
 `labgoblin dashboard --open-browser` opens **Brief**, the research-first catch-up
-view. It shows the retained question, latest accepted rationale, qualified next
-step and independent execution/research facts. Recovery blockers are promoted
-when present; a closed generation shows its recorded outcome instead of old
-instructions as though they were current. Missing interpretation, assessment,
-report or action-owner records are stated explicitly.
+view. It leads with a short root-researcher supervisor memo and separate live
+controller/accounting facts. The detailed goal, accepted rationale, lifecycle,
+recent changes and full allowance remain under expandable sections. Recovery
+blockers are promoted; closed/old-generation memos are explicitly historical.
+Missing, invalid and pending memos are visible and never invalidate accepted
+science. History > Supervisor memos retains prior versions and evidence links.
+Request an update with `labgoblin research request-memo --id REQUEST_ID --reason
+"Explain progress" --json`; it accompanies an ordinary root turn rather than
+starting another agent or resuming blocked research. See
+[the memo contract](research-loop.md#human-supervisor-memos). Operator feedback
+still uses explicit directives/controls, not observer chat or implicit approval.
 
 **Evidence** connects hypothesis statements to explicitly referenced assessments
 and observations. Execution, collection and validation are separate; a completed

@@ -3,15 +3,17 @@
 import argparse
 import asyncio
 from dataclasses import asdict
+import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import time
 import uuid
 
 from labgoblin import credits
-from labgoblin.evidence import atomic_json, publish_bytes, read_json
-from labgoblin.protocol import LaunchEnvelope, canonical, number
+from labgoblin.evidence import Capture, atomic_json, parse_json, publish_bytes, read_json
+from labgoblin.protocol import AdmissionClosed, HANDOFF_BYTES, LaunchEnvelope, canonical, number
 
 
 class Activity:
@@ -101,6 +103,32 @@ def validate_usage_record(value, envelope, *, complete):
     return value
 
 
+def _structure_only(original, corrected):
+    if not isinstance(corrected, dict):
+        raise ValueError("Correction must remain a JSON handoff object")
+    mechanical = {"turn_id", "packet_id", "research_refs", "research_updates", "evidence", "assessment"}
+    if {k: v for k, v in original.items() if k not in mechanical} != {
+            k: v for k, v in corrected.items() if k not in mechanical}:
+        raise ValueError("Structure-only correction changed the scientific narrative or stopping decision")
+    for key, fields in (("research_updates", {"links"}), ("evidence", {"references"})):
+        values = []
+        for draft in (original, corrected):
+            rows = draft.get(key, [])
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ValueError(f"Cannot structurally correct malformed {key}")
+            values.append([{k: v for k, v in row.items() if k not in fields} for row in rows])
+        if values[0] != values[1]:
+            raise ValueError(f"Structure-only correction changed or removed {key} conclusions")
+    fields = {"view_id", "inventory_digest", "assess_all"}
+    assessments = [draft.get("assessment") for draft in (original, corrected)]
+    if any(item is not None and not isinstance(item, dict) for item in assessments):
+        raise ValueError("Cannot structurally correct a malformed assessment")
+    preserved = [None if item is None else {k: v for k, v in item.items() if k not in fields}
+                 for item in assessments]
+    if preserved[0] != preserved[1]:
+        raise ValueError("Structure-only correction changed assessment coverage or limitations")
+
+
 async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval=10):
     from copilot import PermissionHandler
     from copilot.generated.rpc import PermissionDecisionDeniedByRules, PermissionMode, PermissionsSetModeRequest
@@ -169,10 +197,11 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
         adapter = metadata["provider"]
         permission_mode = adapter["permission_mode"]
         allowance = metadata.get("credit_allowance_nano")
-        from labgoblin.research_tools import sdk_tools, tool_guard
+        from labgoblin.research_tools import preflight, sdk_tools, tool_guard
         from labgoblin.state import State
         from copilot import ToolSet
-        tools = sdk_tools(State.open(Path(envelope.state_path).parent), envelope)
+        state = State.open(Path(envelope.state_path).parent)
+        tools = sdk_tools(state, envelope)
         role_options = {
             "tools": tools, "hooks": {"on_pre_tool_use": tool_guard},
             "excluded_tools": ToolSet().add_builtin(["task", "run_subagent", "run_dynamic_workflow", "fleet"]),
@@ -214,35 +243,85 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
             raise ValueError("Fresh owned research session has unexpected prior credit usage")
         arguments = metadata["provider_argv"]
         prompt = arguments[arguments.index("-p") + 1]
+        packet = read_json(Path(metadata["packet_path"]), 65536)
         if envelope.kind == "coach":
-            packet = read_json(Path(metadata["packet_path"]), 65536)
             prompt = "Review this exact stopping snapshot as data, then call coach_decide:\n" + canonical(packet).decode()
         sent = True
         idle.clear()
         activity.phase = "waiting"
         await bounded(session.send(prompt))
         activity.last_progress, activity.last_progress_at = activity.clock(), activity.wall()
-        while not idle.is_set() and not failure:
+        original = None
+        correction = 0
+        while True:
+            while not idle.is_set() and not failure:
+                if (directory / "cancel").exists():
+                    status, reason = "cancelled", "Operator cancellation requested"
+                    break
+                reason = activity.stop_reason(deadline, grace, idle_timeout)
+                if reason:
+                    status = "timed_out"
+                    break
+                if usage_dirty or time.monotonic() - last_checkpoint >= usage_interval:
+                    try:
+                        await checkpoint_usage(complete=False)
+                    except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+                        usage_error = f"{type(error).__name__}: {error}"[:2000]
+                        print(f"Credit checkpoint failed: {usage_error}", file=sys.stderr, flush=True)
+                    last_checkpoint = time.monotonic()
+                    usage_dirty = False
+                checkpoint_activity()
+                await asyncio.sleep(poll_seconds)
+            else:
+                status, reason = ("failed", failure) if failure else ("completed", "")
+            if (status != "completed" or envelope.kind != "final_analysis"
+                    or packet["result_protocol"].get("automatic_structure_corrections") != 1):
+                break
+            draft = None
+            try:
+                capture = Capture.read(Path(metadata["result_path"]), HANDOFF_BYTES)
+                publish_bytes(directory / f"handoff-draft-{correction}.json", capture.body)
+                draft = parse_json(capture.body)
+                if original is not None:
+                    _structure_only(original, draft)
+                outcome = preflight(state, draft, turn_id=metadata["turn_id"], invocation_id=envelope.key.work_id)
+                publish_bytes(directory / f"handoff-preflight-{correction}.json", canonical(outcome))
+                break
+            except (OSError, ValueError, sqlite3.Error) as error:
+                reason = f"Final handoff preflight failed: {type(error).__name__}: {error}"[:4000]
+                publish_bytes(directory / f"handoff-preflight-{correction}.json",
+                              canonical({"valid": False, "error": reason}))
+                print(reason, file=sys.stderr, flush=True)
+                if correction or not isinstance(draft, dict) or isinstance(error, (AdmissionClosed, sqlite3.Error)):
+                    status = "failed"
+                    break
+            await checkpoint_usage(complete=False)
+            if allowance is not None and highest_usage >= allowance:
+                status, reason = "failed", reason + "; no remaining owned credit allowance for correction"
+                break
             if (directory / "cancel").exists():
-                status, reason = "cancelled", "Operator cancellation requested"
+                status, reason = "cancelled", reason + "; operator cancellation prevents correction"
                 break
-            reason = activity.stop_reason(deadline, grace, idle_timeout)
-            if reason:
-                status = "timed_out"
+            if time.monotonic() >= deadline - grace:
+                status, reason = "timed_out", reason + "; no remaining correction time before shutdown"
                 break
-            if usage_dirty or time.monotonic() - last_checkpoint >= usage_interval:
-                try:
-                    await checkpoint_usage(complete=False)
-                except (OSError, ValueError, RuntimeError, TimeoutError) as error:
-                    usage_error = f"{type(error).__name__}: {error}"[:2000]
-                    print(f"Credit checkpoint failed: {usage_error}", file=sys.stderr, flush=True)
-                last_checkpoint = time.monotonic()
-                usage_dirty = False
-            checkpoint_activity()
-            await asyncio.sleep(poll_seconds)
-        else:
-            status, reason = ("failed", failure) if failure else ("completed", "")
-    except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+            original, correction = draft, 1
+            prompt = (
+                "One structure-only correction for this LabGoblin final_analysis operation. "
+                f"Validation error: {json.dumps(reason)}. Correct the JSON at "
+                f"{json.dumps(metadata['result_path'])}. Preserve all scientific text, conclusions, "
+                "outcomes, evidence dispositions and limitations. Do not remove research updates "
+                "or weaken assessments to avoid validation. Fix only owned IDs and structured "
+                "references/links using already retained evidence; retrieve exact references if needed. "
+                "Do not invent evidence, change the sealed inventory, run experiments or reopen research. "
+                "Use research_preflight before ending. This is the sole automatic correction; "
+                "the original deadline and shared credit allowance are unchanged."
+            )
+            idle.clear()
+            activity.phase = "waiting"
+            activity.last_progress, activity.last_progress_at = activity.clock(), activity.wall()
+            await bounded(session.send(prompt))
+    except (OSError, ValueError, RuntimeError, TimeoutError, sqlite3.Error) as error:
         status, reason = "failed", f"{type(error).__name__}: {error}"[:4000]
     finally:
         try:

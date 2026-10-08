@@ -124,7 +124,7 @@ def main(argv=None):
     from labgoblin.credits import parse_limit
     parse_limit(args.credits, "evaluation credits")
     if args.credits < 600:
-        parser.error("Each campaign needs at least 600 credits to compare configured coaching reserves")
+        parser.error("This behavioral comparison requires at least 600 total campaign credits per variant")
     if "direct" in variants and (args.baseline_source is None or not (args.baseline_source / "labgoblin").is_dir()):
         parser.error("Direct baseline requires the preserved compatible pre-workspace source checkout")
     total = args.credits * len(variants) * len(scenarios) * len(seeds)

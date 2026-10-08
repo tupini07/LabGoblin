@@ -98,6 +98,23 @@ def test_bounded_probe_refuses_truncated_output():
         backends.command([sys.executable, "-c", "print('a'*100000)"], limit=1024)
 
 
+def test_probe_preserves_windows_driver_locations_without_inheriting_secrets(monkeypatch):
+    from labgoblin.payload import process_environment
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
+    monkeypatch.setenv("PRIVATE_TEST_SECRET", "not-for-probes")
+    env = process_environment({"cpus": 1})
+    assert env["ProgramFiles"] == env["ProgramW6432"] == r"C:\Program Files"
+    assert "PRIVATE_TEST_SECRET" not in env
+    assert env["CUDA_VISIBLE_DEVICES"] == ""
+
+
+def test_failed_probe_reports_driver_errors_written_to_stdout():
+    with pytest.raises(RuntimeError, match="stdout: Failed to initialize NVML"):
+        backends.command([sys.executable, "-c",
+                          "print('Failed to initialize NVML: Unknown Error'); raise SystemExit(255)"])
+
+
 @pytest.mark.parametrize("endpoint", ["tcp://127.0.0.1:2375", "ssh://localhost", "tcp://remote:2376"])
 def test_docker_remote_endpoints_are_not_local_even_when_loopback(endpoint, monkeypatch):
     monkeypatch.setattr(backends, "command", lambda *args, **kwargs: endpoint)

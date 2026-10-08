@@ -78,6 +78,21 @@ def test_finite_budget_boundaries():
         limit.allows(-1)
 
 
+@pytest.mark.parametrize("limit,expected", [("unlimited", None), (0, 0), (0.25, 0.25)])
+def test_gpu_hours_explicit_limit_roundtrip(tmp_path, limit, expected):
+    from labgoblin.config import restore_config
+    value = config(tmp_path, campaign={"max_gpu_hours": limit})
+    assert value.campaign.max_gpu_hours == expected
+    snapshot = json.loads(canonical(asdict(value)))
+    assert restore_config(snapshot, revision=value.revision, path=value.config_path) == value
+
+
+@pytest.mark.parametrize("limit", [None, True, -1, float("inf"), float("nan"), "0", "Unlimited", ""])
+def test_invalid_gpu_hour_limits(tmp_path, limit):
+    with pytest.raises(ValueError, match="campaign.max_gpu_hours"):
+        config(tmp_path, campaign={"max_gpu_hours": limit})
+
+
 def test_runner_fields_are_kind_specific_and_explicit(tmp_path):
     raw = initial_config("fixture")
     raw["runners"].update({

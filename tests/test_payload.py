@@ -66,6 +66,26 @@ def test_task_absolute_deadline_survives_absent_controller(spec, expired):
         assert_process_exited(read_json(handle))
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+def test_unlimited_task_retains_operation_deadline_and_cancellation(spec, cancel):
+    spec["argv"] = [sys.executable, "-c", "import time;time.sleep(10)"]
+    spec["envelope"] = {"metadata": {"task_deadline": None}}
+    timer = None
+    if cancel:
+        timer = threading.Timer(0.4, lambda: Path(spec["cancel_path"]).touch())
+        timer.start()
+    else:
+        spec["seconds"] = 0.4
+    try:
+        result = run_process(spec)
+    finally:
+        if timer:
+            timer.join()
+    assert result["status"] == ("cancelled" if cancel else "timed_out"), result
+    assert result["elapsed"] < 5
+    assert_process_exited(read_json(Path(spec["root"]) / "process-handle.json"))
+
+
 def test_real_payload_retains_bounded_output_and_reaps(spec):
     spec["argv"] = [sys.executable, "-c",
                     "import sys;sys.stdout.write('x'*200000);sys.stderr.write('y'*150000)"]

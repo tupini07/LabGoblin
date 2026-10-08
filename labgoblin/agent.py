@@ -145,10 +145,10 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
     cwd = config.root
     task_deadline = None
     if turn["scope_id"] != "root":
-        from labgoblin.research_tasks import get
+        from labgoblin.research_tasks import deadline, get
         task = get(state, turn["scope_id"])
         cwd = Path(task["root"]) / "work"
-        task_deadline = task["created"] + task["charter"]["max_seconds"]
+        task_deadline = deadline(task)
     nonce = identifier()
     launch_root = root / "launches" / nonce
     result = root / "handoff.json"
@@ -167,6 +167,9 @@ def prepare(state, config, turn_id: str, invocation_id: str, grant: dict, *, ada
         "credit_allowance_nano": state.credit_allowance(invocation_id),
         "task_deadline": task_deadline,
     }
+    context = json.loads(packet["content"])
+    if invocation["kind"] != "canary" and "supervisor_memo" in context:
+        metadata["supervisor_memo_path"] = str(contained(root, context["supervisor_memo"]["path"]))
     ledger_path, ledger_id = state.ledger_identity()
     executable_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
     environment = {

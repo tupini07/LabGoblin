@@ -411,7 +411,6 @@ class Campaign:
                         research_tasks.cancel(self.state, scope_id, f"Task preparation failed: {error}")
                         errors.append({"category": "task_preparation", "work_id": scope_id, "error": str(error)})
             if not no_agent and turn is None and current["generation_state"] != "sealed":
-                journal.automatic_compaction(self.state)
                 maintenance = self.state.pending_maintenance()
                 if maintenance:
                     try:

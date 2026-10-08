@@ -276,9 +276,9 @@ def parser():
     hypothesis.add_argument("--label", default="")
     hypothesis.add_argument("--supersedes")
     research = command("research", "Explicit research publication, revision retrieval, search and flat tasks")
-    research.add_argument("action", choices=("list", "search", "read", "history", "publish", "export", "task", "status", "coach"))
+    research.add_argument("action", choices=("list", "search", "read", "history", "publish", "export", "task", "status", "coach", "preflight", "memos", "request-memo"))
     research.add_argument("--id")
-    research.add_argument("--file", type=Path, help="JSON draft under research/, or task operation request")
+    research.add_argument("--file", type=Path, help="JSON research draft, task request or owned handoff for preflight")
     research.add_argument("--query", default="")
     research.add_argument("--limit", type=int, default=20)
     research.add_argument("--offset", type=int, default=0)
@@ -342,6 +342,16 @@ def execute(args):
     state = State.open(args.state_dir if args.command == "reconcile" and args.state_dir else paths.state)
     if args.command == "research":
         from labgoblin import research_memory, research_tools
+        if args.action == "request-memo":
+            if turn_id:
+                raise ValueError("Only the operator requests a supervisor memo; researchers supply it with their result")
+            from labgoblin.supervisor_memos import request
+            return request(state, args.reason, request_id=args.id)
+        if args.action == "preflight":
+            if args.file is None:
+                raise ValueError("Handoff preflight requires --file")
+            return research_tools.preflight(state, read_json(args.file, 16384), turn_id=turn_id,
+                                            invocation_id=environment_value("INVOCATION_ID"))
         if args.action == "publish":
             if args.file is None:
                 raise ValueError("Publication requires --file pointing to a JSON draft under research")
@@ -362,7 +372,7 @@ def execute(args):
         request = {"operation": "record" if args.action == "read" else args.action}
         if args.id:
             request["id"] = args.id
-        if args.action in ("list", "search", "history"):
+        if args.action in ("list", "search", "history", "memos"):
             request.update(query=args.query, offset=args.offset, limit=args.limit)
             if args.cutoff is not None:
                 request["cutoff"] = args.cutoff

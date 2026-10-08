@@ -110,7 +110,7 @@ def test_owned_report_request_executes_once_without_changing_research_progress(t
     requested = state.request_maintenance("report")
     Campaign(config, state=state, ledger=ledger).run()
     current = state.campaign()
-    assert current["progress"] == before["progress"] == "wait"
+    assert current["progress"] == before["progress"] == "blocked"
     assert current["invocations"] == before["invocations"] + 1
     with state.db.read() as conn:
         report = conn.execute("SELECT outputs FROM reports").fetchone()

@@ -7,28 +7,13 @@ from labgoblin.evidence import Capture, SizeLimitError, contained, parse_json
 from labgoblin.protocol import HANDOFF_BYTES, Handoff, integer, text
 
 
-COMPACTION_THRESHOLD = 32 * 1024
-
-
-def automatic_compaction(state) -> dict | None:
-    with state.db.read() as conn:
-        campaign = conn.execute("SELECT archive_bytes,operator_mode,generation FROM campaign").fetchone()
-        if (campaign["operator_mode"] not in ("ready", "running")
-                or conn.execute("SELECT state FROM generations WHERE id=?", (campaign["generation"],)).fetchone()[0] != "open"):
-            return None
-        row = conn.execute("""SELECT s.metadata FROM source_heads h JOIN sources s ON s.id=h.source_id
-            WHERE h.name='summary'""").fetchone()
-        prior = parse_json(row[0].encode()) if row else {}
-        if campaign["archive_bytes"] - prior.get("archive_index_bytes", 0) < COMPACTION_THRESHOLD:
-            return None
-    return state.request_maintenance("compact", origin="automatic")
-
-
 def render_handoff(value: Handoff) -> str:
     lines = [f"## {value.summary}", "", "### Governing rationale", value.rationale,
              "", "### Next step", value.next_step, "", f"**{value.disposition}:** {value.reason}"]
     if value.stopping_criterion:
         lines.extend(["", "### Stopping criterion", value.stopping_criterion])
+    if value.stop_basis:
+        lines.extend(["", f"**Stopping basis:** {value.stop_basis}"])
     if value.research_refs:
         lines.extend(["", "### Research context (not a support claim)", ", ".join(value.research_refs)])
     if value.evidence:

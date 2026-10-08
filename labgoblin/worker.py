@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 
 from labgoblin.evidence import atomic_json, contained, hash_file, publish_bytes, read_bytes, read_json
 from labgoblin.processes import background_options, own_handle, process_state
@@ -21,7 +22,7 @@ RUNTIME_FILES = (
     "processes.py", "scheduler.py", "worker.py", "backends.py", "payload.py",
     "workspace.py", "agent.py", "agent_policy.py", "agent_worker.py", "copilot_worker.py",
     "journal.py", "results.py", "reporting.py", "dashboard_data.py", "dashboard_chat.py", "paths.py",
-    "research_memory.py", "research_tasks.py", "research_tools.py", "coaching.py", "briefing.py",
+    "research_memory.py", "research_tasks.py", "research_tools.py", "coaching.py", "briefing.py", "supervisor_memos.py",
 )
 BOOTSTRAP = b"""from pathlib import Path
 import sys
@@ -77,7 +78,10 @@ def verify_runtime(state: State, envelope: LaunchEnvelope):
     namespace = runtime.get("namespace")
     if namespace != "labgoblin":
         raise PreExecutionError("Frozen helper namespace is unsupported")
-    if set(runtime["files"]) != set(RUNTIME_FILES):
+    expected = set(RUNTIME_FILES)
+    if "supervisor_memos.py" not in runtime["files"] and "supervisor_memo_path" not in envelope.metadata:
+        expected.remove("supervisor_memos.py")
+    if set(runtime["files"]) != expected:
         raise PreExecutionError("Frozen helper manifest is incomplete")
     root = contained(state.root / "runtime", runtime["root"])
     manifest = {"files": runtime["files"], "bootstrap": runtime["bootstrap"], "namespace": namespace}
@@ -239,6 +243,26 @@ def recover_allocations(state: State):
     flush_releases(state)
 
 
+def _recover_unclaimed(state: State, envelope: LaunchEnvelope, launch: dict) -> bool:
+    if (launch["phase"] != "armed" or launch["supervisor"] is not None
+            or launch["payload"] is not None or not launch["launcher"]):
+        return False
+    launcher = json.loads(launch["launcher"])
+    if process_state(launcher) != "dead":
+        return False
+    verify_runtime(state, envelope)
+    receipt = LaunchReceipt(
+        envelope.key, envelope.digest, "not_started", True, 0, executed=False,
+        reason="Recorded launcher exited before committing its execution claim",
+        metadata={"recovery": "exited_before_claim", "launcher": launcher,
+                  "runtime_id": envelope.metadata["runtime"]["id"]})
+    data = asdict(receipt)
+    # Fence out a late claim before publishing a non-execution receipt.
+    state.finish_launch(envelope.key.nonce, data, unclaimed_launcher=launcher)
+    publish_bytes(launch_directory(envelope) / "receipt.json", canonical(data))
+    return True
+
+
 def reconcile(state: State, inspector=None) -> dict:
     recovered = []
     errors = []
@@ -272,6 +296,9 @@ def reconcile(state: State, inspector=None) -> dict:
             if (launch["phase"] == "armed" and launch["launcher"]
                     and process_state(json.loads(launch["launcher"])) == "alive"):
                 continue
+            if handle is None and _recover_unclaimed(state, envelope, launch):
+                recovered.append(envelope.key.work_id)
+                continue
             if inspector is not None and inspector(envelope) == "dead":
                 elapsed = max(envelope.timeout_seconds, time.time() - launch["created"])
                 receipt = LaunchReceipt(
@@ -296,6 +323,7 @@ def main(manifest: str) -> int:
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         print(f"Worker could not establish a durable outcome: {type(error).__name__}: {str(error)[:4000]}",
               file=sys.stderr)
+        traceback.print_exc(limit=20, file=sys.stderr)
         return 1
 
 

@@ -106,7 +106,8 @@ def test_frozen_allowance_reserves_final_analysis_and_is_rechecked(tmp_path):
 
 def test_canary_and_final_bundle_minimums_are_preserved(tmp_path):
     _, state, _, _, ids, _ = fixture(tmp_path, sandbox=True, credit_limit=200)
-    assert state.credit_allowance(ids[0]) == 110 * credits.NANO
+    assert state.credit_allowance(ids[0]) == 30 * credits.NANO
+    assert state.credit_allowance(ids[1]) == 110 * credits.NANO
     (tmp_path / "too-small").mkdir()
     with pytest.raises(BudgetExhausted, match="30-credit"):
         fixture(tmp_path / "too-small", sandbox=True, credit_limit=100)

@@ -172,7 +172,9 @@ def test_waiting_handoff_does_not_pay_again_for_old_unacknowledged_events(tmp_pa
     config, state, ledger, _ = fixture(tmp_path)
     result = Campaign(config, state=state, ledger=ledger).run()
     assert not result["errors"]
-    assert state.campaign()["progress"] == "wait"
+    assert state.campaign()["progress"] == "blocked"
+    with state.db.read() as conn:
+        assert conn.execute("SELECT state FROM stop_episodes").fetchone()[0] == "needs_operator"
     assert state.campaign()["invocations"] == 1
     assert state.pending_events()
     Campaign(config, state=state, ledger=ledger).run(once=True)

@@ -18,10 +18,18 @@ evidence and history, but reconsider earlier researcher assumptions and strategy
 The latest researcher focus is a revisable interpretation, not an operator directive.
 Derived summaries are unverified hints, never authority over these sources or constraints.
 Do useful support work or replication without inventing a hypothesis or discovery.
+Keep an iterative loop: establish useful comparisons, run a bounded test, assess the
+actual evidence, retain or retire the idea, and choose what to learn next. Negative
+results and actual errors are useful evidence. Revisit near misses, earlier ideas and
+assumptions when stuck. Prefer a simpler approach when evidence makes it competitive.
+One next step need not solve the entire goal; incremental information gain can justify it.
 Use the research workspace to keep general knowledge, questions, hypotheses and reflections.
 Edit draft files freely, then explicitly publish through the research tools or CLI.
 Publish scientific assessments in research_updates in this owned handoff. Jobs state their
 purpose (evaluation|exploration|support) and exact research_refs; evaluation pins hypotheses.
+Each assessed research update needs its own nonempty links array with exact target IDs
+and relations. Prose citations and top-level research_refs do not replace these links.
+Top-level research_refs names published research revisions, not observation or event IDs.
 Direct work is appropriate for a short continuous task. Delegate only separable work through
 the harness task API when enabled, never native provider subagents. Task workers own details.
 
@@ -30,6 +38,7 @@ unmanaged shell jobs. All experiments and inference share finite resources. Do n
 controllers, providers, subagents or workflows, install into shared environments, upload
 data, push code, or expand the goal. Trusted execution is not filesystem isolation.
 Do not wait synchronously for experiments while holding the reasoning grant.
+A null task max_seconds means unlimited task lifetime, not unlimited job or reasoning deadlines.
 
 Use labgoblin evidence and journal retrieval for exact revisions. Event and metric previews
 may be incomplete: inspect their coverage and retrieve more before drawing conclusions.
@@ -42,10 +51,23 @@ governing next step. Acknowledge only exact delivered event IDs; subsets may lea
 An assessed/excluded disposition requires a reason. Deferred evidence additionally needs
 a concrete wake_condition and remains unacknowledged. Cite only delivered/retrieved IDs.
 Request fixed report/compact maintenance in the handoff, never a child provider.
+Fresh packets already bound working context. Do not request compaction merely because
+the archive grew; use exact retrieval, and request a summary only when genuinely useful.
+Use research_preflight (or labgoblin research preflight --file) before returning a handoff.
+Preflight validates without publication; it does not replace writing the owned result file.
 
 Choose continue, wait, blocked, or finalize with a reason. A report or empty queue alone
-does not complete research. Finalize names the goal's stopping criterion and outstanding
-limitations. Final analysis must assess the sealed inventory; it cannot submit experiments
+does not complete research. Retire an unsuccessful branch and continue or reflect; do not
+equate it with campaign closure. For root blocked/finalize proposals, set stop_basis to
+goal_satisfied, operator_needed, or discretionary. Goal satisfaction requires finalize,
+the original stopping criterion, exact evidence/research references and honest limitations.
+Name a specific missing permission/input for operator_needed, including what remains
+possible without it. Discretionary partial closure needs operator approval, not a coach's
+permission; uncertain value or no single-step solution is not enough. Earlier researcher
+stopping prose is revisable strategy, including after an operator reopens a campaign.
+Hard budgets, safety and operator controls always prevail; never spend merely to persist.
+Workers may finalize their assigned task without claiming campaign completion.
+Final analysis must assess the sealed inventory; it cannot submit experiments
 or reopen research. Be honest about failed, unperformed, invalid and unassessed attempts.
 """
 
@@ -91,7 +113,9 @@ def _context(conn, campaign, kind, view_id=None) -> tuple[dict, list[dict]]:
     sources, constraints = {}, []
     remaining = PACKET_BYTES
     for name, source_id in heads.items():
-        if name in ("rationale", "summary") and kind in ("research", "reflection", "worker", "coach"):
+        if kind == "compact" and name == "rationale":
+            continue
+        if name in ("rationale", "summary") and kind in ("research", "reflection", "worker", "coach", "final_analysis"):
             continue
         value = _source(conn, source_id, remaining)
         remaining -= len(canonical(value))
@@ -100,7 +124,7 @@ def _context(conn, campaign, kind, view_id=None) -> tuple[dict, list[dict]]:
         value = {**dict(row), "source": _source(conn, row["source_id"], remaining)}
         remaining -= len(canonical(value))
         constraints.append(value)
-    if kind in ("research", "reflection", "worker", "coach"):
+    if kind in ("research", "reflection", "worker", "coach", "final_analysis"):
         for name in ("rationale", "summary"):
             if name not in heads:
                 continue
@@ -165,7 +189,9 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id, scope_id=
         "result_protocol": {
             "maximum_bytes": HANDOFF_BYTES,
             "required": ["turn_id", "packet_id", "summary", "rationale", "next_step", "disposition", "reason"],
-            "optional": ["evidence", "stopping_criterion", "maintenance", "research_updates", "research_refs", "reflection", "coaching"],
+            "optional": ["evidence", "stopping_criterion", "stop_basis", "maintenance", "research_updates", "research_refs", "reflection", "coaching"],
+            "stop_basis": "goal_satisfied|operator_needed|discretionary (root blocked/finalize only; missing is discretionary)",
+            "research_update_links": [{"target": "exact delivered/retrieved evidence ID", "relation": "supports|refutes|context|derived_from|supersedes|informs"}],
             "evidence_shape": {"event_id": "delivered ID", "disposition": "assessed|excluded|deferred",
                                "reason": "explanation", "references": ["revision IDs"], "wake_condition": "required if deferred"},
         },
@@ -184,6 +210,27 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id, scope_id=
         "cli": "labgoblin research --help"}
     packet["references"] = sorted(set(packet["references"]) | {record["head"] for record in records})
     references.update(record["head"] for record in records)
+    if scope_id == "root" and kind in ("research", "reflection", "final_analysis"):
+        from labgoblin.supervisor_memos import packet_context
+        packet["supervisor_memo"] = packet_context(conn, state.root / "turns" / turn_id / "supervisor-memo.json")
+        for item in packet["supervisor_memo"]["requests"]:
+            if not item["truncated"]:
+                references.add(item["id"])
+            if item["reference"]:
+                references.add(item["reference"])
+        packet["references"] = sorted(references)
+        packet["instructions"] += (
+            "\nWrite a separate supervisor-memo.json at supervisor_memo.path when an update is due, "
+            "or when this turn brings a meaningful result, assessment, retirement, pivot or operator decision. "
+            "Do not add memo fields to the scientific handoff. Use the supplied memo format, about 150-250 words "
+            "(maximum 300), plain language: bottom line, changes since the previous memo, uncertainty, next step, "
+            "and a specific decision needed (or 'None; research continues'). Cite underlying exact evidence. "
+            "Retiring a hypothesis does not necessarily refute it. Distinguish development results from goal "
+            "completion; do not invent progress or reproduce low-level logs. Retrieve truncated/more pending requests with "
+            "research_read operation=memos (or labgoblin research memos); retrieve the previous memo by its source ID. "
+            "This is asynchronous communication, not permission to pause for review, expand scope or spend. "
+            "A missing memo does not invalidate science; do not request a separate paid reporting turn. "
+            "The dashboard supplies live health and spending separately; do not claim an old snapshot is live.")
     if kind == "worker":
         from labgoblin.research_tasks import assert_owned
         task = assert_owned(conn, scope_id)
@@ -200,6 +247,12 @@ def _content(state, conn, campaign, turn_id, packet_id, kind, view_id, scope_id=
     if kind == "reflection":
         packet["instructions"] += ("\nReflect on evidence and strategy, including useful unlinked knowledge and "
                                    "retired ideas. Return a concise decision; do not run heavy jobs or delegate in this turn.")
+    if kind == "final_analysis":
+        packet["result_protocol"]["automatic_structure_corrections"] = 1
+        packet["instructions"] += ("\nThe SDK preflights the final draft before owned result capture. At most one "
+                                   "structure/reference correction can use this same session's remaining allowance "
+                                   "and deadline. It cannot change scientific conclusions, discard assessments, "
+                                   "start experiments or reopen the sealed inventory.")
     if kind == "coach":
         from labgoblin.coaching import INSTRUCTIONS as COACH_INSTRUCTIONS, packet as coach_packet
         packet["coaching"] = coach_packet(conn)
@@ -272,6 +325,7 @@ def _compaction(conn, packet):
     metadata = json.loads(conn.execute("SELECT metadata FROM sources WHERE id=?", (previous["id"],)).fetchone()[0]) if previous else {}
     scope = {"source_ids": [previous["id"]] if previous else [], "sources": [],
              "input_bytes": len(previous["text"].encode("utf-8")) if previous else 0,
+             "maximum_summary_bytes": 4096,
              "archive_after": metadata.get("archive_after", 0),
              "archive_index_bytes": metadata.get("archive_index_bytes", 0),
              "coverage": "Only listed prefixes and the prior derived summary; originals remain exactly retrievable"}
@@ -280,7 +334,8 @@ Preserve useful negative results, reasons and decisions. The goal, active constr
 rationale are separate authority and MUST NOT be replaced. Do not perform research or experiments.
 Use exact journal entry retrieval when a preview is insufficient. Semantic equivalence is not certified.
 Write only the specified owned JSON result, with source_ids exactly matching compaction.source_ids.
-The summary must be smaller than compaction.input_bytes. Do not launch any child provider.""",
+The summary must be smaller than compaction.input_bytes and at most compaction.maximum_summary_bytes
+UTF-8 bytes. Keep retrieval pointers instead of reproducing every detail. Do not launch any child provider.""",
                   result_protocol={"maximum_bytes": HANDOFF_BYTES,
                                    "required": ["turn_id", "packet_id", "summary", "source_ids"]},
                   compaction=scope)

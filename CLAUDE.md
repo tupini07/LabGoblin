@@ -10,8 +10,10 @@ LabGoblin is a local autonomous research harness, not a general workflow engine.
 Python 3.11+, native Windows, prepared WSL2 and local Linux Docker are supported.
 Configuration/campaign schemas are version 4; machine ledger and worker protocol
 remain version 3. They are separately checked; there is no campaign migration.
-`paths.py` resolves only LabGoblin names; there are no old-name aliases or frozen
-helper compatibility readers. Never rewrite admitted envelopes or receipts.
+`paths.py` resolves only LabGoblin names; there are no old-name aliases or
+old-name frozen-helper readers. The same-protocol pre-memo helper manifest stays
+valid without replacement, as documented in the runtime contract. Never rewrite
+admitted envelopes or receipts.
 Do not reintroduce cluster commands, implicit image pulls or environment installs.
 
 ```powershell
@@ -40,6 +42,7 @@ authorization and a persisted invocation allowance outside the test campaign.
 | `briefing.py`, `journal.py` | Exact bounded packets, one owned delta, protected directives and retained history. |
 | `research_memory.py`, `research_tools.py` | Explicit draft publication, immutable revisions and common CLI/SDK boundaries. |
 | `research_tasks.py`, `coaching.py` | Flat scope ownership/integration and non-prescriptive pre-stop review. |
+| `supervisor_memos.py` | Optional owned human communication, coalesced requests and immutable history; not scientific authority. |
 | `results.py`, `reporting.py` | Read-only projections, complete source inventories and immutable reports. |
 | `cli.py`, `dashboard*.py`, `static` | Structured local commands and read-only dashboard/observer. |
 
@@ -64,6 +67,11 @@ authorization and a persisted invocation allowance outside the test campaign.
 - Status/dashboard reads never initialize, migrate, reconcile, acknowledge or
   mutate research. Archival reset requires quiescence and exclusive reader access.
 - Only campaign admission time and managed invocations accept `0` as unlimited.
+  GPU hours use explicit `"unlimited"`; numeric zero still permits no GPU time.
+  Unlimited GPU hours do not bypass device grants or finite job deadlines.
+  Task lifetime accepts positive seconds or explicit `"unlimited"` (stored as
+  null); finite task deadlines remain pinned in provider/experiment envelopes.
+  Unlimited task lifetime never removes operation deadlines or invocation limits.
   Ordinary work cannot consume a finite generation's final-analysis reserve.
 - Copilot credits use `"unlimited"` or a >=30 soft cap. Aggregate owned receipt
   `totalNanoAiu`, never premium multipliers. Unknown spend blocks capped inference
@@ -77,6 +85,11 @@ authorization and a persisted invocation allowance outside the test campaign.
   spend. Credit reconciliation appends attributed evidence, never rewrites receipts.
 - Accepted handoff, exact evidence dispositions, next action and journal entry
   commit together. Human text or unrelated file changes cannot satisfy a turn.
+- Root supervisor memos use a separately captured optional sidecar, never change
+  handoff digests or reject valid science for a memo error. Report issues visibly.
+  Cover only delivered/retrieved requests at the packet cutoff and own-turn
+  milestones. Memo publication/requests cannot advance scientific progress,
+  renew coaching, schedule paid reporting, approve exceptions or wake research.
 - Published research revisions, captured observations and report sources are
   immutable. Revise a hypothesis by advancing its head; attempts keep exact
   pinned revisions. Retiring a record never deletes evidence. General knowledge
@@ -87,13 +100,21 @@ authorization and a persisted invocation allowance outside the test campaign.
 - Coaching is campaign-owned, read-only and non-prescriptive. Intercept a stop
   before sealing; missing/stale/failed review is not acceptance. Bounded pushback
   leads to researcher reflection or an explicit operator decision, not endless debate.
+  Only evidence-linked goal satisfaction can be coach-approved. Discretionary
+  partial closure requires an operator even when coaching is disabled.
+  Reworded strategy alone cannot renew the two-review allowance.
 - Every role shares campaign credits, invocation limits and machine resources.
-  Reserve finite task/call allowances transactionally; native provider spawning
+  Use one campaign credit setting and derive call reservations transactionally;
+  there are no new per-task/coach/call credit settings. Native provider spawning
   is not an alternative to managed delegation. Recursive spawning is rejected.
 - Summaries are derived hints. Never delete retained sources, active operator
-  authority or governing rationale during compaction.
+  authority or governing rationale during compaction. Archive growth alone does
+  not authorize paid compaction; bounded fresh packets already limit context.
 - Closure seals its denominator. At most one additional analysis, no automatic
   new experiments/retry cycle, and no equation of process success with research.
+  Preflight shares acceptance validation but rolls back all state/artifact writes.
+  SDK final analysis may correct structure once in its original session; preserve
+  drafts/errors and forbid altered conclusions, allowance renewal or inventory changes.
 - Observer sessions are fresh empty-mode SDK sessions, with curated read-only
   tools, separate allowance and owned machine admission. No steering, arbitrary
   commands/files, research-session attachment, or research-state writes.

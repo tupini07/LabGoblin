@@ -221,7 +221,8 @@ class WindowsPayload:
 
 def process_environment(spec):
     names = ("PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME",
-             "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA", "LANG", "PATHEXT")
+             "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA", "LANG", "PATHEXT",
+             "ProgramFiles", "ProgramW6432")
     env = {name: os.environ[name] for name in names if name in os.environ}
     if spec.get("provider"):
         env = os.environ.copy()

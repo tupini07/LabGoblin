@@ -42,6 +42,10 @@ Read/list/search exact published revisions with `labgoblin research`.
 Jobs specify `purpose` (evaluation, exploration, support) and exact `research_refs`;
 evaluation pins a published hypothesis revision. Revise or retire ideas without
 rewriting past evidence. Put scientific assessments in handoff `research_updates`.
+Every assessed update needs its own nonempty structured `links` array; prose
+citations and top-level `research_refs` do not substitute for evidence links.
+Use SDK `research_preflight` or `labgoblin research preflight --file handoff.json`
+before returning the owned result. Validation does not publish or accept it.
 Request reflection/coaching in the handoff. If enabled, delegate only through
 `research_task` or `labgoblin research task`; workers cannot delegate further.
 
@@ -51,6 +55,20 @@ continue/wait/blocked/finalize decision. Finalize names the goal stopping criter
 and limitations. A report, milestone, empty queue or successful process is not
 automatically successful research. The journal is projected from owned handoffs:
 do not write an independent checkpoint or overwrite research authority.
+Retiring a failed branch is not campaign closure: consider the researcher's own
+next informative step, which need not solve the whole goal at once. Root stopping
+proposals name `stop_basis`: `goal_satisfied`, `operator_needed`, or `discretionary`.
+Only evidence-linked goal satisfaction can be coach-approved; discretionary
+partial closure needs operator approval. Hard limits and safety always prevail.
+Previously accepted researcher stopping prose remains revisable after reopening.
+Fresh packets already bound context; archive growth alone is not a reason to
+request paid compaction.
+
+When the root packet requests a supervisor memo, write its separate optional
+sidecar alongside the handoff: a short bottom line, changes, uncertainty, next
+step and decision needed, with exact evidence links. It is asynchronous human
+communication, not a new research agent, approval gate or scientific authority.
+Follow the packet's path/format; do not add memo fields to the handoff.
 
 Do not start providers, subagents or controllers, self-expand the goal, modify
 shared environments or inputs, install into shared environments, push code,

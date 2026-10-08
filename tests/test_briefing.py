@@ -127,7 +127,8 @@ def test_sealed_analysis_pins_constraints_and_goal(state):
         conn.execute("""INSERT INTO directives(id,source_id,origin,scope,created)
             VALUES(?,?,'operator','campaign',?)""", (directive_id, source_id, time.time()))
     current = turn(state)
-    accept(state, handoff(current, disposition="finalize", stopping_criterion="Controls fully assessed."))
+    accept(state, handoff(current))
+    state.close_admission("Operator requested the sealed assessment.")
     goal(state, b"New goal, outside the sealed assessment.")
     with state.db.write() as conn:
         conn.execute("UPDATE directives SET active=0")

@@ -173,6 +173,9 @@ def supervise(envelope) -> LaunchReceipt:
         except (OSError, ValueError) as error:
             result_capture["error"] = str(error)[:2000]
         metadata["result_capture"] = result_capture
+        if envelope.metadata.get("supervisor_memo_path"):
+            from labgoblin.supervisor_memos import capture
+            metadata["supervisor_memo_capture"] = capture(envelope)
     receipt = replace(receipt, usage=usage, metadata=metadata)
     publish_bytes(launch_directory(envelope) / "backend-receipt.json", canonical(asdict(receipt)))
     return receipt

@@ -42,7 +42,7 @@ NAV = (
 SECTIONS = {
     "/evidence": (("/evidence", "Questions"), ("/research", "Research workspace"), ("/artifacts", "Measurements"), ("/compare", "Compare"), ("/goal", "Goal & protocol")),
     "/work": (("/work", "Now & next"), ("/tasks", "Tasks & coaching"), ("/monitor", "Live monitor"), ("/jobs", "Experiments"), ("/debug", "Recovery"), ("/resources", "Limits & resources"), ("/activity", "Agent turns")),
-    "/history": (("/history", "Research history"), ("/journal", "Journal"), ("/reports", "Reports"), ("/changes", "Recorded changes")),
+    "/history": (("/history", "Research history"), ("/memos", "Supervisor memos"), ("/journal", "Journal"), ("/reports", "Reports"), ("/changes", "Recorded changes")),
 }
 ROUTE_GROUP = {
     "/job": "/work", "/hypotheses": "/evidence", "/hypothesis": "/evidence",
@@ -239,6 +239,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "/": ("Research brief", self._overview), "/evidence": ("Evidence", self._evidence),
                 "/work": ("Work", self._work), "/history": ("History", self._history),
                 "/monitor": ("Live monitor", self._monitor),
+                "/memos": ("Supervisor memos", self._memos),
                 "/research": ("Research workspace", self._research),
                 "/tasks": ("Tasks & coaching", self._tasks),
                 "/compare": ("Compare measurements", self._compare), "/changes": ("Recorded changes", self._changes),
@@ -442,18 +443,39 @@ Which conclusions have experimental support?</p></div></div>
     def _overview(self):
         current = self.current
         content = self._recovery_summary() if current["blockers"] else ""
+        from labgoblin.supervisor_memos import status
+        memo = status(self.connection)
+        credits = self.budget["ai_credits"]
+        operations = _facts([
+            ("Controller sampled now", _host_process(current["controller"]) if current["controller"] else
+             "No recorded controller; independently owned work may still be active"),
+            ("Operator intent", _badge(current["operator_mode"])),
+            ("Recorded progression", _badge(current["progress"])),
+            ("Research outcome", _badge(current["research_outcome"])),
+            ("Reported research credits", f'{credits["used"]:,.2f}'),
+            ("Reserved, not spent", f'{credits["reserved"]:,.2f}'),
+            ("Unreserved credits", "Unlimited" if credits["unlimited"] else f'{credits["remaining"]:,.2f}'),
+        ]) + '<p class="muted">Process liveness is not payload health or scientific success.</p>'
+        if credits["unknown"] or credits["estimated"]:
+            operations += (f'<p class="notice">{credits["unknown"]} unknown usage record(s); '
+                           f'{credits["estimated_used"]:,.2f} additional operator-estimated credits. '
+                           f'{credits["uncovered_unknown"]} unknown record(s) without an approved estimate. '
+                           'Remaining allowance may be approximate or blocked.</p>')
+        operations += _link("/monitor", "Live work and diagnostics") + " &middot; " + _link("/resources", "All accounting and limits")
+        content += '<div class="brief-grid">' + _panel("Supervisor update", self._memo_summary(memo),
+                    _link("/memos", "Memo history")) + _panel("Live operational snapshot", operations) + "</div>"
         heads = dict((r["name"], r["source_id"]) for r in self._rows(
             "SELECT name,source_id FROM source_heads WHERE name IN ('goal','protocol','rationale')"))
         goal = self._source_excerpt(heads["goal"], 900) if "goal" in heads else _empty(
             "No recorded goal", "A research interpretation needs a versioned question and evaluation criteria.")
-        content += _panel("The research question", goal, _link("/goal", "Goal & protocol"))
+        working = _panel("The research question", goal, _link("/goal", "Goal & protocol"))
         rationale = None
         rationale_generation = None
         if "rationale" in heads:
             value = journal.entry(self.state.db, heads["rationale"])
             rationale = value.get("handoff")
             if rationale:
-                self.context["source_id"] = heads["rationale"]
+                self.context.setdefault("source_id", heads["rationale"])
                 turns = self._rows("SELECT generation FROM turns WHERE id=?", (rationale["turn_id"],))
                 rationale_generation = turns[0]["generation"] if turns else None
         closed = current["generation_state"] != "open"
@@ -488,8 +510,9 @@ Which conclusions have experimental support?</p></div></div>
                + self._lifecycle()
                + '<p class="muted">No complete action-owner record is available. Absence of a blocker is not an all-clear.</p>'
                + _link("/work", "Inspect work and limits"))
-        content += '<div class="brief-grid">' + _panel(
+        working += '<div class="brief-grid">' + _panel(
             "Closure handoff" if closed else "Latest recorded interpretation", answer) + _panel("Now & next", now) + "</div>"
+        content += _details("Researcher's working context and lifecycle", working)
         source_cutoff = self.view_snapshot["source_cutoff"]
         events = self.view_snapshot["event_cutoff"]
         catchup = ('<div class="catchup-controls" hidden><p id="catchup-status" role="status"></p>'
@@ -498,11 +521,61 @@ Which conclusions have experimental support?</p></div></div>
                    '<a id="catchup-link" href="/changes">Inspect change interval</a></div>'
                    '<p class="muted">Saves the displayed source/event cutoffs on this browser only. '
                    'Does not acknowledge research events. Latest records below are a bounded preview, not the entire interval.</p></div>')
-        content += '<div class="brief-grid">' + _panel(
-            "Recent recorded changes", catchup + self._recent_sources(0, source_cutoff, limit=4),
+        supporting = '<div class="brief-grid">' + _panel(
+            "Recent recorded changes", catchup + _details("Recorded source previews", self._recent_sources(0, source_cutoff, limit=4)),
             _link("/changes", "All recorded changes", source_cutoff=source_cutoff, event_cutoff=events))
-        content += _panel("Admission allowance", self._budget_summary(), _link("/resources", "All limits")) + "</div>"
-        return content
+        supporting += _panel("Admission allowance", _details("Full allowance", self._budget_summary()),
+                             _link("/resources", "All limits")) + "</div>"
+        return content + supporting
+
+    def _memo_article(self, value):
+        self.context["source_id"] = value["id"]
+        memo, metadata = value["content"], value["metadata"]
+        body = f'<h2 class="brief-answer">{_escape(memo["bottom_line"])}</h2>'
+        for key, label in (("changes", "Since the last update"), ("uncertainty", "Confidence & gaps"),
+                           ("next_step", "Next"), ("decision_needed", "Decision needed")):
+            body += f'<p><strong>{label}</strong><br>{_escape(memo[key])}</p>'
+        body += (f'<p class="muted">Researcher-authored interpretation &middot; {_timestamp(value["created"])} '
+                 f'&middot; Generation {metadata["generation"]}. Not an independently verified verdict or operator approval.</p>')
+        if metadata["generation"] != self.current["generation"]:
+            body += '<p class="notice">Historical memo from an earlier generation; not a current plan.</p>'
+        if self.current["generation_state"] != "open":
+            body += '<p class="notice">This generation is sealed. Memo next steps do not reopen research.</p>'
+        details = self._reference_links(memo["references"])
+        details += _facts([("Event cutoff", str(metadata["event_cutoff"])),
+                           ("Request coverage cutoff", str(metadata["request_cutoff"])),
+                           ("Owned turn", _link("/turn", "Read original handoff", id=metadata["turn_id"])),
+                           ("Exact memo", _link("/journal", "Retained memo source", entry=value["id"]))])
+        return body + _details("Evidence and provenance", details)
+
+    def _memo_summary(self, value):
+        body = (self._memo_article(value["latest"]) if value["latest"] else
+                _empty("No supervisor memo yet", "A short update will accompany an ordinary root-researcher result. "
+                       "No extra reporting agent is started; detailed research remains below."))
+        if value["pending"]:
+            detail = (f'{value["pending_count"]} unreported milestone/request(s).' if value["pending_count"] else
+                      'No new memo has been accepted for the current context.')
+            body += (f'<p class="notice">Update pending: {detail} '
+                     'The memo is a dated snapshot, not live operational status.</p>')
+        if value["authority_changed"]:
+            body += '<p class="notice">Governing authority changed since this memo.</p>'
+        result = value["last_result"]
+        if result and result["content"].get("error"):
+            body += '<p class="notice">Reporting issue: ' + _escape(result["content"]["error"]) + "</p>"
+        return body
+
+    def _memos(self):
+        from labgoblin.supervisor_memos import get, history, status
+        if self.params.get("id"):
+            value = get(self.connection, self.params["id"])
+            return _panel("Retained supervisor memo", self._memo_article(value), _link("/memos", "All memos"))
+        count = self._rows("SELECT COUNT(*) n FROM sources WHERE kind='supervisor_memo'")[0]["n"]
+        offset, pagination = self._pagination(count, page_size=20)
+        value = history(self.connection, offset=offset)
+        rows = [[_link("/memos", row["bottom_line"], id=row["id"]), _timestamp(row["created"]),
+                 str(row["metadata"]["generation"])] for row in value["memos"]]
+        return (self._memo_summary(status(self.connection))
+                + _panel("Memo history", pagination + _table(["Bottom line", "Published", "Generation"], rows)))
 
     def _source_excerpt(self, source_id, limit=1600):
         value = source_preview(self.connection, source_id, limit)
@@ -526,15 +599,17 @@ Which conclusions have experimental support?</p></div></div>
 
     def _budget_summary(self):
         content = ""
-        for key, label in (("elapsed_admission_seconds", "Elapsed admission horizon"), ("managed_invocations", "Managed invocations")):
+        for key, label in (("elapsed_admission_seconds", "Elapsed admission horizon"),
+                           ("managed_invocations", "Managed invocations"), ("gpu_hours", "GPU hours")):
             value = self.budget[key]
-            formatter = _duration if key == "elapsed_admission_seconds" else lambda n: f"{n:,.0f}"
+            formatter = (_duration if key == "elapsed_admission_seconds" else
+                         (lambda n: f"{n:,.3f}") if key == "gpu_hours" else lambda n: f"{n:,.0f}")
             limit = "Unlimited" if value["unlimited"] else formatter(value["configured"])
             remaining = "Unlimited" if value["unlimited"] else formatter(value["remaining"]) + " remaining"
             detail = f'{formatter(value["used"])} / {limit}; {remaining}'
             if value["reserved"]:
                 detail += f'; {formatter(value["reserved"])} reserved'
-            content += _meter(label, value["used"] + value["reserved"], value["configured"], detail)
+            content += _meter(label, value["used"] + value["reserved"], value["configured"] or 0, detail)
         value = self.budget["ai_credits"]
         limit = "Unlimited" if value["unlimited"] else f'{value["configured"]:,.3f}'
         detail = f'{value["used"]:,.3f} reported / {limit}; {value["reserved"]:,.3f} reserved'
@@ -853,14 +928,18 @@ Which conclusions have experimental support?</p></div></div>
         if self.params.get("id"):
             value = research_tasks.get(self.state, self.params["id"])
             charter, budget = value["charter"], value["budget"]
+            deadline = research_tasks.deadline(value)
             content = _panel("Worker charter", _facts([
                 ("Task", _escape(value["id"])), ("Parent", "root"), ("State", _badge(value["state"])),
                 ("Charter revision", _escape(value["charter_revision"])),
                 ("Invocation allowance", f'{budget["invocations"]} / {budget["max_invocations"]}'),
                 ("Reported / reserved credits", f'{budget["used"]} / {budget["reserved"]}'),
                 ("Unknown usage", str(budget["unknown"])),
-                ("Credit ceiling", str(budget["configured"])),
-                ("Task deadline", _timestamp(value["created"] + charter["max_seconds"])),
+                ("Credit allowance", ("Shared campaign pool; no per-task cap"
+                                      if budget["credit_scope"] == "campaign" else
+                                      f'Legacy task ceiling: {budget["configured"]}')),
+                ("Task deadline", "Unlimited; individual operations remain bounded"
+                 if deadline is None else _timestamp(deadline)),
             ]) + "<h3>Objective</h3>" + _markdown(charter["objective"])
                 + "<h3>Deliverables</h3>" + _markdown(charter["deliverables"]))
             content += _panel("Dependencies", " ".join(_link("/tasks", ref, id=ref)
@@ -886,10 +965,14 @@ Which conclusions have experimental support?</p></div></div>
                  _escape(json.loads(row["integrated"])["state"]) if row["integrated"] else "Not integrated"]
                 for row in tasks])) + paging
         episodes = self._rows("SELECT * FROM stop_episodes ORDER BY created DESC LIMIT 20")
-        content += _panel("Stopping reviews (latest 20)", _table(["Episode", "State", "Coach calls", "Reason", "Response"], [
-            [_escape(row["id"]), _badge(row["state"]), str(row["rounds"]), _escape(row["reason"]),
+        content += _panel("Stopping reviews (latest 20)", _table(["Episode", "State", "Basis", "Coach calls", "Reason", "Response"], [
+            [_escape(row["id"]), _badge(row["state"]),
+             _escape(json.loads(row["proposal"]).get("stop_basis") or "Unclassified"),
+             str(row["rounds"]), _escape(row["reason"]),
              _link("/journal", "Exact coach decision", entry=row["result_source"]) if row["result_source"] else "No review result"]
-            for row in episodes]))
+            for row in episodes]) + "<p>Discretionary partial closure requires an operator decision. "
+                                   "A coach may approve an evidence-linked goal-completion claim, not scientific truth. "
+                                   "Historical decisions retain their original policy and outcome.</p>")
         from labgoblin import credits
         rows = self._rows("""SELECT l.kind,l.envelope,l.receipt,l.phase FROM launches l WHERE l.kind!='attempt'""")
         costs = []

@@ -23,6 +23,11 @@ result=dict(turn_id=packet["turn_id"],packet_id=packet["packet_id"],summary="Fin
             rationale="Baseline captured; retain the sealed cohort.",next_step="Do not submit new work.",
             disposition="finalize",reason="Synthetic stopping criterion evaluated.",evidence=[],
             stopping_criterion="Assess the admitted synthetic controls and their limitations.")
+if packet["kind"] == "research":
+    result["stop_basis"]="goal_satisfied"
+    result["evidence"]=[dict(event_id=packet["events"][0]["id"],disposition="assessed",
+                            reason="Synthetic criterion considered against original authority",
+                            references=[packet["sources"]["goal"]["id"]])]
 if packet["kind"] == "final_analysis":
     inventory=packet["inventory"]
     scores=sorted(o["metrics"]["score"] for a in inventory["attempts"] for o in a["observations"]
@@ -77,7 +82,9 @@ def test_late_contradictory_admitted_result_is_in_one_final_owned_assessment(tmp
         try:
             drain(controller, lambda _: state.collection(baseline["id"])["collection"] == "complete"
                   and state.attempt(replication["id"])["status"] in ("starting", "running"))
-            drain(controller, lambda _: state.campaign()["generation_state"] == "sealed", no_agent=False)
+            drain(controller, lambda _: state.campaign()["progress"] == "wait", no_agent=False)
+            assert state.campaign()["generation_state"] == "open"
+            state.close_admission("Operator seals the admitted cohort while the replication settles")
             assert state.attempt(replication["id"])["status"] in ("starting", "running")
             assert state.campaign()["invocations"] == 1
         finally:

@@ -20,7 +20,7 @@ def check(directory):
         entry.read_string(archive.read(next(n for n in names if n.endswith(".dist-info/entry_points.txt"))).decode())
         assert dict(entry["console_scripts"]) == {"labgoblin": "labgoblin.cli:main"}
         for module in ("initialization", "setup_assistant", "setup_runtime", "state", "worker", "config", "credits", "copilot_worker",
-                       "research_memory", "research_tools", "research_tasks", "coaching"):
+                       "research_memory", "research_tools", "research_tasks", "coaching", "supervisor_memos"):
             assert f"labgoblin/{module}.py" in names
         for asset in ("dashboard.js", "dashboard-chat.js", "dashboard.css"):
             assert f"labgoblin/static/{asset}" in names

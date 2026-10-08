@@ -61,6 +61,51 @@ def test_worker_jobs_have_scoped_keys_and_confined_source_paths(tmp_path):
     finish(state, root, root_launch, disposition="wait")
 
 
+@pytest.mark.parametrize("seconds", [7200, 30000, "unlimited"])
+def test_six_hour_job_admission_uses_optional_task_deadline(tmp_path, seconds):
+    from dataclasses import asdict, replace
+    from labgoblin.protocol import Resources
+    from tests.test_state import receipt
+    config, state = campaign(tmp_path, task_max_seconds=seconds)
+    task = tasks.create(state, charter())
+    packet, provider = owned(config, state, "worker", task["id"])
+    request = {"key": "long-compile", "argv": ["python", "-c", "print('compiled')"],
+               "cwd": str(Path(task["root"]) / "work"), "seconds": 21600, "memory_mb": 128}
+    if seconds == 7200:
+        with pytest.raises(ValueError, match="remaining time allowance"):
+            workspace.submit(state, config, request, turn_id=packet["turn_id"])
+        assert not state.attempts()
+        finish(state, packet, provider, disposition="finalize", stopping_criterion="Admission checked")
+        return
+    for invalid in (0, "unlimited", None):
+        with pytest.raises(ValueError, match="seconds"):
+            workspace.submit(state, config, {**request, "seconds": invalid}, turn_id=packet["turn_id"])
+    attempt = workspace.submit(state, config, request, turn_id=packet["turn_id"])
+    finish(state, packet, provider, disposition="wait")
+    assert tasks.get(state, task["id"])["state"] == "waiting"
+    assert task["id"] not in tasks.ready(state)
+    resources = Resources(1, 128)
+    allocation = state.allocation(attempt["id"], "attempt", {"resources": asdict(resources)},
+                                  state.campaign()["revision"])
+    assert state.granted(allocation["token"])
+    grant = {"state": "granted", "owner_id": state.id, "work_id": attempt["id"],
+             "token": allocation["token"], "native_cpus": "[0]"}
+    envelope = workspace.prepare_envelope(state, config, attempt["id"], grant)
+    assert envelope.timeout_seconds == 21600
+    assert envelope.metadata["task_deadline"] == tasks.deadline(task)
+    forged = None if seconds != "unlimited" else time.time() + 3600
+    with pytest.raises(ValueError, match="task's absolute deadline"):
+        state.arm(replace(envelope, metadata={**envelope.metadata, "task_deadline": forged}))
+    state.arm(envelope)
+    state.finish_launch(envelope.key.nonce, receipt(envelope))
+    state.released(envelope.key.grant_id)
+    workspace.collect_artifacts(state, attempt["id"])
+    assert task["id"] in tasks.ready(state)
+    resumed, provider = owned(config, state, "worker", task["id"])
+    finish(state, resumed, provider, disposition="finalize", stopping_criterion="Long-job result handled")
+    assert tasks.get(state, task["id"])["budget"]["invocations"] == 2
+
+
 def test_worker_artifact_requires_exact_validation_and_conflict_checked_integration(tmp_path, monkeypatch):
     config, state = campaign(tmp_path)
     original = tmp_path / "code.py"
@@ -141,8 +186,9 @@ def test_coach_sdk_is_empty_role_with_only_evidence_and_verdict_tools(tmp_path):
     assert value["episode_id"] == packet["content"]["coaching"]["id"]
 
 
-def test_task_invocation_ceiling_and_operator_pause_preserve_bounded_scope(tmp_path):
-    config, state = campaign(tmp_path)
+@pytest.mark.parametrize("seconds", [7200, "unlimited"])
+def test_task_invocation_ceiling_and_operator_pause_preserve_bounded_scope(tmp_path, seconds):
+    config, state = campaign(tmp_path, task_max_seconds=seconds)
     task = tasks.create(state, charter(max_invocations=1))
     packet, invocation = owned(config, state, "worker", task["id"])
     finish(state, packet, invocation)
@@ -154,8 +200,9 @@ def test_task_invocation_ceiling_and_operator_pause_preserve_bounded_scope(tmp_p
     assert tasks.get(state, task["id"])["state"] == "waiting"
 
 
-def test_relative_publication_cli_and_observer_routes_do_not_mutate(tmp_path, capsys):
-    config, state = campaign(tmp_path)
+@pytest.mark.parametrize("seconds", [7200, "unlimited"])
+def test_relative_publication_cli_and_observer_routes_do_not_mutate(tmp_path, capsys, seconds):
+    config, state = campaign(tmp_path, task_max_seconds=seconds)
     directory = tmp_path / "research"
     directory.mkdir()
     (directory / "draft.json").write_bytes(canonical({"id": "unlinked", "request_id": "unlinked-v1",
@@ -170,6 +217,8 @@ def test_relative_publication_cli_and_observer_routes_do_not_mutate(tmp_path, ca
         for path in ("/research", "/research?id=" + publication["source_id"], "/tasks",
                      "/tasks?id=" + task["id"], "/journal?entry=" + task["charter"]["source_id"]):
             assert get(base, path)[0] == 200
+        detail = get(base, "/tasks?id=" + task["id"])[2].decode("utf-8")
+        assert ("Unlimited; individual operations remain bounded" in detail) == (seconds == "unlimited")
     assert dump(state) == before
     assert cli.main(["--project", str(tmp_path), "research", "read", "--json"]) == 1
     assert "exact ID" in capsys.readouterr().out
@@ -292,7 +341,8 @@ def test_role_guards_precede_early_mutation_routes(tmp_path, monkeypatch, capsys
     assert not list(tmp_path.iterdir())
 
 
-def test_controller_schedules_real_ledger_scopes_and_native_job_without_parent_grant(tmp_path, monkeypatch):
+@pytest.mark.parametrize("seconds", [7200, "unlimited"])
+def test_controller_schedules_real_ledger_scopes_and_native_job_without_parent_grant(tmp_path, monkeypatch, seconds):
     from dataclasses import asdict
     import hashlib
     import tomli_w
@@ -308,7 +358,7 @@ def test_controller_schedules_real_ledger_scopes_and_native_job_without_parent_g
     from tests.test_workspace import request
 
     config, state, ledger, raw = fixture(tmp_path)
-    raw["research"].update(coaching=True, max_tasks=2, max_parallel_agents=1)
+    raw["research"].update(coaching=True, max_tasks=2, max_parallel_agents=1, task_max_seconds=seconds)
     raw["campaign"].update(max_invocations=20, max_ai_credits=2000)
     raw["agent"].update(transport="sdk", timeout_seconds=60, shutdown_grace_seconds=5)
     config = parse_config(raw, config.config_path)
@@ -323,6 +373,9 @@ def test_controller_schedules_real_ledger_scopes_and_native_job_without_parent_g
     def provider_double(current, envelope):
         if envelope.kind == "attempt":
             assert not any(row["kind"] != "attempt" for row in ledger.rows())
+            assert envelope.metadata["task_deadline"] == tasks.deadline(scopes["task"])
+            if seconds == "unlimited":
+                assert envelope.timeout_seconds == 21600
             return start(current, envelope)
         envelope = worker.prepare_runtime(current, envelope)
         current.arm(envelope)
@@ -339,7 +392,8 @@ def test_controller_schedules_real_ledger_scopes_and_native_job_without_parent_g
             if "attempt" not in scopes:
                 directory = Path(scopes["task"]["root"]) / "work"
                 scopes["attempt"] = workspace.submit(current, config, {
-                    **request(), "cwd": str(directory), "source_files": [str(directory / "experiment.py")]},
+                    **request(), "seconds": 21600 if seconds == "unlimited" else 10,
+                    "cwd": str(directory), "source_files": [str(directory / "experiment.py")]},
                     turn_id=turn_id)
                 result["disposition"] = "wait"
             else:
@@ -368,5 +422,5 @@ def test_controller_schedules_real_ledger_scopes_and_native_job_without_parent_g
     assert state.credit_budget()["used"] == len(calls)
     assert not ledger.rows()
     with state.db.read() as conn:
-        assert coaching.pending(conn) is None
+        assert coaching.pending(conn)["state"] == "needs_operator"
         assert not conn.execute("SELECT 1 FROM turns WHERE state IN ('prepared','running')").fetchone()

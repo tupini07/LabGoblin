@@ -47,7 +47,7 @@ class ExecutionConfig:
 class CampaignConfig:
     resources: Resources
     max_jobs: int
-    max_gpu_hours: float
+    max_gpu_hours: float | None
     max_seconds: Limit
     max_invocations: Limit
     max_ai_credits: float | None = None
@@ -76,26 +76,27 @@ class AgentConfig:
 @dataclass(frozen=True)
 class ResearchConfig:
     coaching: bool = False
-    coach_credits: float = 100
     max_parallel_agents: int = 1
     max_tasks: int = 0
     task_max_invocations: int = 4
-    task_max_credits: float = 300
-    task_max_seconds: float = 7200
-    invocation_credits: float = 300
+    task_max_seconds: float | None = 7200
+
+
+def parse_task_seconds(value, name: str) -> float | None:
+    return None if value == "unlimited" else number(value, name)
 
 
 def parse_research(value, agent) -> ResearchConfig:
+    if set(table(value, "research")) & {"coach_credits", "task_max_credits", "invocation_credits"}:
+        raise ValueError("Remove research coach_credits/task_max_credits/invocation_credits; "
+                         "all research uses campaign.max_ai_credits")
     value = table(value, "research", set(ResearchConfig.__dataclass_fields__))
-    settings = ResearchConfig(**value)
+    settings = ResearchConfig(**{**value, "task_max_seconds": parse_task_seconds(
+        value.get("task_max_seconds", ResearchConfig.task_max_seconds), "research.task_max_seconds")})
     boolean(settings.coaching, "research.coaching")
     integer(settings.max_parallel_agents, "research.max_parallel_agents")
     integer(settings.max_tasks, "research.max_tasks", zero=True)
     integer(settings.task_max_invocations, "research.task_max_invocations")
-    number(settings.task_max_seconds, "research.task_max_seconds")
-    for name in ("coach_credits", "task_max_credits", "invocation_credits"):
-        if credits.parse_limit(getattr(settings, name), f"research.{name}") is None:
-            raise ValueError(f"research.{name} must be a finite credit allowance")
     if (settings.coaching or settings.max_tasks) and (agent.provider != "copilot" or agent.transport != "sdk"):
         raise ValueError("Coaching and managed delegation require Copilot SDK transport")
     return settings
@@ -268,6 +269,7 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
     campaign_config = CampaignConfig(
         resources,
         integer(campaign.get("max_jobs"), "campaign.max_jobs"),
+        None if campaign.get("max_gpu_hours") == "unlimited" else
         number(campaign.get("max_gpu_hours"), "campaign.max_gpu_hours", zero=True),
         Limit(number(campaign.get("max_seconds"), "campaign.max_seconds", zero=True)),
         Limit(integer(campaign.get("max_invocations"), "campaign.max_invocations", zero=True)),
@@ -361,19 +363,28 @@ def restore_config(snapshot: dict, *, revision: str, path: str | Path) -> LabGob
         elif value.get("kind") == "docker":
             fields.update(("image", "context", "network"))
         runners[name] = {key: item for key, item in value.items() if key in fields}
+    research = dict(table(snapshot["research"], "snapshot.research"))
+    for name in ("coach_credits", "task_max_credits", "invocation_credits"):
+        if name in research:
+            if credits.parse_limit(research.pop(name), f"snapshot.research.{name}") is None:
+                raise ValueError("Legacy research credit ceilings must be finite")
     raw = {"schema_version": CONFIG_VERSION, "project": snapshot["project"],
            "execution": snapshot["execution"], "runners": runners,
            "campaign": {**table(campaign.get("resources"), "snapshot.resources"), **limits,
-                        "max_jobs": campaign.get("max_jobs"), "max_gpu_hours": campaign.get("max_gpu_hours"),
+                        "max_jobs": campaign.get("max_jobs"),
+                        "max_gpu_hours": ("unlimited" if campaign.get("max_gpu_hours") is None
+                                          else campaign["max_gpu_hours"]),
                         "max_ai_credits": campaign.get("max_ai_credits")},
            "agent": {"transport": "cli", **snapshot["agent"]},
            "storage": snapshot["storage"], "inputs": snapshot["inputs"],
-           "dashboard": {"chat": snapshot["chat"]}, "research": snapshot["research"]}
+           "dashboard": {"chat": snapshot["chat"]},
+           "research": {**research, "task_max_seconds": (
+               "unlimited" if research.get("task_max_seconds") is None else research["task_max_seconds"])}}
     config = replace(parse_config(raw, path), revision=revision)
     normalized = {**snapshot, "campaign": {"max_ai_credits": None, **snapshot["campaign"]},
                   "agent": {"transport": "cli", "idle_timeout_seconds": 600,
                             "shutdown_grace_seconds": 30, **snapshot["agent"]},
-                  "chat": {"max_ai_credits": None, **snapshot["chat"]}}
+                  "chat": {"max_ai_credits": None, **snapshot["chat"]}, "research": research}
     if fingerprint(asdict(config)) != fingerprint(normalized):
         raise ValueError("Configuration snapshot does not round-trip through the strict schema")
     return config

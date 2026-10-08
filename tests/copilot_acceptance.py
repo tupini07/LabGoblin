@@ -49,7 +49,8 @@ alone cannot establish reproducibility.
 
 Second research turn: the baseline will have finished, while the ALREADY ADMITTED
 replication waits at a controller-owned barrier. Assess the delivered baseline
-evidence using exact event/observation IDs and request finalize, without waiting.
+evidence using exact event/observation IDs and return wait, without holding the
+reasoning grant. The operator will then seal the admitted cohort for final analysis.
 The stopping criterion is assessment of BOTH admitted conditions, including any
 late contradictory result and all limitations. Do not touch the barrier.
 
@@ -101,7 +102,7 @@ def provider_double(arguments):
         turn_id=packet["turn_id"], packet_id=packet["packet_id"], summary="Synthetic finite comparison",
         rationale="One baseline alone cannot establish reproducibility; retain the admitted replication.",
         next_step="Wait for admitted evidence." if first else "Assess the sealed inventory.",
-        disposition="wait" if first else "finalize", reason="Synthetic comparison, not generalization.",
+        disposition="finalize" if final else "wait", reason="Synthetic comparison, not generalization.",
         evidence=[dict(event_id=event["id"], disposition="assessed", reason="Synthetic evidence read.",
                        references=[item["id"] for item in event["observations"]])
                   for event in packet["events"]],
@@ -197,10 +198,12 @@ def run(root, *, live=False):
                   lambda: state.collection(baseline["id"])["collection"] == "complete"
                   and (replication_output / "ready").exists())
             controller.step()
-            until(controller.reconcile, lambda: state.campaign()["generation_state"] == "sealed"
+            until(controller.reconcile, lambda: state.campaign()["progress"] == "wait"
                   and not controller._turn())
             assert state.attempt(replication["id"])["status"] in ("starting", "running")
             assert state.campaign()["invocations"] == 2
+            assert state.campaign()["generation_state"] == "open"
+            state.close_admission("Synthetic operator seals the complete admitted cohort")
             replication_output.joinpath("release").touch()
             until(controller.reconcile, lambda: not state.active_launches() and not ledger.rows())
             until(controller.step, lambda: state.campaign()["generation_state"] == "closed")

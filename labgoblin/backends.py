@@ -47,8 +47,14 @@ def command(arguments, *, timeout=30, limit=65536) -> str:
             "log_bytes": limit, "cancel_path": str(root / "cancel"),
         })
         if result["status"] != "completed":
-            path = root / "logs" / "stderr.log"
-            error = tail(path, limit=min(limit, 8192))["text"] if path.exists() else ""
+            diagnostics = []
+            for name in ("stderr", "stdout"):
+                path = root / "logs" / f"{name}.log"
+                if path.exists():
+                    output = tail(path, limit=min(limit, 4096))["text"].strip()
+                    if output:
+                        diagnostics.append(f"{name}: {output}")
+            error = "; ".join(diagnostics)
             raise RuntimeError(f"{arguments[0]}: {result['reason']}; {error.strip()}")
         if any(item["truncated"] for item in result["logs"].values()):
             raise ValueError(f"Probe output exceeded its {limit}-byte bound")

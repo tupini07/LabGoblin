@@ -56,6 +56,7 @@ TOOLS = {
         "offset": {"type": "integer", "minimum": 0},
     }),
     "research_scopes": ("Read bounded worker/task and stopping-review state; cannot control either.", {}),
+    "supervisor_memos": ("Read the latest researcher-authored human memo and pending update status, not live health or scientific authority.", {}),
     "campaign_status": ("Read fresh recorded campaign state, budgets and experiment counts.", {}),
     "list_experiments": ("Find recent experiments by status or name. Returns at most 20 records.", {
         "status": {"type": "string", "maxLength": 40},
@@ -98,7 +99,7 @@ TOOL_REQUIRED = {
 }
 RESEARCH_SOURCES = {"goal", "protocol", "handoff", "journal_import", "summary", "directive",
                     "research_record", "worker_handoff", "coaching", "coaching_resolution",
-                    "task_charter", "task_message", "task_amendment", "task_integration"}
+                    "task_charter", "task_message", "task_amendment", "task_integration", "supervisor_memo"}
 FAILED = ("failed", "timed_out", "interrupted", "not_started")
 ATTENTION = "(a.status IN ('failed','timed_out','interrupted','not_started','recovery_required') OR a.validation='invalid' OR a.collection='failed')"
 
@@ -143,6 +144,8 @@ def snapshot(state, conn):
     changes["research"] = tuple(conn.execute("SELECT COUNT(*),MAX(updated) FROM research_records").fetchone())
     changes["tasks"] = [tuple(row) for row in conn.execute("SELECT id,state,integrated FROM research_tasks")]
     changes["coaching"] = [tuple(row) for row in conn.execute("SELECT id,state,rounds FROM stop_episodes")]
+    changes["memos"] = tuple(conn.execute("""SELECT COUNT(*),MAX(seq) FROM sources
+        WHERE kind IN ('supervisor_memo','supervisor_memo_request','supervisor_memo_status')""").fetchone())
     return {
         "campaign": current,
         "budget": state.budget(now, connection=conn),
@@ -272,7 +275,7 @@ def question_context(value):
         target = urllib.parse.urlsplit(value["url"])
         allowed = {"/", "/evidence", "/work", "/monitor", "/history", "/jobs", "/job", "/hypotheses", "/hypothesis",
                    "/activity", "/turn", "/artifacts", "/observation", "/reports", "/report", "/view",
-                   "/resources", "/journal", "/goal", "/debug", "/changes", "/compare"}
+                   "/resources", "/journal", "/goal", "/debug", "/changes", "/compare", "/memos"}
         if target.scheme or target.netloc or target.path not in allowed or "\\" in value["url"]:
             raise ValueError("Dashboard context must reference a read-only local evidence page")
     if len(json.dumps(value).encode()) > 4096:
@@ -322,6 +325,11 @@ class EvidenceReader:
                 data = research_memory.index(self.state, query=arguments.get("query", ""),
                                              offset=arguments.get("offset", 0), limit=10)
                 sources.append(_source("/research", "Published research workspace"))
+        elif name == "supervisor_memos":
+            from labgoblin.supervisor_memos import status
+            with db.read() as conn:
+                data = status(conn)
+            sources.append(_source("/memos", "Supervisor memos and pending updates"))
         elif name == "research_scopes":
             with db.read() as conn:
                 data = {"tasks": [dict(row) for row in conn.execute("""SELECT id,state,substr(reason,1,500) AS reason,result_source,

@@ -29,14 +29,21 @@ the configuration authority. Explain decisions without a mandatory questionnaire
 Setup always uses Copilot, independently of agent.provider/model/reasoning_effort.
 Preserve explicit operator choices. Zero max_seconds/max_invocations means unlimited
 campaign admission; per-operation seconds remain finite. There is no setup usage cap.
+Campaign max_gpu_hours accepts "unlimited" or a nonnegative number; zero means no
+GPU time. Unlimited GPU hours never bypass explicit devices, ownership or deadlines.
 Campaign max_ai_credits and dashboard.chat.max_ai_credits are separate post-response
 soft caps; use "unlimited" or a number >=30. Finite campaign credits require Copilot.
 Research reserves final-analysis credits. Do not equate credits with invocations.
 Explain the research workspace: unlinked knowledge, revisable questions/hypotheses,
 published immutable revisions and optional reflection. Coaching and flat delegation
 are disabled in starter settings and require Copilot SDK when enabled. Show the
-finite research coach/task/per-call credits, task time/invocations and agent/task
-concurrency limits in the preview. All consume the campaign budget, not extra money.
+task time/invocations and agent/task concurrency limits in the preview.
+research.task_max_seconds accepts positive seconds or "unlimited" for the total
+worker lifetime, including job/dependency waits; individual job and reasoning
+deadlines remain finite. Task invocation limits remain positive integers. There is
+one research credit setting, campaign.max_ai_credits, shared by every research role.
+There are no coach, task or per-call credit settings. Internal launch reservations
+are allocated automatically; dashboard chat keeps its separate allowance.
 The coach challenges process, never prescribes science. Do not enable recursion.
 Research defaults to a 1800-second hard deadline. Copilot uses the owned SDK transport,
 with a 600-second inactive-session allowance and a 30-second shutdown grace inside

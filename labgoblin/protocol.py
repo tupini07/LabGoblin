@@ -312,6 +312,7 @@ class Handoff:
     coaching: bool = False
     task_artifacts: tuple[dict, ...] = ()
     research_refs: tuple[str, ...] = ()
+    stop_basis: str = ""
 
     def __post_init__(self):
         for name in ("turn_id", "packet_id", "summary", "rationale", "next_step", "reason"):
@@ -319,6 +320,12 @@ class Handoff:
         if self.disposition not in ("continue", "wait", "blocked", "finalize"):
             raise ValueError("Disposition must be continue, wait, blocked or finalize")
         text(self.stopping_criterion, "stopping_criterion", empty=self.disposition != "finalize")
+        if self.stop_basis not in ("", "goal_satisfied", "operator_needed", "discretionary"):
+            raise ValueError("stop_basis must be goal_satisfied, operator_needed or discretionary")
+        if self.stop_basis and self.disposition not in ("blocked", "finalize"):
+            raise ValueError("stop_basis applies only to a blocked/finalize proposal")
+        if self.stop_basis == "goal_satisfied" and self.disposition != "finalize":
+            raise ValueError("Goal satisfaction requires a finalize proposal")
         if len({e.event_id for e in self.evidence}) != len(self.evidence):
             raise ValueError("Evidence event IDs must be unique")
         if set(self.maintenance) - {"report", "compact"}:

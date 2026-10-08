@@ -92,6 +92,15 @@ invocations respectively; no other zero means unlimited. Every operation still
 has a finite deadline, and an open generation reserves its final analysis.
 Managed invocations are not API-call, token, or spending caps.
 
+`research.task_max_seconds = "unlimited"` removes the aggregate worker-task
+lifetime cap (normally 7200 seconds), so multi-hour jobs can run while the worker
+yields. Each job still has an explicit finite deadline; task invocation limits,
+shared campaign budgets, ownership and cancellation remain enforced.
+
+`campaign.max_gpu_hours = "unlimited"` removes the cumulative GPU-hour cap;
+numeric `0` still permits no GPU time. Explicit GPU devices, shared admission,
+usage accounting and finite job deadlines remain enforced.
+
 Research turns default to a **30-minute hard deadline**. Copilot research uses
 the local CLI through its SDK, recording response/tool activity and partial
 credit checkpoints. In-progress responses and tools are not mistaken for idle
@@ -99,7 +108,10 @@ sessions; a bounded shutdown grace captures final usage before forced terminatio
 Activity never extends the hard limit. Claude retains the CLI transport.
 
 For Copilot, set `campaign.max_ai_credits = 1000` to bound cumulative research
-usage with a **soft credit cap**. New configs expose this as `"unlimited"` until
+across researcher, workers, coaching, reflection and maintenance. This is the
+only research credit setting; per-task usage remains visible, but tasks do not
+have separate caps. The controller automatically shares and reserves the pool.
+This is a **soft credit cap**. New configs expose it as `"unlimited"` until
 you choose a limit. Values must be at least 30 credits; `0` is not unlimited here.
 Usage survives restarts and reopening, includes retries/maintenance/final analysis,
 and reserves final-analysis allowance. In-flight responses can overshoot.
@@ -165,6 +177,10 @@ Each research turn receives a versioned packet and returns one owned delta
 handoff. Exact evidence acknowledgements, decisions, and the journal projection
 commit together. Operator constraints remain outside model-written summaries,
 and historical source revisions survive compaction.
+Branch retirement does not end the campaign. A coach may approve an
+evidence-linked goal-completion claim, but discretionary partial closure needs
+the operator. Already-completed waits resume normal evidence assessment.
+Archive growth alone no longer launches paid compaction.
 
 Finalization seals the complete attempt inventory, including failed, cancelled,
 unperformed and still-running admitted work. At most one additional analysis
@@ -172,6 +188,9 @@ assesses the sealed evidence, including late replications. Missing allowance,
 failed analysis, or a request for more work produces an honest incomplete outcome,
 not an automatic paid loop. The harness checks reference/value integrity and
 explicit coverage; it does **not** certify scientific truth, novelty or adequacy.
+Handoff preflight is available through CLI/SDK. SDK final analysis permits one
+structure-only correction inside its existing session budget and deadline,
+without reopening evidence or changing scientific conclusions.
 
 ## Research dashboard
 
@@ -184,10 +203,10 @@ around four destinations:
 
 | Destination | Purpose |
 |---|---|
-| **Brief** | Research question, latest recorded interpretation, next step, recovery attention and recent changes. |
+| **Brief** | Short researcher-authored supervisor memo, separate live controller/accounting snapshot, and expandable research context. |
 | **Evidence** | Hypothesis statements, assessment references, exact measurements and side-by-side inspection. |
 | **Work** | Experiment state, named recovery blockers, safe inspection commands and readable resource limits. |
-| **History** | Generation outcomes, folded journal entries, retained reports and immutable source inventories. |
+| **History** | Supervisor memo versions, generation outcomes, folded journal entries, retained reports and immutable source inventories. |
 
 Interpretations are attributed research records, not automatically generated
 verdicts. Validation warnings follow evidence into historical drilldowns.

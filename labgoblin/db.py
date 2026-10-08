@@ -13,6 +13,7 @@ from labgoblin.protocol import ACTIVE, DATABASE_VERSION, canonical, identifier, 
 
 APPLICATION_ID = 0x58474533
 ACTIVE_STATUSES = ACTIVE
+BUSY_TIMEOUT_SECONDS = 30
 
 SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -262,21 +263,33 @@ def connection(path: str | Path, *, write: bool = False, lease: bool = True):
 
 @contextmanager
 def _connection(path, *, write):
-    conn = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
-                           uri=True, timeout=10, isolation_level=None)
-    conn.row_factory = sqlite3.Row
+    conn = None
+    stage = "connect"
     try:
+        conn = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
+                               uri=True, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        stage = "connection settings"
         conn.execute("PRAGMA foreign_keys=ON")
         if not write:
             conn.execute("PRAGMA query_only=ON")
-        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        stage = "BEGIN IMMEDIATE" if write else "BEGIN"
+        conn.execute(stage)
+        stage = "transaction body"
         yield conn
+        stage = "commit"
         conn.commit()
-    except BaseException:
-        conn.rollback()
+    except BaseException as error:
+        if isinstance(error, sqlite3.Error):
+            name = getattr(error, "sqlite_errorname", "unknown")
+            error.args = (f"{error} [database={path}; stage={stage}; sqlite={name}; "
+                          f"busy_timeout={BUSY_TIMEOUT_SECONDS}s]", *error.args[1:])
+        if conn is not None:
+            conn.rollback()
         raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 class Database:

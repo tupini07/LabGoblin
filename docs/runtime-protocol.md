@@ -48,8 +48,15 @@ Research workspace publication and role scheduling are specified in
 [the research-loop guide](research-loop.md). One controller owns all scopes;
 root research/reflection/coaching/maintenance remains serialized, while workers
 have distinct turn slots and event acknowledgements. All invocation receipts
-are charged once to campaign accounting; per-task and per-call ceilings do not
-create additional budget. Late or cancelled worker evidence cannot advance root
+are charged once to the single `campaign.max_ai_credits` pool. Provider-call
+reservations are derived automatically, not configured as extra task/coach/call
+budgets. Historical task ceilings and frozen launch commitments remain binding.
+`research.task_max_seconds` accepts positive seconds or `"unlimited"`; snapshots
+and task charters store unlimited as null. A finite charter pins an absolute
+deadline from task creation into both provider and experiment envelopes, checked
+again at arming and enforced by the payload owner. Unlimited charters omit only
+that aggregate deadline; finite operation deadlines and cancellation still apply.
+Late or cancelled worker evidence cannot advance root
 strategy. Coach results require the same owned result capture and packet identity
 as other roles. Failed review never authorizes sealing.
 
@@ -67,6 +74,29 @@ Campaign creation takes an exclusive external `.labgoblin.lock` lease; readers,
 submission preparation and dashboard lifetimes take shared leases. Reset needs
 exclusive access and never renames a directory containing its open lock handle.
 Cached database objects verify campaign identity on every read/write.
+
+Campaign and machine-ledger connections allow up to 30 seconds of SQLite busy
+waiting for an individual operation. Durable commits on contended storage can
+hold the writer lock longer than the former ten-second allowance. WAL mode,
+full synchronous durability, read-only connections and operation deadlines are
+unchanged; a lock error never replays a transaction body or authorizes a launch
+retry. SQLite failures retain the database path, transaction stage and native
+error name. Unhandled worker startup failures also retain a traceback in the
+bounded supervisor diagnostics. Exhausted waits still fail explicitly and retain
+uncertain launch/resource ownership. These diagnostics do not constitute a
+non-execution or final-usage receipt, and updating the package does not repair
+or replace a previously admitted frozen launch.
+
+Reconciliation can retire a proven pre-claim failure: the exact recorded launcher
+has exited, the launch is still armed with no supervisor/payload, and its frozen
+runtime verifies. Workers must commit their claim before starting any provider
+or payload. These conditions are rechecked while atomically recording a
+`not_started` outcome, fencing out late claims before publishing its receipt.
+The receipt retains the launcher and frozen runtime identities; normal settlement
+then releases its unused reservations without inventing a provider bill or
+replaying that launch. Missing launcher identity, unknown liveness, a prior claim
+or damaged helper files do not qualify. A dead PID or missing receipt alone is
+still insufficient.
 
 `campaign.max_seconds = 0` and `campaign.max_invocations = 0` explicitly mean
 unlimited for those dimensions. Per-operation deadlines, resources and storage
@@ -210,6 +240,25 @@ commits acknowledgements, rationale, journal source and next action together.
 Human journal edits and post-completion result rewrites cannot stand in for it.
 Journal pages are read-only projections over retained source IDs.
 
+New root packets may advertise a separate optional supervisor-memo sidecar.
+After quiescence, the provider captures its bounded parsed content, original
+byte digest/length and normalized content digest in an independent receipt
+field. It does not change `Handoff` or any existing handoff digest. Publication
+uses the accepted-result transaction, root scope, exact turn/packet identity,
+current authority and delivered/retrieved evidence. Memo validation errors
+become retained reporting-status sources, not rejected scientific handoffs.
+There is no post-acceptance filesystem dependency or publication recovery gap.
+
+`sources`/`source_heads` retain immutable memo versions, request milestones and
+reporting status without a schema migration. Coverage is bounded by the packet
+request cutoff and actual delivery/retrieval, plus own-turn milestones; later
+requests and unread pages remain pending. These source kinds are excluded from
+substantive source revisions and do not schedule inference or renew coaching.
+Old packets/receipts without memo fields remain valid. Runtime verification
+accepts the exact predecessor helper manifest without `supervisor_memos.py`
+only when the envelope does not advertise that feature; every original helper
+hash is still checked, and no frozen file is replaced.
+
 Operator directives retain exact bytes, scope and explicit supersession. Source
 and archive pages have stable sequence cutoffs; lexical search scans at most 64
 16-KiB prefixes and returns at most 20 matches with explicit searched coverage.
@@ -220,9 +269,13 @@ bytes; a subsequent observed manual edit becomes a new attributed revision.
 Manual `.labgoblin\journal.md` imports are retained notes, never owned handoffs.
 
 Compaction is one owned, budgeted maintenance request, never an independent child
-provider. Automatic compaction becomes eligible after 32 KiB of newly indexed
-handoff/note text. Its packet contains bounded source prefixes and the previous
-derived summary, separately from mandatory authority. Summaries retain source
+provider. Archive growth no longer authorizes automatic paid compaction: fresh
+research packets already bound working context and expose exact retrieval.
+Operator/researcher requests contain bounded source prefixes and the previous
+derived summary, separately from mandatory authority and without duplicating
+the full current handoff. New summaries are at most 4096 UTF-8 bytes; frozen
+older packets retain their recorded limits. Unstarted automatic requests are
+cancelled, not silently serviced after upgrade. Summaries retain source
 IDs, prefix coverage and exact originals; shrinking bytes does not certify
 semantic equivalence. Neither a failed nor a non-shrinking compaction retries
 automatically at the same non-maintenance source revision. Maintenance events

@@ -68,6 +68,27 @@ def monitor_launch(campaign, key="monitor-job"):
     return aid, nonce, directory
 
 
+@pytest.mark.parametrize("gpu_limit,expected", [("unlimited", "Unlimited"), (0, "0.000"), (2, "2.000")])
+def test_gpu_hour_limits_are_explicit_in_read_only_dashboard(campaign, gpu_limit, expected):
+    import tomllib
+    import tomli_w
+    from labgoblin.campaign import Campaign
+    from labgoblin.config import load_config
+
+    path = Path(campaign.config.config_path)
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    raw["campaign"]["max_gpu_hours"] = gpu_limit
+    path.write_text(tomli_w.dumps(raw), encoding="utf-8")
+    with Campaign(load_config(path), ledger=campaign.ledger) as controller:
+        controller.step(no_agent=True, admit=False)
+    before = dump(campaign.state)
+    with serve(path, chat=False) as base:
+        code, _, body = get(base, "/resources")
+        assert code == 200
+        assert f"GPU hours0.000 / {expected};" in "".join(Document(body).text)
+        assert dump(campaign.state) == before
+
+
 def test_live_monitor_samples_host_identity_and_log_activity_without_writes(campaign, monkeypatch):
     from labgoblin import agent, backends
     from labgoblin.processes import own_handle
@@ -493,7 +514,7 @@ def test_update_token_catches_control_recovery_and_work_without_clock_noise(camp
     campaign.state.blocker("inspect", "ownership", "No liveness proof")
     blocked = read()
     assert blocked["event_cutoff"] == second["event_cutoff"]
-    assert blocked["source_cutoff"] == second["source_cutoff"]
+    assert blocked["source_cutoff"] == second["source_cutoff"] + 1  # Coalesced supervisor update request.
     assert blocked["change_token"] != second["change_token"]
     campaign.state.control("pause", "synthetic-pause", blocked["campaign"]["revision"])
     assert read()["change_token"] != blocked["change_token"]

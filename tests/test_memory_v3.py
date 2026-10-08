@@ -115,7 +115,8 @@ def test_late_operator_constraints_are_visible_without_replacing_sealed_scope(st
     goal(state)
     first = state.directive("Keep the original split.")
     current = turn(state)
-    accept(state, handoff(current, disposition="finalize", stopping_criterion="Original control evaluated."))
+    accept(state, handoff(current))
+    state.close_admission("Operator requested the sealed assessment.")
     second = state.directive("Do not read the retired dataset.", supersedes=first["id"])
     packet = briefing.prepare(state, "final_analysis")
     constraints = {item["id"]: item for item in packet["content"]["directives"]}
@@ -130,6 +131,7 @@ def test_owned_compaction_cannot_replace_constraints_rationale_or_historical_byt
     with state.db.read() as conn:
         original = dict(conn.execute("SELECT name,source_id FROM source_heads"))
     note = state.source("journal_import", b"Negative result and exact reason. " * 1500, origin="operator")
+    state.request_maintenance("compact")
     Campaign(config, state=state, ledger=ledger).run()
     with state.db.read() as conn:
         heads = dict(conn.execute("SELECT name,source_id FROM source_heads"))
@@ -153,6 +155,7 @@ def test_nonshrinking_compaction_never_wakes_a_paid_retry_loop(tmp_path):
     config, state, ledger, _ = fixture(tmp_path, program=program)
     Campaign(config, state=state, ledger=ledger).run()
     state.source("journal_import", b"x" * 40000, origin="operator")
+    state.request_maintenance("compact")
     Campaign(config, state=state, ledger=ledger).run()
     with Campaign(config, state=state, ledger=ledger) as controller:
         for _ in range(4):

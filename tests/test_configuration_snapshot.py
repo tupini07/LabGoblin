@@ -202,7 +202,7 @@ def test_restarting_changes_limits_without_resetting_accounting(tmp_path):
         conn.execute("UPDATE campaign SET invocations=3,gpu_hours=1.5,elapsed=27")
     with Campaign(config, ledger=ledger) as first:
         first.step(no_agent=True, admit=False)
-    raw["campaign"].update(max_seconds=0, max_invocations=0)
+    raw["campaign"].update(max_seconds=0, max_invocations=0, max_gpu_hours="unlimited")
     Path(config.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
     before = state.campaign()
     with Campaign(state=state, ledger=ledger) as second:
@@ -211,13 +211,41 @@ def test_restarting_changes_limits_without_resetting_accounting(tmp_path):
         for key in ("id", "generation", "invocations", "gpu_hours", "elapsed", "authority_revision"):
             assert current[key] == before[key]
         assert state.budget()["managed_invocations"]["unlimited"]
-    raw["campaign"].update(max_seconds=100, max_invocations=4)
+        assert state.budget()["gpu_hours"] == {
+            "used": 1.5, "reserved": 0, "configured": None, "unlimited": True, "remaining": None}
+    raw["campaign"].update(max_seconds=100, max_invocations=4, max_gpu_hours=2)
     Path(config.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
     with Campaign(state=state, ledger=ledger) as third:
         third.step(no_agent=True, admit=False)
         budget = state.budget()
         assert budget["managed_invocations"]["remaining"] == 1
         assert budget["elapsed_admission_seconds"]["used"] == 27
+        assert budget["gpu_hours"] == {
+            "used": 1.5, "reserved": 0, "configured": 2, "unlimited": False, "remaining": 0.5}
+
+
+@pytest.mark.parametrize("before,after", [(7200, "unlimited"), ("unlimited", 7200)])
+def test_task_lifetime_changes_only_new_charters_after_restart(tmp_path, before, after):
+    import tomllib
+    from labgoblin import research_tasks as tasks
+    from tests.test_research_loop import campaign, charter
+    config, state = campaign(tmp_path, task_max_seconds=before)
+    raw = tomllib.loads(Path(config.config_path).read_text(encoding="utf-8"))
+    with Campaign(config, state=state) as first:
+        state.configure(config, controller=first.handle)
+        original = tasks.create(state, charter())
+        raw["research"]["task_max_seconds"] = after
+        Path(config.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
+        assert state.configuration()[0].research.task_max_seconds == config.research.task_max_seconds
+        unchanged = tasks.create(state, charter(request_id="before-restart"))
+        assert unchanged["charter"]["max_seconds"] == original["charter"]["max_seconds"]
+    candidate = load_config(config.config_path)
+    with Campaign(candidate, state=state) as second:
+        state.configure(candidate, controller=second.handle)
+        current = tasks.create(state, charter(request_id="after-restart"))
+        assert current["charter"]["max_seconds"] == (None if after == "unlimited" else after)
+        assert tasks.get(state, original["id"]) == original
+        assert tasks.get(state, unchanged["id"]) == unchanged
 
 
 def test_goal_source_uses_loaded_path_and_candidate_validation_does_not_activate(tmp_path, capsys):

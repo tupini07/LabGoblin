@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from labgoblin.evidence import publish_bytes, read_json
-from labgoblin.protocol import canonical, table
+from labgoblin.protocol import Handoff, canonical, table
 from labgoblin import journal, research_memory, research_tasks
 
 
@@ -35,6 +35,16 @@ def read(state, request, *, turn_id=None):
                 "SELECT id,state,rounds,reason,result_source FROM stop_episodes ORDER BY created DESC LIMIT 10")]
         return {"campaign": state.campaign(), "budget": state.budget(), "tasks": research_tasks.listing(state),
                 "coaching": episodes}
+    if operation == "memos":
+        from labgoblin.supervisor_memos import get, status
+        with state.db.read() as conn:
+            value = (get(conn, request["id"]) if request.get("id") else
+                     status(conn, offset=request.get("offset", 0), limit=request.get("limit", 8)))
+        if turn_id:
+            for ref in ([value["id"]] if request.get("id") else
+                        [ref for row in value["requests"] for ref in (row["id"], row["content"]["reference"]) if ref]):
+                state.retrieved(turn_id, ref)
+        return value
     if operation in ("list", "search"):
         return research_memory.index(state, **{k: v for k, v in request.items()
                                               if k in ("query", "offset", "limit", "cutoff")})
@@ -66,7 +76,7 @@ def read(state, request, *, turn_id=None):
         from labgoblin.briefing import event
         value = event(state.db, request["id"], offset=request.get("offset", 0), limit=16384)
     else:
-        raise ValueError("Read operation must be status, list, search, record, history, source, task, event or observation")
+        raise ValueError("Read operation must be status, memos, list, search, record, history, source, task, event or observation")
     if turn_id:
         state.retrieved(turn_id, request["id"])
     return value
@@ -92,6 +102,13 @@ def task(state, request, *, turn_id=None):
     raise ValueError("Task operation must be create, cancel, integrate, message or amend")
 
 
+def preflight(state, value, *, turn_id, invocation_id):
+    handoff = Handoff.parse(value)
+    if not turn_id or handoff.turn_id != turn_id or not invocation_id:
+        raise ValueError("Preflight requires the calling turn and invocation's exact owned handoff")
+    return state.preflight_handoff(handoff, invocation_id=invocation_id)
+
+
 def sdk_tools(state, envelope):
     from copilot import Tool, ToolResult
     turn_id = envelope.metadata["turn_id"]
@@ -105,6 +122,9 @@ def sdk_tools(state, envelope):
                 value = research_memory.publish(state, invocation.arguments, turn_id=turn_id)
             elif invocation.tool_name == "research_task" and not coach:
                 value = task(state, invocation.arguments, turn_id=turn_id)
+            elif invocation.tool_name == "research_preflight" and not coach:
+                value = preflight(state, invocation.arguments["handoff"], turn_id=turn_id,
+                                  invocation_id=envelope.key.work_id)
             elif invocation.tool_name == "coach_decide" and coach:
                 packet = read_json(Path(envelope.metadata["packet_path"]), 65536)
                 value = {**invocation.arguments, "turn_id": turn_id,
@@ -123,7 +143,7 @@ def sdk_tools(state, envelope):
 
     definitions = {
         "research_read": ("Read published research knowledge, revisions, task results or status. Search includes retired ideas.",
-                          {"operation": {"type": "string", "enum": ["status", "list", "search", "record", "history", "source", "task", "event", "observation"]},
+                          {"operation": {"type": "string", "enum": ["status", "memos", "list", "search", "record", "history", "source", "task", "event", "observation"]},
                            "id": {"type": "string"}, "query": {"type": "string"}, "offset": {"type": "integer"},
                            "limit": {"type": "integer"}, "cutoff": {"type": "integer"}}, ["operation"]),
         "research_publish": ("Publish a draft knowledge/question/hypothesis/reflection revision using expected base. "
@@ -134,18 +154,24 @@ def sdk_tools(state, envelope):
                               "activity": {"type": "string"}, "outcome": {"type": "string"},
                               "links": {"type": "array", "items": {"type": "object"}},
                               "provenance": {"type": "object"}}, ["id", "request_id", "title", "body"]),
-        "research_task": ("Root-only bounded worker commissioning, cancellation or integration; never native subagents.",
+        "research_task": ("Root-only bounded worker commissioning, cancellation or integration; never native subagents. "
+                          "Tasks share campaign credits; charter has no max_credits field. Omit charter max_seconds "
+                          "to inherit the task lifetime, or use positive seconds or 'unlimited' within its configured ceiling.",
                           {"operation": {"type": "string", "enum": ["create", "cancel", "integrate", "message", "amend"]},
                            "id": {"type": "string"}, "charter": {"type": "object"},
                            "reason": {"type": "string"}, "decision": {"type": "object"},
                            "message": {"type": "string"}, "amendment": {"type": "object"}}, ["operation"]),
+        "research_preflight": ("Validate the complete proposed owned handoff without publishing, acknowledging or "
+                               "accepting it. Fix reported structure/reference errors before writing the result file.",
+                               {"handoff": {"type": "object"}}, ["handoff"]),
         "coach_decide": ("Record this coach's process-only verdict; no scientific methods or experiments.",
                          {"decision": {"type": "string", "enum": ["request_reflection", "accept_stop", "needs_operator"]},
                           "reason": {"type": "string"}, "questions": {"type": "array", "items": {"type": "string"}},
                           "references": {"type": "array", "items": {"type": "string"}}, "limitations": {"type": "string"}},
                          ["decision", "reason", "questions", "references", "limitations"]),
     }
-    names = ("research_read", "coach_decide") if coach else ("research_read", "research_publish", "research_task")
+    names = (("research_read", "coach_decide") if coach else
+             ("research_read", "research_publish", "research_task", "research_preflight"))
     return [Tool(name=name, description=definitions[name][0], handler=handler, skip_permission=True, defer="never",
                  parameters={"type": "object", "properties": definitions[name][1], "required": definitions[name][2],
                              "additionalProperties": False}) for name in names]

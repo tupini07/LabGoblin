@@ -1,5 +1,6 @@
 """Transactional campaign authority, independent of mutable configuration files."""
 
+from contextlib import contextmanager
 from dataclasses import asdict
 import hashlib
 import json
@@ -66,6 +67,10 @@ def _blocker(conn, generation: int, blocker_id: str, category: str, detail: str,
     conn.execute("""INSERT INTO blockers(id,generation,category,work_id,detail,created)
         VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET detail=excluded.detail,resolved=NULL""",
                  (blocker_id, generation, category, work_id, detail, time.time()))
+    if generation == _campaign(conn)["generation"]:
+        from labgoblin.supervisor_memos import request_in
+        request_in(conn, f"Operational blocker ({category}): {detail}"[:500],
+                   key=["blocker", blocker_id, detail])
 
 
 def _collection(conn, attempt) -> dict:
@@ -111,7 +116,8 @@ def _active_directives(conn, generation):
 
 def _source_revision(conn) -> str:
     source = conn.execute("""SELECT COALESCE(MAX(seq),0) FROM sources
-        WHERE kind NOT IN ('summary','instruction_backup','credit_reconciliation','credit_estimate')""").fetchone()[0]
+        WHERE kind NOT IN ('summary','instruction_backup','credit_reconciliation','credit_estimate',
+                           'supervisor_memo','supervisor_memo_request','supervisor_memo_status')""").fetchone()[0]
     event = conn.execute("""SELECT COALESCE(MAX(seq),0) FROM events
         WHERE kind NOT IN ('maintenance','continue','protocol_failure','control','reopened')""").fetchone()[0]
     campaign = _campaign(conn)
@@ -577,6 +583,9 @@ class State:
     def pending_maintenance(self) -> dict | None:
         with self.db.write() as conn:
             campaign = _campaign(conn)
+            conn.execute("""UPDATE maintenance SET state='cancelled',
+                reason='Archive growth no longer authorizes paid compaction; request it explicitly'
+                WHERE kind='compact' AND origin='automatic' AND state='pending'""")
             row = conn.execute("""SELECT * FROM maintenance WHERE state='pending' AND generation=? AND revision=?
                 AND (origin='operator' OR EXISTS(SELECT 1 FROM generations WHERE id=? AND state='open'))
                 ORDER BY created,id LIMIT 1""",
@@ -775,9 +784,9 @@ class State:
                 if json.loads(attempt["spec"]).get("authority_revision", campaign["authority_revision"]) != campaign["authority_revision"]:
                     raise ValueError("Queued request predates current governing authority; resubmit against its intended scope")
                 if attempt["scope_id"] != "root":
-                    from labgoblin.research_tasks import assert_owned
+                    from labgoblin.research_tasks import assert_owned, deadline
                     task = assert_owned(conn, attempt["scope_id"])
-                    if envelope.metadata.get("task_deadline") != task["created"] + json.loads(task["charter"])["max_seconds"]:
+                    if envelope.metadata.get("task_deadline") != deadline(task):
                         raise ValueError("Launch differs from its task's absolute deadline")
                 settings = _settings(conn, campaign)
                 running = conn.execute("""SELECT COUNT(*),COALESCE(SUM(seconds*json_array_length(gpus)/3600),0)
@@ -785,8 +794,9 @@ class State:
                 used = campaign["gpu_hours"]
                 if running[0] >= settings["campaign"]["max_jobs"]:
                     raise AdmissionWait("Campaign experiment concurrency exhausted")
-                if used + running[1] + attempt["seconds"] * len(json.loads(attempt["gpus"])) / 3600 > \
-                        settings["campaign"]["max_gpu_hours"]:
+                gpu_limit = settings["campaign"]["max_gpu_hours"]
+                if (gpu_limit is not None
+                        and used + running[1] + attempt["seconds"] * len(json.loads(attempt["gpus"])) / 3600 > gpu_limit):
                     raise BudgetExhausted("gpu_hours", "Campaign GPU-hour admission budget exhausted")
                 if attempt["hypothesis_id"]:
                     statement = conn.execute("SELECT statement FROM hypotheses WHERE id=?",
@@ -810,9 +820,9 @@ class State:
                 if turn["state"] not in ("prepared", "running") or turn["revision"] != campaign["revision"]:
                     raise AdmissionClosed("Provider turn was superseded by control or acceptance")
                 if turn["scope_id"] != "root":
-                    from labgoblin.research_tasks import assert_owned
+                    from labgoblin.research_tasks import assert_owned, deadline
                     task = assert_owned(conn, turn["scope_id"])
-                    if envelope.metadata.get("task_deadline") != task["created"] + json.loads(task["charter"])["max_seconds"]:
+                    if envelope.metadata.get("task_deadline") != deadline(task):
                         raise ValueError("Provider launch differs from its task's absolute deadline")
                 settings = _settings(conn, campaign)
                 if envelope.metadata.get("provider", {}).get("transport", "cli") != settings["agent"].get("transport", "cli"):
@@ -921,7 +931,7 @@ class State:
             _blocker(conn, row["generation"], f"launch-{nonce}", "launch", detail, row["work_id"])
             return True
 
-    def finish_launch(self, nonce: str, receipt: dict):
+    def finish_launch(self, nonce: str, receipt: dict, *, unclaimed_launcher: dict | None = None):
         receipt = asdict(LaunchReceipt.parse(receipt))
         with self.db.write() as conn:
             launch = conn.execute("SELECT * FROM launches WHERE nonce=?", (nonce,)).fetchone()
@@ -941,6 +951,14 @@ class State:
                 return
             if launch["phase"] not in ("armed", "executing"):
                 raise ValueError("Receipt cannot complete a revoked launch")
+            if unclaimed_launcher is not None:
+                from labgoblin.processes import process_state
+                if (receipt["status"] != "not_started" or receipt["executed"]
+                        or launch["phase"] != "armed" or launch["supervisor"] is not None
+                        or launch["payload"] is not None
+                        or launch["launcher"] != _json(unclaimed_launcher)
+                        or process_state(unclaimed_launcher) != "dead"):
+                    raise ValueError("Launch no longer proves an exited, unclaimed launcher")
             now = time.time()
             conn.execute("UPDATE launches SET phase='quiescent',receipt=?,ended=? WHERE nonce=?",
                          (_json(receipt), now, nonce))
@@ -1004,7 +1022,6 @@ class State:
                 "SELECT COUNT(*) FROM invocations WHERE state='reserved'").fetchone()[0]
             generation_state = conn.execute("SELECT state FROM generations WHERE id=?", (campaign["generation"],)).fetchone()[0]
             reserve = (2 if settings["agent"]["sandbox"] else 1) if kind != "final_analysis" and generation_state != "closed" else 0
-            enhanced = settings["research"]["coaching"] or settings["research"]["max_tasks"]
             coach_reserve = (2 * len(kinds) if settings["research"]["coaching"]
                              and kind not in ("coach", "reflection", "final_analysis") and generation_state == "open" else 0)
             reflection_reserve = 0
@@ -1018,23 +1035,30 @@ class State:
             reserve += coach_reserve + reflection_reserve
             if not limit.allows(committed, len(kinds) + reserve):
                 raise BudgetExhausted("invocations", "Invocation budget exhausted after reserving final analysis")
-            credits.available(self.credit_budget(connection=conn),
-                              reserve=(len(kinds) + reserve - 1) * credits.MIN_SESSION)
+            budget = self.credit_budget(connection=conn)
+            required = (len(kinds) + reserve) * credits.MIN_SESSION
+            if (not budget["unlimited"] and not budget["uncovered_unknown"]
+                    and budget["remaining_nano"] < required
+                    <= budget["remaining_nano"] + budget["reserved_nano"]):
+                raise AdmissionWait("Campaign credits are reserved by active or pending invocations")
+            credits.available(budget, reserve=required - credits.MIN_SESSION)
+            occupied = conn.execute("""SELECT COUNT(DISTINCT turn_id) FROM invocations
+                WHERE turn_id!=? AND state IN ('reserved','armed','running','uncertain')""",
+                                    (turn_id,)).fetchone()[0]
+            slots = max(1, settings["research"]["max_parallel_agents"] - occupied)
             ids = []
             for index, invocation_kind in enumerate(kinds):
                 invocation_id = identifier()
-                allowance = None
-                if enhanced:
-                    cap = (30 if invocation_kind == "canary" else settings["research"]["coach_credits"]
-                           if kind == "coach" else settings["research"]["invocation_credits"])
-                    reserve_nano = ((len(kinds) - index - 1 + reserve - coach_reserve) * credits.MIN_SESSION
-                                    + coach_reserve * credits.nano_limit(settings["research"]["coach_credits"]))
-                    available = credits.available(self.credit_budget(connection=conn), reserve=reserve_nano)
-                    allowance = min(credits.nano_limit(cap), available) if available is not None else credits.nano_limit(cap)
-                    if task_budget is not None:
-                        from labgoblin.research_tasks import budget
-                        allowance = min(allowance, credits.available(budget(conn, turn["scope_id"]),
-                                        reserve=(len(kinds) - index - 1) * credits.MIN_SESSION))
+                reserve_nano = (len(kinds) - index - 1 + reserve) * credits.MIN_SESSION
+                available = credits.available(self.credit_budget(connection=conn), reserve=reserve_nano)
+                allowance = (credits.MIN_SESSION if invocation_kind == "canary" else
+                             None if available is None else max(credits.MIN_SESSION, available // slots))
+                if task_budget is not None:
+                    from labgoblin.research_tasks import budget
+                    legacy = credits.available(budget(conn, turn["scope_id"]),
+                                               reserve=(len(kinds) - index - 1) * credits.MIN_SESSION)
+                    if legacy is not None:
+                        allowance = legacy if allowance is None else min(allowance, legacy)
                 conn.execute("""INSERT INTO invocations(id,turn_id,generation,kind,bundle_id,bundle_position,state,created,credit_allowance_nano)
                     VALUES(?,?,?,?,?,?,'reserved',?,?)""",
                              (invocation_id, turn_id, campaign["generation"], invocation_kind, turn_id,
@@ -1109,28 +1133,62 @@ class State:
                 conn.execute("INSERT OR IGNORE INTO turn_references(turn_id,reference_id) VALUES(?,?)", (turn_id, ref))
 
     def accept_handoff(self, handoff: Handoff, *, invocation_id: str):
-        encoded = _json(asdict(handoff))
+        self._apply_handoff(handoff, invocation_id=invocation_id, preflight=False)
+
+    def preflight_handoff(self, handoff: Handoff, *, invocation_id: str):
+        self._apply_handoff(handoff, invocation_id=invocation_id, preflight=True)
+        return {"valid": True, "accepted": False, "turn_id": handoff.turn_id,
+                "note": "Validation only; final owned capture and controller acceptance are still required"}
+
+    @contextmanager
+    def _handoff_transaction(self, preflight):
         with self.db.write() as conn:
+            try:
+                yield conn
+            finally:
+                if preflight:
+                    conn.rollback()
+
+    def _apply_handoff(self, handoff: Handoff, *, invocation_id: str, preflight: bool):
+        encoded = _json(asdict(handoff))
+        with self._handoff_transaction(preflight) as conn:
             turn = conn.execute("SELECT * FROM turns WHERE id=?", (handoff.turn_id,)).fetchone()
             if not turn or turn["kind"] not in ("research", "reflection", "worker", "final_analysis") or turn["packet_id"] != handoff.packet_id:
                 raise ValueError("Handoff does not belong to its turn and packet")
             if turn["state"] == "accepted":
-                if turn["result"] != encoded:
+                if preflight:
+                    raise AdmissionClosed("Preflight requires a still-active owned turn, not an accepted result")
+                if _json(asdict(Handoff.parse(json.loads(turn["result"])))) != encoded:
                     raise ValueError("Accepted handoff cannot be replaced")
                 return
             if turn["state"] not in ("prepared", "running"):
                 raise ValueError("Turn is not eligible for handoff acceptance")
-            owned = conn.execute("""SELECT l.receipt FROM invocations i JOIN launches l ON l.nonce=i.nonce
-                WHERE i.id=? AND i.turn_id=? AND i.kind=? AND i.state='completed' AND l.phase='quiescent'""",
+            owned = conn.execute("""SELECT l.receipt,l.phase,i.state FROM invocations i JOIN launches l ON l.nonce=i.nonce
+                WHERE i.id=? AND i.turn_id=? AND i.kind=?""",
                                  (invocation_id, handoff.turn_id, turn["kind"])).fetchone()
-            if (not owned or json.loads(owned["receipt"]).get("metadata", {}).get(
-                    "result_capture", {}).get("handoff_digest") != fingerprint(asdict(handoff))):
+            digests = {fingerprint(asdict(handoff))}
+            if not handoff.stop_basis:
+                digests.add(fingerprint({key: value for key, value in asdict(handoff).items() if key != "stop_basis"}))
+            if preflight:
+                if not owned or owned["state"] not in ("armed", "running") or owned["phase"] not in ("armed", "executing"):
+                    raise AdmissionClosed("Handoff preflight requires this exact active owned invocation")
+            elif (not owned or owned["state"] != "completed" or owned["phase"] != "quiescent"
+                  or json.loads(owned["receipt"]).get("metadata", {}).get(
+                      "result_capture", {}).get("handoff_digest") not in digests):
                 raise ValueError("Handoff requires its exact successfully owned provider result")
             packet = conn.execute("SELECT * FROM packets WHERE id=?", (handoff.packet_id,)).fetchone()
             if not packet or not packet["ready"]:
                 raise ValueError("Turn packet was not durably published")
             if hashlib.sha256(packet["content"].encode("utf-8")).hexdigest() != packet["digest"]:
                 raise ValueError("Committed turn packet integrity failed")
+            if preflight:
+                current = _campaign(conn)
+                context = json.loads(packet["content"])
+                if (turn["generation"] != current["generation"] or turn["revision"] != current["revision"]
+                        or context["config_revision"] != current["config_revision"]
+                        or context["authority_revision"] != current["authority_revision"]
+                        or current["operator_mode"] not in ("ready", "running")):
+                    raise AdmissionClosed("Handoff preflight authority changed; this invocation cannot correct its result")
             delivered = {r[0] for r in conn.execute(
                 "SELECT event_id FROM packet_events WHERE packet_id=?", (handoff.packet_id,))}
             if {e.event_id for e in handoff.evidence} - delivered:
@@ -1179,9 +1237,9 @@ class State:
                 stale = stale or not task or task["state"] not in ("queued", "research", "waiting")
             if not stale:
                 for update in handoff.research_updates:
+                    publish_in(conn, update, {"scope_id": turn["scope_id"], "kind": "accepted", "id": turn["id"]})
                     if {link.get("target") for link in update.get("links", [])} - allowed_refs:
                         raise ValueError("Research assessment cites an undelivered reference")
-                    publish_in(conn, update, {"scope_id": turn["scope_id"], "kind": "accepted", "id": turn["id"]})
             source_id = _source(conn, "handoff" if turn["scope_id"] == "root" else "worker_handoff",
                                 encoded.encode(), "researcher",
                                 {"turn_id": handoff.turn_id, "generation": turn["generation"], "scope_id": turn["scope_id"],
@@ -1198,7 +1256,7 @@ class State:
                 if handoff.coaching or handoff.maintenance or handoff.reflection:
                     raise ValueError("Workers return local decisions; only root requests global maintenance or coaching")
                 from labgoblin.research_tasks import accept_in
-                accept_in(conn, turn, handoff, source_id, packet["watermark"])
+                accept_in(conn, turn, handoff, source_id, packet["watermark"], preflight=preflight)
                 return
             campaign = _campaign(conn)
             if (campaign["generation"] == turn["generation"]
@@ -1206,12 +1264,11 @@ class State:
                     and turn["kind"] in ("research", "reflection") and conn.execute(
                         "SELECT state FROM generations WHERE id=?", (turn["generation"],)).fetchone()[0] == "open"):
                 from labgoblin.coaching import propose_in
-                intercepted = propose_in(conn, handoff)
+                intercepted = False if stale else propose_in(conn, handoff, packet["watermark"])
                 progress = {"continue": "research", "wait": "wait", "blocked": "blocked",
                             "finalize": "finalize"}[handoff.disposition]
                 reason = handoff.reason
-                if (progress == "finalize" and json.loads(packet["content"]).get("authority_revision", 0)
-                        != campaign["authority_revision"]):
+                if stale and progress in ("blocked", "finalize"):
                     progress = "research"
                     reason = "Governing goal/protocol/constraints changed after this turn; reassessment is required"
                 if intercepted:
@@ -1228,6 +1285,13 @@ class State:
                     and campaign["operator_mode"] not in ("stopping", "stopped")):
                 for kind in handoff.maintenance:
                     self._maintenance(conn, kind, "researcher")
+            if not preflight:
+                from labgoblin.supervisor_memos import accept_in, request_in
+                if not stale and handoff.disposition in ("blocked", "finalize"):
+                    request_in(conn, f"Researcher {handoff.disposition} proposal: {handoff.reason}"[:500],
+                               key=["handoff", turn["id"]], reference=source_id, turn_id=turn["id"])
+                accept_in(conn, turn, json.loads(packet["content"]), json.loads(owned["receipt"]),
+                          allowed_refs, stale=stale)
 
     @staticmethod
     def _owned_maintenance(conn, value, invocation_id, kind):
@@ -1264,7 +1328,8 @@ class State:
             if value.get("source_ids") != scope["source_ids"]:
                 raise ValueError("Summary must identify exactly its committed source scope")
             body = value["summary"].encode("utf-8")
-            if len(canonical(value)) > 16384 or len(body) >= scope["input_bytes"]:
+            if (len(canonical(value)) > 16384 or len(body) >= scope["input_bytes"]
+                    or len(body) > scope.get("maximum_summary_bytes", 16384)):
                 raise ValueError("Derived summary is oversized or did not shrink its committed input")
             _source(conn, "summary", body, "owned-compactor",
                     {**scope, "sources": [{k: v for k, v in item.items() if k != "text"} for item in scope["sources"]],
@@ -1526,7 +1591,7 @@ class State:
                 raise ValueError("Credit allocation requires a reserved invocation")
             if row["credit_allowance_nano"] is not None:
                 budget = self.credit_budget(connection=conn)
-                if budget["uncovered_unknown"]:
+                if not budget["unlimited"] and budget["uncovered_unknown"]:
                     raise BudgetExhausted("ai_credits", "AI credit usage is unknown; further admission is blocked")
                 maximum = credits.nano_limit(budget["configured"])
                 if maximum is not None and budget["accounted_nano"] + budget["reserved_nano"] > maximum:
@@ -1560,7 +1625,11 @@ class State:
                 "elapsed_admission_seconds": Limit(settings["max_seconds"]["value"]).view(elapsed),
                 "managed_invocations": Limit(settings["max_invocations"]["value"]).view(campaign["invocations"], reserved),
                 "ai_credits": self.credit_budget(connection=conn),
-                "gpu_hours": {"used": campaign["gpu_hours"], "reserved": active[1], "configured": settings["max_gpu_hours"]},
+                "gpu_hours": {"used": campaign["gpu_hours"], "reserved": active[1],
+                              "configured": settings["max_gpu_hours"],
+                              "unlimited": settings["max_gpu_hours"] is None,
+                              "remaining": (None if settings["max_gpu_hours"] is None else
+                                            max(0, settings["max_gpu_hours"] - campaign["gpu_hours"] - active[1]))},
                 "active_experiments": active[0], "maximum_experiments": settings["max_jobs"],
                 "resources": {"configured": settings["resources"],
                               "committed_cpus": sum(row["cpus"] for row in requests),
