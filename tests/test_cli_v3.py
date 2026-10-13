@@ -71,6 +71,36 @@ def test_all_json_errors_are_structured_and_do_not_create_state(tmp_path, capsys
     assert code == 1 and "--spec" in result["error"]["message"]
 
 
+@pytest.mark.parametrize("kind", ["work", "research-update"])
+def test_schema_discovery_needs_no_config_state_or_inference(tmp_path, capsys, kind):
+    code, schema = call(capsys, "schema", kind, "--project", tmp_path, "--json")
+    assert code == 0
+    assert schema["type"] == "object" and schema["additionalProperties"] is False
+    assert schema["examples"]
+    assert set(schema["required"]) <= set(schema["properties"])
+    assert not list(tmp_path.iterdir())
+    if kind == "research-update":
+        assert "request_id" in schema["required"]
+        assert schema["properties"]["links"]["items"]["required"] == ["target", "relation"]
+    else:
+        assert schema["properties"]["gpus"]["type"] == "array"
+        assert "resources" not in schema["properties"]
+
+
+def test_manifest_validation_reuses_existing_claim_without_mutation(tmp_path, capsys):
+    from tests.test_dashboard import dump
+    config, state, _, raw = fixture(tmp_path)
+    Path(config.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
+    state.hypothesis("existing", "An exact stored statement.")
+    manifest = config.root / "work.json"
+    manifest.write_text(json.dumps(request(hypothesis_id="existing")), encoding="utf-8")
+    before = dump(state)
+    code, result = call(capsys, "validate", "--spec", manifest, "--project", config.root, "--json")
+    assert code == 0 and result["valid"]
+    assert result["configuration_scope"] == "Disk candidate; not activated"
+    assert dump(state) == before
+
+
 def test_status_and_budget_are_readonly_even_with_broken_config(tmp_path, capsys):
     config, state, _, _ = fixture(tmp_path)
     Path(config.config_path).write_text("not [TOML", encoding="utf-8")

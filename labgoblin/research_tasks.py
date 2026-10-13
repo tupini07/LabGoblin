@@ -292,8 +292,9 @@ def reconcile(state):
             cancel(state, task["id"], reason)
 
 
-def ready(state):
-    with state.db.read() as conn:
+def ready(state, *, connection=None):
+    from contextlib import nullcontext
+    with state.db.read() if connection is None else nullcontext(connection) as conn:
         tasks = list(conn.execute("""SELECT * FROM research_tasks WHERE state IN ('queued','research','waiting')
             AND NOT EXISTS(SELECT 1 FROM turns WHERE scope_id=research_tasks.id
             AND state IN ('prepared','running')) ORDER BY created,id"""))

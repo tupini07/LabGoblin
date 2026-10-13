@@ -117,9 +117,10 @@ def _active_directives(conn, generation):
 def _source_revision(conn) -> str:
     source = conn.execute("""SELECT COALESCE(MAX(seq),0) FROM sources
         WHERE kind NOT IN ('summary','instruction_backup','credit_reconciliation','credit_estimate',
-                           'supervisor_memo','supervisor_memo_request','supervisor_memo_status')""").fetchone()[0]
+                           'supervisor_memo','supervisor_memo_request','supervisor_memo_status',
+                           'strategy_review','strategy_review_status','operational_checkpoint')""").fetchone()[0]
     event = conn.execute("""SELECT COALESCE(MAX(seq),0) FROM events
-        WHERE kind NOT IN ('maintenance','continue','protocol_failure','control','reopened')""").fetchone()[0]
+        WHERE kind NOT IN ('maintenance','continue','protocol_failure','control','reopened','strategy_advice')""").fetchone()[0]
     campaign = _campaign(conn)
     return fingerprint({"source": source, "event": event, "generation": campaign["generation"],
                         "attempt_revision": campaign["attempt_revision"]})
@@ -137,7 +138,7 @@ def _elapsed(conn, campaign: dict, now: float) -> float:
 
 
 def _seal(conn, generation: int, reason: str):
-    heads = dict(conn.execute("SELECT name,source_id FROM source_heads WHERE name IN ('goal','protocol','rationale','summary')"))
+    heads = dict(conn.execute("SELECT name,source_id FROM source_heads WHERE name IN ('goal','protocol','rationale','summary','goal_progress')"))
     heads.update({f"directive:{r['id']}": r["source_id"] for r in _active_directives(conn, generation)})
     changed = conn.execute("""UPDATE generations SET state='sealed',sealed=?,reason=?,
         source_heads=?,authority_revision=(SELECT authority_revision FROM campaign) WHERE id=? AND state='open'""",
@@ -289,8 +290,12 @@ class State:
                     raise ValueError("Closed/stopped work requires explicit reopen, not run/resume")
                 if action == "run" and mode == "paused":
                     raise ValueError("Campaign is paused; use resume")
-                if conn.execute("SELECT 1 FROM blockers WHERE resolved IS NULL").fetchone():
+                if conn.execute("""SELECT 1 FROM blockers WHERE resolved IS NULL
+                    AND (?!='resume' OR category!='provider_limit')""", (action,)).fetchone():
                     raise ValueError("Resolve recorded recovery blockers before resuming admission")
+                if action == "resume":
+                    conn.execute("UPDATE blockers SET resolved=? WHERE resolved IS NULL AND category='provider_limit'",
+                                 (time.time(),))
                 mode = "running"
                 if progress in ("blocked", "wait") and action == "resume":
                     progress = "research"
@@ -1022,21 +1027,30 @@ class State:
                 "SELECT COUNT(*) FROM invocations WHERE state='reserved'").fetchone()[0]
             generation_state = conn.execute("SELECT state FROM generations WHERE id=?", (campaign["generation"],)).fetchone()[0]
             reserve = (2 if settings["agent"]["sandbox"] else 1) if kind != "final_analysis" and generation_state != "closed" else 0
+            strategy_review = kind == "coach" and conn.execute("""SELECT 1 FROM packets
+                WHERE id=? AND json_extract(content,'$.coaching.purpose')='strategy'""",
+                                                               (turn["packet_id"],)).fetchone() is not None
             coach_reserve = (2 * len(kinds) if settings["research"]["coaching"]
-                             and kind not in ("coach", "reflection", "final_analysis") and generation_state == "open" else 0)
+                             and (strategy_review or kind not in ("coach", "reflection", "final_analysis"))
+                             and generation_state == "open" else 0)
             reflection_reserve = 0
             if settings["research"]["coaching"] and generation_state == "open" and kind != "final_analysis":
                 episode = conn.execute("""SELECT rounds FROM stop_episodes
-                    WHERE generation=? AND state IN ('reviewing','reflecting')""", (campaign["generation"],)).fetchone()
+                    WHERE generation=? AND state IN ('reviewing','reflecting')
+                    AND COALESCE(json_extract(proposal,'$.review_kind'),'stop')!='strategy'""",
+                                       (campaign["generation"],)).fetchone()
                 if kind in ("coach", "reflection") and episode:
                     coach_reserve = max(0, 2 - episode["rounds"]) * len(kinds)
                 reflection_reserve = len(kinds) if kind not in ("reflection",) and (
-                    kind != "coach" or episode and episode["rounds"] < 2) else 0
+                    kind != "coach" or strategy_review or episode and episode["rounds"] < 2) else 0
             reserve += coach_reserve + reflection_reserve
             if not limit.allows(committed, len(kinds) + reserve):
                 raise BudgetExhausted("invocations", "Invocation budget exhausted after reserving final analysis")
             budget = self.credit_budget(connection=conn)
-            required = (len(kinds) + reserve) * credits.MIN_SESSION
+            finishing = budget["finishing"]
+            finish_extra = (finishing["reserve_nano"] - credits.MIN_SESSION
+                            if kind != "final_analysis" and generation_state != "closed" else 0)
+            required = (len(kinds) + reserve) * credits.MIN_SESSION + finish_extra
             if (not budget["unlimited"] and not budget["uncovered_unknown"]
                     and budget["remaining_nano"] < required
                     <= budget["remaining_nano"] + budget["reserved_nano"]):
@@ -1045,11 +1059,17 @@ class State:
             occupied = conn.execute("""SELECT COUNT(DISTINCT turn_id) FROM invocations
                 WHERE turn_id!=? AND state IN ('reserved','armed','running','uncertain')""",
                                     (turn_id,)).fetchone()[0]
-            slots = max(1, settings["research"]["max_parallel_agents"] - occupied)
+            from labgoblin.research_tasks import ready
+            scopes = {row[0] for row in conn.execute("""SELECT scope_id FROM turns t
+                WHERE t.generation=? AND t.state IN ('prepared','running')
+                AND NOT EXISTS(SELECT 1 FROM invocations i WHERE i.turn_id=t.id
+                    AND i.state IN ('reserved','armed','running','uncertain'))""", (campaign["generation"],))}
+            scopes.update(ready(self, connection=conn))
+            slots = max(1, min(len(scopes), settings["research"]["max_parallel_agents"] - occupied))
             ids = []
             for index, invocation_kind in enumerate(kinds):
                 invocation_id = identifier()
-                reserve_nano = (len(kinds) - index - 1 + reserve) * credits.MIN_SESSION
+                reserve_nano = (len(kinds) - index - 1 + reserve) * credits.MIN_SESSION + finish_extra
                 available = credits.available(self.credit_budget(connection=conn), reserve=reserve_nano)
                 allowance = (credits.MIN_SESSION if invocation_kind == "canary" else
                              None if available is None else max(credits.MIN_SESSION, available // slots))
@@ -1166,9 +1186,7 @@ class State:
             owned = conn.execute("""SELECT l.receipt,l.phase,i.state FROM invocations i JOIN launches l ON l.nonce=i.nonce
                 WHERE i.id=? AND i.turn_id=? AND i.kind=?""",
                                  (invocation_id, handoff.turn_id, turn["kind"])).fetchone()
-            digests = {fingerprint(asdict(handoff))}
-            if not handoff.stop_basis:
-                digests.add(fingerprint({key: value for key, value in asdict(handoff).items() if key != "stop_basis"}))
+            digests = handoff.capture_digests()
             if preflight:
                 if not owned or owned["state"] not in ("armed", "running") or owned["phase"] not in ("armed", "executing"):
                     raise AdmissionClosed("Handoff preflight requires this exact active owned invocation")
@@ -1204,6 +1222,14 @@ class State:
             validate_refs(conn, handoff.research_refs, "support")
             if set(handoff.research_refs) - allowed_refs:
                 raise ValueError("Journal context requires delivered or retrieved research revisions")
+            if (handoff.goal_progress is not None or handoff.commitment is not None) and turn["scope_id"] != "root":
+                raise ValueError("Only the root researcher updates campaign goal progress or strategic commitments")
+            if handoff.commitment is not None and turn["kind"] == "final_analysis":
+                raise ValueError("Final analysis assesses the sealed inventory; it cannot commit new research")
+            if handoff.goal_progress is not None:
+                refs = {ref for item in handoff.goal_progress["items"] for ref in item.get("references", [])}
+                if refs - allowed_refs:
+                    raise ValueError("Goal progress cites an undelivered reference; retrieve exact evidence first")
             if handoff.assessment is not None:
                 from labgoblin.reporting import read_all
                 assessment = handoff.assessment
@@ -1240,14 +1266,20 @@ class State:
                     publish_in(conn, update, {"scope_id": turn["scope_id"], "kind": "accepted", "id": turn["id"]})
                     if {link.get("target") for link in update.get("links", [])} - allowed_refs:
                         raise ValueError("Research assessment cites an undelivered reference")
+            from labgoblin.coaching import evidence_boundary
             source_id = _source(conn, "handoff" if turn["scope_id"] == "root" else "worker_handoff",
                                 encoded.encode(), "researcher",
                                 {"turn_id": handoff.turn_id, "generation": turn["generation"], "scope_id": turn["scope_id"],
-                                 "stale": bool(stale), "updates_applied": not stale, "research_refs": handoff.research_refs},
+                                 "stale": bool(stale), "updates_applied": not stale, "research_refs": handoff.research_refs,
+                                 "strategy_evidence_boundary": evidence_boundary(conn, turn["id"])
+                                 if handoff.commitment is not None else None},
                                 f"checkpoint:{turn['generation']}:{turn['scope_id']}")
             if turn["scope_id"] == "root" and not stale:
                 conn.execute("""INSERT INTO source_heads(name,source_id,revision) VALUES('rationale',?,1)
                     ON CONFLICT(name) DO UPDATE SET source_id=excluded.source_id,revision=revision+1""", (source_id,))
+                if handoff.goal_progress is not None and turn["kind"] != "final_analysis":
+                    conn.execute("""INSERT INTO source_heads(name,source_id,revision) VALUES('goal_progress',?,1)
+                        ON CONFLICT(name) DO UPDATE SET source_id=excluded.source_id,revision=revision+1""", (source_id,))
             conn.execute("INSERT INTO handoffs(turn_id,content,digest,source_id,created) VALUES(?,?,?,?,?)",
                          (handoff.turn_id, encoded, fingerprint(asdict(handoff)), source_id, now))
             conn.execute("UPDATE turns SET state='accepted',ended=?,result=? WHERE id=?",
@@ -1281,6 +1313,9 @@ class State:
                     _event(conn, campaign["generation"], "reflection" if handoff.reflection else "continue",
                            {"turn_id": handoff.turn_id, "reason": handoff.reason},
                            f"continue-{handoff.turn_id}")
+                    if not stale and not handoff.reflection:
+                        from labgoblin.coaching import propose_strategy_in
+                        propose_strategy_in(conn, handoff, source_id)
             if (turn["kind"] == "research" and campaign["generation"] == turn["generation"]
                     and campaign["operator_mode"] not in ("stopping", "stopped")):
                 for kind in handoff.maintenance:
@@ -1393,6 +1428,15 @@ class State:
             if conn.execute("""SELECT 1 FROM invocations i JOIN launches l ON l.nonce=i.nonce
                 WHERE i.turn_id=? AND l.phase IN ('armed','executing')""", (turn_id,)).fetchone():
                 raise ValueError("Cannot retire a turn with armed or unresolved execution")
+            limit_receipt = None
+            if not cancelled:
+                for row in conn.execute("""SELECT i.id,l.nonce,l.receipt FROM invocations i JOIN launches l ON l.nonce=i.nonce
+                    WHERE i.turn_id=? AND l.phase='quiescent'""", (turn_id,)):
+                    receipt = json.loads(row["receipt"])
+                    if receipt.get("metadata", {}).get("sdk", {}).get("session_limit", {}).get("code") == "session_limits_exhausted":
+                        limit_receipt = {**dict(row), "receipt": receipt}
+                        reason = "Provider session limits exhausted without accepted completion; " + reason
+                        break
             now = time.time()
             conn.execute("UPDATE invocations SET state='cancelled',ended=?,reason=? WHERE turn_id=? AND state='reserved'",
                          (now, reason, turn_id))
@@ -1403,6 +1447,9 @@ class State:
             conn.execute("UPDATE maintenance SET state=?,reason=? WHERE turn_id=? AND state='running'",
                          ("cancelled" if cancelled else "failed", reason, turn_id))
             from labgoblin.coaching import fail_in
+            strategy_review = turn["kind"] == "coach" and conn.execute(
+                "SELECT json_extract(content,'$.coaching.purpose') FROM packets WHERE id=?",
+                (turn["packet_id"],)).fetchone()[0] == "strategy"
             fail_in(conn, turn, reason)
             if turn["scope_id"] != "root":
                 paused = cancelled and _campaign(conn)["operator_mode"] == "paused"
@@ -1413,18 +1460,32 @@ class State:
                     _event(conn, turn["generation"], "task_result",
                            {"task_id": turn["scope_id"], "state": "cancelled" if cancelled else "failed", "reason": reason},
                            scope_id="root")
-            if not cancelled:
+            if not cancelled and not strategy_review:
                 campaign = _campaign(conn)
                 event_kind = "maintenance" if turn["kind"] in ("compact", "report") else "protocol_failure"
                 event_id = _event(conn, turn["generation"], event_kind, {"turn_id": turn_id, "reason": reason})
                 if turn["generation"] == campaign["generation"] and turn["kind"] in ("research", "reflection"):
                     failures = campaign["failures"] + 1
-                    retry = failures <= _settings(conn, campaign)["agent"]["retries"]
+                    retry = not limit_receipt and failures <= _settings(conn, campaign)["agent"]["retries"]
                     sequence = conn.execute("SELECT seq FROM events WHERE id=?", (event_id,)).fetchone()[0]
                     if campaign["operator_mode"] not in ("stopping", "stopped"):
                         conn.execute("""UPDATE campaign SET failures=?,progress=?,reason=?,wake_after=? WHERE id=?""",
                                      (failures, "research" if retry else "blocked", reason,
                                       sequence - 1 if retry else sequence, self.id))
+                    if limit_receipt:
+                        _blocker(conn, turn["generation"], f"provider-limit-{turn_id}", "provider_limit",
+                                 reason + ". Inspect retained work and accounting before explicit operator resume.", turn_id)
+                if limit_receipt:
+                    _source(conn, "operational_checkpoint", canonical({
+                        "turn_id": turn_id, "invocation_id": limit_receipt["id"], "nonce": limit_receipt["nonce"],
+                        "reason": reason, "scientifically_accepted": False,
+                        "result_capture": limit_receipt["receipt"].get("metadata", {}).get("result_capture", {}),
+                        "session_limit": limit_receipt["receipt"]["metadata"]["sdk"]["session_limit"],
+                        "retained_work": dict(conn.execute("""SELECT status,COUNT(*) FROM attempts
+                            WHERE generation=? GROUP BY status""", (turn["generation"],))),
+                        "scope": "Model-free operational checkpoint, not a scientific assessment. "
+                                 "Original drafts, captures and receipts remain unchanged.",
+                    }), "controller", {"turn_id": turn_id})
             return True
 
     def close_admission(self, reason: str):
@@ -1472,7 +1533,8 @@ class State:
                 AND state IN ('pending','reviewing','needs_operator')""", (campaign["generation"],)).fetchone():
                 return False
             return bool(conn.execute("""SELECT 1 FROM events WHERE generation=? AND acknowledged_by IS NULL
-                AND scope_id='root' AND kind!='maintenance' AND seq>? LIMIT 1""", (campaign["generation"], campaign["wake_after"])).fetchone())
+                AND scope_id='root' AND kind NOT IN ('maintenance','strategy_advice') AND seq>? LIMIT 1""",
+                                     (campaign["generation"], campaign["wake_after"])).fetchone())
 
     def credit_budget(self, *, connection=None) -> dict:
         from contextlib import nullcontext
@@ -1493,7 +1555,34 @@ class State:
             if result["remaining_nano"] is not None:
                 result["remaining_nano"] = max(0, result["remaining_nano"] - reserved)
                 result["remaining"] = result["remaining_nano"] / credits.NANO
-            return {**result, "scope": "All campaign research, workers, coaching, reflection and maintenance; excludes observer/setup"}
+            return {**result, "finishing": self.finishing_policy(connection=conn),
+                    "scope": "All campaign research, workers, coaching, reflection and maintenance; excludes observer/setup"}
+
+    def finishing_policy(self, *, connection=None) -> dict:
+        from contextlib import nullcontext
+        with self.db.read() if connection is None else nullcontext(connection) as conn:
+            rows = conn.execute("""SELECT i.id,i.usage FROM invocations i JOIN turns t ON t.id=i.turn_id
+                JOIN packets p ON p.id=t.packet_id
+                WHERE t.state='accepted' AND t.scope_id='root'
+                AND t.kind IN ('research','reflection','final_analysis') AND i.kind=t.kind
+                AND i.state='completed' AND i.usage IS NOT NULL AND i.usage!='null'
+                AND json_extract(p.content,'$.config_revision')=(SELECT config_revision FROM campaign)
+                ORDER BY t.ended DESC,t.id DESC LIMIT 7""")
+            samples, excluded = [], []
+            for row in rows:
+                try:
+                    samples.append(credits.usage_nano(json.loads(row["usage"])))
+                except ValueError as error:
+                    excluded.append({"invocation_id": row["id"], "reason": str(error)})
+            samples.sort()
+        median = (samples[(len(samples) - 1) // 2] + samples[len(samples) // 2] + 1) // 2 if samples else 0
+        reserve = max(credits.MIN_SESSION, median) if len(samples) >= 3 else credits.MIN_SESSION
+        return {"reserve_nano": reserve, "reserve": reserve / credits.NANO, "sample_count": len(samples),
+                "excluded_history": excluded,
+                "basis": "Median of recent accepted root completion costs under this configuration"
+                         if len(samples) >= 3 else "Provider minimum; insufficient comparable completion history",
+                "guarantee": False, "scope": "Planning reserve, not spending, final-analysis cost prediction or permission "
+                                          "to weaken science. Estimates and failed/incomplete calls are excluded."}
 
     def _credit_adjustment_launch(self, conn, invocation_id, confirm, reason):
         if confirm != self.id:

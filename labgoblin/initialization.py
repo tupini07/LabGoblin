@@ -23,17 +23,25 @@ INSTRUCTIONS = f"""{SECTION_START}
 ## Autonomous local research with LabGoblin
 
 Read the controller's versioned packet before acting. It contains the goal,
-operator constraints, governing rationale, event cutoff and owned result format.
-Researcher strategy is revisable; operator constraints are not.
+operator constraints, event cutoff and owned result format. Its bounded research
+focus is qualified by generation, authority and task charter, not simply recency.
+Researcher strategy is revisable; operator constraints are not. Historical focus
+and discovery headers are not current strategy.
 Use `labgoblin status --json`, `labgoblin budget --json`, and exact `labgoblin evidence`
 or `labgoblin journal entry` retrieval. Previews and searches have bounded coverage.
+`labgoblin research work --json` pages current scoped job/task facts; completion,
+collection, evidence assessment and root integration are distinct.
 
 Submit heavy work with `labgoblin submit --spec work.json --json`. A manifest uses
 a stable idempotency `key`, `argv` array, explicit `source_files`, optional runner
-and hypothesis ID/statement, CPU/RAM/GPU request, finite `seconds`, and relative
+and hypothesis ID/description, top-level `cpus`, `memory_mb`, `gpus` (array of IDs,
+`[]` for CPU-only), finite `seconds`, and relative
 `artifacts`. Write outputs to LABGOBLIN_OUTPUT_DIR; metrics.json is a finite numeric
 JSON object. Access declared inputs through LABGOBLIN_INPUT_NAME. Do not run heavy
 work outside the queue or wait for it while holding a reasoning grant.
+Use `labgoblin schema work --json` for exact fields and a minimal example.
+For an existing hypothesis ID, omit `hypothesis_description` to use the stored
+claim; explicit conflicting descriptions are rejected, not silently overwritten.
 
 Use the research workspace for knowledge, questions, hypotheses and reflection.
 General knowledge need not name a hypothesis. Draft files are not accepted records:
@@ -42,10 +50,28 @@ Read/list/search exact published revisions with `labgoblin research`.
 Jobs specify `purpose` (evaluation, exploration, support) and exact `research_refs`;
 evaluation pins a published hypothesis revision. Revise or retire ideas without
 rewriting past evidence. Put scientific assessments in handoff `research_updates`.
+Each update requires `id`, a stable unique `request_id`, `title`, and `body`;
+new records require `kind`, revisions require `base` naming the exact current
+revision. See `labgoblin schema research-update --json` for fields and an example.
 Every assessed update needs its own nonempty structured `links` array; prose
 citations and top-level `research_refs` do not substitute for evidence links.
-Use SDK `research_preflight` or `labgoblin research preflight --file handoff.json`
-before returning the owned result. Validation does not publish or accept it.
+Keep concise direction, why, unresolved decisions and revisit conditions in the
+existing handoff `rationale`; prioritize exact `research_refs` for the next turn.
+Accepted inline updates also carry forward without replacing pinned revisions.
+Do not forward-reference unpublished revisions. No additional memory document is required.
+Use `research_complete` to validate and write the owned handoff in one action;
+omit turn/packet IDs to use the owned identities, then end the turn after success.
+CLI providers use `labgoblin research complete --file draft.json`. See
+`labgoblin schema handoff --json`. Manual result files still require
+`research_preflight` or `labgoblin research preflight --file handoff.json`.
+Recording is not scientific acceptance; the controller verifies the completed receipt.
+Read the accepted `goal_progress` before the local plan. In root research/reflection
+turns, update it at the outset and when assessments change, not every turn.
+In those root turns, at a branch, refinement batch or milestone, use `commitment` to connect the work
+to a goal gap and a decision it informs or concrete prerequisite it enables.
+Workers must not publish these root fields; final analysis must not add `commitment`.
+Keep scientific standards unchanged; do not guess task credit costs. Occasional
+strategic advice is nonbinding and does not require a pivot or extra reflection.
 Request reflection/coaching in the handoff. If enabled, delegate only through
 `research_task` or `labgoblin research task`; workers cannot delegate further.
 

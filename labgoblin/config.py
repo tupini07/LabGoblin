@@ -113,7 +113,7 @@ class StorageConfig:
     log_bytes: int = 16 * 1024 * 1024
     tail_bytes: int = 64 * 1024
     snapshot_bytes: int = 256 * 1024 * 1024
-    capture_bytes: int = 1024 * 1024
+    capture_bytes: int = 16 * 1024 * 1024 * 1024
     metrics_bytes: int = 256 * 1024
     volumes: dict[str, Watermark] = field(default_factory=dict)
 
@@ -329,9 +329,11 @@ def parse_config(raw: dict, path: str | Path) -> LabGoblinConfig:
     inputs = {name: _input(name, value)
               for name, value in table(raw.get("inputs", {}), "inputs").items()}
     dashboard = table(raw.get("dashboard", {}), "dashboard", {"chat"})
+    # A changed retention default must not reuse an older immutable snapshot's identity.
+    revision_input = {**raw, "storage": {"capture_bytes": limits["capture_bytes"], **storage}}
     return LabGoblinConfig(project_config, execution_config, runners, campaign_config,
                         agent_config, StorageConfig(**limits, volumes=volumes), inputs,
-                        str(path), fingerprint(raw), parse_chat_settings(dashboard.get("chat", {})),
+                        str(path), fingerprint(revision_input), parse_chat_settings(dashboard.get("chat", {})),
                         parse_research(raw.get("research", {}), agent_config))
 
 
@@ -341,14 +343,35 @@ def load_config(path: str | Path = ".") -> LabGoblinConfig:
     return parse_config(tomllib.loads(read_bytes(path, 64 * 1024).decode("utf-8")), path)
 
 
+def project_storage(storage: dict, *, recorded_root: Path, current_root: Path) -> dict:
+    """Compare local watermarks through a preserved whole-project directory alias."""
+    storage = table(storage, "storage", set(StorageConfig.__dataclass_fields__))
+    if recorded_root == current_root:
+        return storage
+    if (not recorded_root.is_absolute()
+            or recorded_root.resolve(strict=True) != current_root.resolve(strict=True)):
+        raise ValueError("Recorded project path is not an alias of the current campaign")
+    volumes = {}
+    for name, value in table(storage.get("volumes", {}), "storage.volumes").items():
+        value = table(value, f"storage.volumes.{name}", {"path", "min_free_mb"})
+        path = Path(text(value.get("path"), "volume.path"))
+        volumes[name] = ({**value, "path": str(current_root / path.relative_to(recorded_root))}
+                         if path.is_relative_to(recorded_root) else value)
+    return {**storage, "volumes": volumes}
+
+
 def restore_config(snapshot: dict, *, revision: str, path: str | Path) -> LabGoblinConfig:
     """Validate the existing persisted dataclass representation without reading TOML."""
     snapshot = table(snapshot, "configuration snapshot", set(LabGoblinConfig.__dataclass_fields__))
     if set(snapshot) != set(LabGoblinConfig.__dataclass_fields__):
         raise ValueError("Configuration snapshot is incomplete")
+    path = Path(path).resolve()
+    recorded = Path(text(snapshot["config_path"], "snapshot.config_path"))
     if (snapshot["revision"] != revision or not re.fullmatch("[0-9a-f]{64}", revision)
-            or snapshot["config_path"] != str(Path(path).resolve())):
+            or not recorded.is_absolute() or recorded.name != path.name
+            or recorded.parent.resolve() != path.parent):
         raise ValueError("Configuration snapshot identity/path does not match its campaign")
+    storage = project_storage(snapshot["storage"], recorded_root=recorded.parent, current_root=path.parent)
     campaign = table(snapshot["campaign"], "snapshot.campaign", set(CampaignConfig.__dataclass_fields__))
     limits = {}
     for name in ("max_seconds", "max_invocations"):
@@ -376,12 +399,13 @@ def restore_config(snapshot: dict, *, revision: str, path: str | Path) -> LabGob
                                           else campaign["max_gpu_hours"]),
                         "max_ai_credits": campaign.get("max_ai_credits")},
            "agent": {"transport": "cli", **snapshot["agent"]},
-           "storage": snapshot["storage"], "inputs": snapshot["inputs"],
+           "storage": storage, "inputs": snapshot["inputs"],
            "dashboard": {"chat": snapshot["chat"]},
            "research": {**research, "task_max_seconds": (
                "unlimited" if research.get("task_max_seconds") is None else research["task_max_seconds"])}}
     config = replace(parse_config(raw, path), revision=revision)
-    normalized = {**snapshot, "campaign": {"max_ai_credits": None, **snapshot["campaign"]},
+    normalized = {**snapshot, "config_path": str(path), "storage": storage,
+                  "campaign": {"max_ai_credits": None, **snapshot["campaign"]},
                   "agent": {"transport": "cli", "idle_timeout_seconds": 600,
                             "shutdown_grace_seconds": 30, **snapshot["agent"]},
                   "chat": {"max_ai_credits": None, **snapshot["chat"]}, "research": research}

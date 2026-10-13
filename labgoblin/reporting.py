@@ -53,7 +53,7 @@ def seal_view(state, *, kind="report", selected=None, selection_reason="Complete
             join = "JOIN closure_members m ON m.attempt_id=a.id AND m.generation=a.generation"
         else:
             heads = dict(conn.execute("""SELECT name,source_id FROM source_heads
-                WHERE name IN ('goal','protocol','rationale','summary')"""))
+                WHERE name IN ('goal','protocol','rationale','summary','goal_progress')"""))
             heads.update({f"directive:{r['id']}": r["source_id"] for r in _active_directives(conn, campaign["generation"])})
             authority, join = campaign["authority_revision"], ""
         watermark = conn.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]

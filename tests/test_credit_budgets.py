@@ -307,6 +307,31 @@ def interrupted_credit(tmp_path, *, partial=7):
 
 
 @pytest.mark.parametrize("partial", [None, 7])
+def test_dashboard_brief_keeps_unknown_credit_balance_explicit(tmp_path, partial):
+    import tomli_w
+    from tests.test_dashboard import get, serve
+
+    config, state, _, _, _ = interrupted_credit(tmp_path, partial=partial)
+    raw = initial_config("provider-fixture", "copilot")
+    raw["agent"] = asdict(config.agent)
+    Path(config.config_path).write_text(tomli_w.dumps(raw), encoding="utf-8")
+    state.blocker("credit-accounting", "budget", "AI credit usage is unknown; further admission is blocked")
+    assert state.credit_budget()["remaining"] is None
+    with state.db.read() as conn:
+        before = list(conn.iterdump())
+    with serve(config.config_path, chat=False) as base:
+        status, _, body = get(base)
+        assert status == 200
+        assert b"<dt>Unreserved credits</dt><dd>Unknown (billing incomplete)</dd>" in body
+        assert b"AI credit usage is unknown; further admission is blocked" in body
+        assert b"1 unknown usage record(s)" in body
+        for route in ("/monitor", "/memos", "/resources"):
+            assert get(base, route)[0] == 200
+    with state.db.read() as conn:
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("partial", [None, 7])
 def test_estimate_is_durable_distinct_idempotent_and_restores_capped_admission(tmp_path, partial):
     from labgoblin.state import _source_revision
     config, state, ledger, turn, envelope = interrupted_credit(tmp_path, partial=partial)
@@ -440,5 +465,9 @@ def test_dashboard_distinguishes_estimates_from_reported_usage(tmp_path):
         assert b"13.000 additional operator-estimated credits" in body
         assert b"remaining allowance is approximate" in body
         assert b"80.000 remaining" in body and b"1 unknown usage record" in body
+        status, _, brief = get(base)
+        assert status == 200
+        assert b"<dt>Unreserved credits</dt><dd>80.00</dd>" in brief
+        assert b"13.00 additional operator-estimated credits" in brief
     with state.db.read() as conn:
         assert list(conn.iterdump()) == before

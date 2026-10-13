@@ -87,6 +87,43 @@ uncertain launch/resource ownership. These diagnostics do not constitute a
 non-execution or final-usage receipt, and updating the package does not repair
 or replace a previously admitted frozen launch.
 
+Slow database stages (at least one second) also emit a warning on stderr with
+database, process, caller locations and elapsed time. Acquisition, transaction
+body, commit, rollback and close are distinguished; SQL parameters and source
+bodies are not logged. The busy timeout is not a deadline on disk flushes.
+Use low-latency local storage for operational SQLite state: a second application
+mutex cannot accelerate a durable commit, and increasing the wait is not proof
+that storage contention is resolved. Do not disable synchronous durability or
+move a live campaign's database as a workaround; its frozen paths and ownership
+must remain intact.
+For native Windows campaigns, a **cold whole-project relocation** can retain the
+original directory as a junction to the new location. Stop all campaign processes
+and readers, including the dashboard. Save and close editors, language servers
+and terminals rooted in the project too: Windows directory handles can prevent
+the rename even when research is stopped. Verify there is no controller, live or
+uncertain launch, or campaign grant before copying. Preserve and verify the
+complete project (including the environment, state, research files, evidence and
+frozen runtimes), then replace the original directory with a junction. Keep a
+verified rollback copy offline; never operate both copies as separate campaigns.
+Do not move only the database, change the shared ledger, or retarget live paths.
+
+Saved configuration revisions, queued specs, packets, envelopes and receipts
+remain byte-for-byte unchanged. Restoration verifies that the recorded **project
+directory**, not just its configuration file, resolves to the current project.
+Only configuration location and project-local storage watermark paths are
+normalized in memory; all other settings retain strict comparisons. Queued work
+uses the same rule without rewriting its captured spec. External storage paths
+and thresholds cannot silently change. Ordinary loaded snapshots still work
+without a readable TOML file.
+
+Keep every historical project alias permanently: original interpreter, input,
+capture and helper paths remain in use. Verify snapshot restoration, historical
+helpers/receipts and installed environment through both paths before restarting.
+A copied project without the original whole-directory alias, a broken/retargeted
+alias, or a config-file-only link is not a supported relocation. Guest
+WSL/Docker mount relocation and live migration are not qualified by this native
+procedure. Initialize new campaigns on their intended local volume when possible.
+
 Reconciliation can retire a proven pre-claim failure: the exact recorded launcher
 has exited, the launch is still armed with no supervisor/payload, and its frozen
 runtime verifies. Workers must commit their claim before starting any provider
@@ -116,6 +153,32 @@ aggregation avoids counting premium multipliers or replaying charges. Unknown
 usage without an operator-approved estimate blocks capped inference, and proven
 non-starts cost zero. Accounting spans
 all generations and controller restarts without changing immutable receipts.
+
+Reservations share unreserved credits among actually prepared/ready owned
+reasoning scopes, not hypothetical idle slots. Final-analysis planning protects
+at least one provider minimum, or the median of up to seven comparable accepted
+root completion costs once three are available under the loaded configuration.
+The budget projection labels this uncertain planning evidence and exposes
+unusable history; no estimate is substituted into billing. Stopping-coach,
+reflection and canary minimums remain separate protected commitments.
+
+The SDK result captures explicit `session_limits_exhausted` provider events and
+the `session.info` / `session_limits` notice
+`Session limit reached. Increase or unset the session limit to continue.`
+Usage updates and final-response/tool-disable warnings are not exhaustion.
+Final spend at/above an allowance alone does not establish such an event.
+Valid owned completion is accepted through the ordinary contract. A quota-only
+session error can finish with its already-valid handoff after model-free preflight;
+final usage/idle confirmation, shutdown and owned receipt checks still apply.
+Other provider errors are not converted into completion, even if a later quota
+error arrives. Without a valid handoff,
+an explicitly limited root turn produces a durable `provider_limit` blocker
+and an `operational_checkpoint` source, not another generic retry or invented
+science. Only explicit operator resume clears this category; it does not clear
+other recovery/accounting blockers. Advice failures remain nonblocking except
+for ordinary accounting/safety constraints. Original receipts and drafts are
+never rewritten, and historical SDK results lacking this field are not inferred
+to contain a limit event.
 
 Research defaults to a 1800-second hard deadline. Copilot's owned SDK payload
 records bounded activity checkpoints and periodic provider aggregate usage.
@@ -201,18 +264,36 @@ rechecked before execution; guest helpers also check the actual guest input
 paths rather than assuming a host check validates an alternate mapping.
 Input hashes have an explicit finite `verification_bytes` allowance.
 
-Requested `stable-consumption` prepares only a bounded small exact copy. Native
+Requested `stable-consumption` streams a bounded exact file copy. Native
 Windows holds a read lease while it is consumed; Docker exposes the prepared
 copy through a read-only mount. Unsupported WSL/native-POSIX guarantees are
 refused. This is not protection against an unrestricted same-user administrator.
 Large inputs are neither copied nor hashed without an explicit applicable policy.
 
-Collection, execution and validation have separate outcomes. Small evidence is
-captured once, with parsing, digests and retained downloads derived from those
-bytes. Large mutable artifacts expose a qualified current reference, not a
-fabricated hash or exact download. Recollection creates new observation IDs and
-a new collection event; old citations keep their original bytes. A missing
-artifact in the latest collection cannot inherit a metric from an earlier one.
+Collection, execution and validation have separate outcomes. Artifact capture
+streams into a private temporary file, computes SHA-256 over those same bytes,
+and publishes the complete immutable object only after copying succeeds. The
+default `storage.capture_bytes` is 16 GiB per file; new preparations also freeze
+a total retained-byte allowance of four times that setting (64 GiB by default,
+including metrics). These are finite storage limits, not model-context limits.
+Metrics retain their separate 256 KiB default and bounded numeric parsing.
+Configuration identity includes the effective capture limit, so a new default
+cannot collide with an existing immutable snapshot from unchanged TOML.
+Collection checks destination space and configured watermarks before copying;
+watermarks are soft admission checks, not cross-process disk reservations.
+An exceeded new-work limit is an explicit collection failure, with a qualified
+unmanaged reference if the output exists, never a fabricated retained digest.
+Existing frozen work without the aggregate allowance keeps its original
+per-file policy, including qualified unmanaged references for oversized files.
+
+Reads verify the complete retained digest while buffering only the requested
+byte page. CLI pages are at most 1 MiB; SDK artifact pages are at most 16 KiB.
+Full exports stream to a new local file and never emit artifact bytes to stdout.
+Dashboard downloads verify before headers, then stream without keeping a SQLite
+read transaction open. Large retained files are downloadable regardless of the
+small inline-image/report-preview limits. Recollection creates new observation
+IDs and a new collection event; old citations keep their original bytes. A
+missing artifact in the latest collection cannot inherit an earlier metric.
 
 Result pages expose their complete attempt denominator and bounded observation/
 metric coverage. CSV is an explicitly requested, byte-bounded, read-only snapshot
@@ -228,10 +309,42 @@ control revision before a provider can launch.
 
 Every packet is at most 64 KiB with 64 event headers. Half the event selection
 slots prioritize oldest pending evidence; remaining slots take oldest pending
-events. Active operator constraints and the complete current rationale are
-mandatory separately from delivery. Oversized mandatory context fails explicitly.
+events. Complete goal/protocol and active operator constraints are mandatory
+separately from delivery. Oversized mandatory context fails explicitly.
 Large event payloads have bounded previews and byte-paged, digest-qualified
 retrieval; exact chunks include base64 to preserve split UTF-8 characters.
+
+Accepted rationale/next-step previews and exact selected research revisions
+are optional, not another source of authority. They are added after sealed
+inventory and event delivery, within at most 12 KiB of additional working context
+and the overall packet limit. Generation/authority and worker-charter qualification,
+UTF-8 coverage, omitted previews, paging and exact source identities are explicit.
+Historical focus is not current strategy; ordinary published heads are discovery
+only. Selected revisions never follow a newer head. Final analysis uses sealed
+focus and has no live discovery index. Current job/task facts and existing budget
+accounting are read using the packet transaction, without probing processes or
+entering the ledger. Process success, collection, evidence disposition and worker
+integration remain distinct. This projection does not rewrite sources,
+receipt digests or old frozen packets.
+
+New handoffs optionally carry root `goal_progress` and `commitment`. The former
+is a bounded, evidence-linked interpretation of original deliverables, carried
+by an accepted handoff source head rather than a second memory store; omission
+means unchanged, not cleared. Stale/rejected/worker handoffs cannot replace it.
+It precedes local plan previews within optional context and is frozen at sealing.
+The latter records decision relevance at branch/refinement/milestone boundaries,
+without task-credit forecasts or a per-turn obligation. Default-valued optional
+additions preserve acceptance of predecessor normalized capture digests, never
+allowing nondefault content to be stripped from an owned capture.
+
+With coaching enabled, evidence-qualified commitments can coalesce a fresh
+non-stopping strategy episode. Its only verdict is `advise`; no stop authority,
+automatic pivot or mandatory reflection is available. Original goals, accepted
+trajectory and exact evidence remain the review context. Failed/stale reviews
+are explicit terminal episode outcomes, not campaign blockers. Their source and
+event kinds do not renew substantive-research or stopping-review allowances and
+cannot independently schedule research. Genuine stop episodes retain their
+separate two-review bound and stricter unresolved-review behavior.
 
 A provider receipt pins the exact result bytes after owned-tree quiescence and
 records the normalized handoff digest. Acceptance requires that successfully
@@ -239,6 +352,13 @@ owned result, exact packet membership and delivered/retrieved references. It
 commits acknowledgements, rationale, journal source and next action together.
 Human journal edits and post-completion result rewrites cannot stand in for it.
 Journal pages are read-only projections over retained source IDs.
+
+`research_complete` and CLI `research complete` share typed handoff fields,
+owned ID binding and rolled-back acceptance preflight before immutable result
+publication. Validation errors remain in-session and do not publish science or
+acknowledge events. Final acceptance repeats all owned-receipt checks. Manual
+file/preflight completion remains supported, and supervisor memos remain an
+independent optional capture.
 
 New root packets may advertise a separate optional supervisor-memo sidecar.
 After quiescence, the provider captures its bounded parsed content, original
@@ -308,6 +428,10 @@ bounded paginated inventories, exact row revisions and all referenced sources.
 Unknown ownership retains its grant and an incomplete inventory, not completion.
 
 One additional final-analysis bundle is authorized at arm, not packet creation.
+When ordinary admission seals a generation late in a controller cycle, continuous
+execution advances to the next admitting cycle for that reserved analysis rather
+than returning as idle. Pause/stop, blockers, no-agent and single-step policies
+retain their normal precedence; no new research cycle or allowance is created.
 Pausing a merely prepared final turn does not spend it. Final failure, inability
 to prepare, disabled inference or insufficient allowance closes with an explicit
 unassessed outcome, without retrying the analysis. A request for more research

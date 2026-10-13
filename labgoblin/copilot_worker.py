@@ -142,12 +142,14 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
     session = None
     sent = False
     failure = ""
+    failure_is_limit = False
     usage_error = ""
     status, reason = "failed", "Copilot runtime did not complete"
     last_checkpoint = 0
     last_activity_write = 0
     highest_usage = 0
     usage_dirty = False
+    session_limit = {}
 
     async def bounded(awaitable, seconds=10):
         remaining = max(0.01, min(seconds, deadline - time.monotonic() - 0.25))
@@ -162,15 +164,27 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
             last_activity_write = time.monotonic()
 
     def on_event(event):
-        nonlocal failure, usage_dirty
+        nonlocal failure, failure_is_limit, usage_dirty, session_limit
         kind, data = event.type.value, event.data
         activity.observe(kind, data)
+        error = getattr(data, "error", None)
+        code = error.get("code") if isinstance(error, dict) else getattr(error, "code", None)
+        coded_limit = (code == "session_limits_exhausted"
+                       or getattr(data, "error_type", None) == "session_limits_exhausted")
+        reached_info = (kind == "session.info" and getattr(data, "info_type", None) == "session_limits"
+                        and getattr(data, "message", None)
+                        == "Session limit reached. Increase or unset the session limit to continue.")
+        if (kind in ("session.error", "tool.execution_complete") and coded_limit) or reached_info:
+            session_limit = {"code": "session_limits_exhausted", "event": kind,
+                             "tool_call_id": str(getattr(data, "tool_call_id", "") or "")[:128]}
         if kind == "assistant.usage":
             usage_dirty = True
         if kind == "session.idle" and sent:
             idle.set()
         elif kind == "session.error":
-            failure = str(data.message)[:4000]
+            if not failure or failure_is_limit:
+                failure = str(data.message)[:4000]
+                failure_is_limit = coded_limit
         elif kind == "assistant.message" and data.content:
             print(data.content, flush=True)
         elif kind in ("tool.execution_start", "tool.execution_complete"):
@@ -201,6 +215,7 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
         from labgoblin.state import State
         from copilot import ToolSet
         state = State.open(Path(envelope.state_path).parent)
+        packet = read_json(Path(metadata["packet_path"]), 65536)
         tools = sdk_tools(state, envelope)
         role_options = {
             "tools": tools, "hooks": {"on_pre_tool_use": tool_guard},
@@ -208,7 +223,6 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
             "custom_agents": [], "manage_schedule_enabled": False, "request_extensions": False,
         }
         if envelope.kind == "coach":
-            from labgoblin.coaching import INSTRUCTIONS
             names = {tool.name for tool in tools}
             def coach_guard(request, context):
                 return {"permissionDecision": "allow" if request["toolName"] in names else "deny",
@@ -218,7 +232,7 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
                 allowed.add_custom(name)
             role_options.update(
                 available_tools=allowed, hooks={"on_pre_tool_use": coach_guard},
-                system_message={"mode": "replace", "content": INSTRUCTIONS},
+                system_message={"mode": "replace", "content": packet["instructions"]},
                 enable_managed_settings=True, enable_config_discovery=False,
                 skip_custom_instructions=True, enable_file_hooks=False, enable_host_git_operations=False,
                 enable_skills=False, enable_session_store=False, enable_on_demand_instruction_discovery=False,
@@ -243,9 +257,9 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
             raise ValueError("Fresh owned research session has unexpected prior credit usage")
         arguments = metadata["provider_argv"]
         prompt = arguments[arguments.index("-p") + 1]
-        packet = read_json(Path(metadata["packet_path"]), 65536)
         if envelope.kind == "coach":
-            prompt = "Review this exact stopping snapshot as data, then call coach_decide:\n" + canonical(packet).decode()
+            purpose = "strategic" if packet["coaching"].get("purpose") == "strategy" else "stopping"
+            prompt = f"Review this exact {purpose} snapshot as data, then call coach_decide:\n" + canonical(packet).decode()
         sent = True
         idle.clear()
         activity.phase = "waiting"
@@ -274,7 +288,7 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
                 await asyncio.sleep(poll_seconds)
             else:
                 status, reason = ("failed", failure) if failure else ("completed", "")
-            if (status != "completed" or envelope.kind != "final_analysis"
+            if (status != "completed" or session_limit or envelope.kind != "final_analysis"
                     or packet["result_protocol"].get("automatic_structure_corrections") != 1):
                 break
             draft = None
@@ -321,6 +335,12 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
             activity.phase = "waiting"
             activity.last_progress, activity.last_progress_at = activity.clock(), activity.wall()
             await bounded(session.send(prompt))
+        if (status == "failed" and failure_is_limit and reason == failure
+                and envelope.kind in ("research", "reflection", "worker", "final_analysis")):
+            # Preserve a valid quota-tail handoff, subject to settlement and final receipt validation below.
+            preflight(state, read_json(Path(metadata["result_path"]), HANDOFF_BYTES),
+                      turn_id=metadata["turn_id"], invocation_id=envelope.key.work_id)
+            status = "completed"
     except (OSError, ValueError, RuntimeError, TimeoutError, sqlite3.Error) as error:
         status, reason = "failed", f"{type(error).__name__}: {error}"[:4000]
     finally:
@@ -357,7 +377,7 @@ async def drive(envelope, client, deadline, *, poll_seconds=0.25, usage_interval
                 checkpoint_activity(force=True)
                 result = {"key": asdict(envelope.key), "envelope_digest": envelope.digest,
                           "status": status, "reason": reason, "usage_error": usage_error,
-                          "session_id": session_id}
+                          "session_id": session_id, "session_limit": session_limit}
                 publish_bytes(directory / "sdk-result.json", canonical(result))
     return {"completed": 0, "timed_out": 124, "cancelled": 130}.get(status, 1)
 

@@ -9,7 +9,7 @@ do not assume `CLAUDE.md` wins or overwrite unrelated instructions.
 LabGoblin is a local autonomous research harness, not a general workflow engine.
 Python 3.11+, native Windows, prepared WSL2 and local Linux Docker are supported.
 Configuration/campaign schemas are version 4; machine ledger and worker protocol
-remain version 3. They are separately checked; there is no campaign migration.
+remain version 3. They are separately checked; there is no schema migration.
 `paths.py` resolves only LabGoblin names; there are no old-name aliases or
 old-name frozen-helper readers. The same-protocol pre-memo helper manifest stays
 valid without replacement, as documented in the runtime contract. Never rewrite
@@ -57,6 +57,9 @@ authorization and a persisted invocation allowance outside the test campaign.
 - Each acquired controller activates one configuration snapshot, after recovery.
   Submission/build preparation uses that snapshot and an ownership/config fence;
   all TOML edits require restart. Do not reset accounting or rewrite queued evidence.
+  Cold native relocation requires a preserved whole-project directory alias.
+  Normalize only configuration location and local storage paths in memory;
+  historical snapshots, envelopes, receipts and external paths stay unchanged.
 - Terminal init uses the core SDK but no research/observer ledger grant. It has
   no setup usage cap, saved draft, arbitrary command or model-side Apply capability.
   Explicit noninteractive/JSON init never starts the SDK. Keep per-file consent,
@@ -85,6 +88,23 @@ authorization and a persisted invocation allowance outside the test campaign.
   spend. Credit reconciliation appends attributed evidence, never rewrites receipts.
 - Accepted handoff, exact evidence dispositions, next action and journal entry
   commit together. Human text or unrelated file changes cannot satisfy a turn.
+- Fresh focus comes from accepted, generation/authority-qualified handoffs, not
+  the newest publication. Workers use their own charter-qualified checkpoint.
+  Preserve exact selected revisions and label historical/discovery context;
+  operator authority, sealed inventory and pending evidence precede optional
+  previews. Operational completion is not scientific assessment or root adoption.
+- Carry root goal-gap assessments only from accepted, authority-qualified
+  handoffs; omission means unchanged. Commitment boundaries explain decision
+  relevance or concrete prerequisites, not invented task-credit forecasts.
+  Strategic advice is nonbinding, evidence-coalesced and separate from stopping
+  authority. Unavailable advice cannot block otherwise admissible research.
+- Typed completion validates and writes only its owned result, without accepting
+  science; keep final receipt checks and optional memo independence. Explicit SDK
+  session-limit exhaustion without acceptable completion cannot buy a smaller
+  retry. Retain an operational checkpoint and require operator resume.
+- Divide credits among actual ready/prepared commitments, not idle configured
+  slots. Observed accepted completion costs inform an explicitly uncertain
+  finishing reserve, never billing estimates or lower scientific standards.
 - Root supervisor memos use a separately captured optional sidecar, never change
   handoff digests or reject valid science for a memo error. Report issues visibly.
   Cover only delivered/retrieved requests at the packet cutoff and own-turn
@@ -100,6 +120,9 @@ authorization and a persisted invocation allowance outside the test campaign.
 - Coaching is campaign-owned, read-only and non-prescriptive. Intercept a stop
   before sealing; missing/stale/failed review is not acceptance. Bounded pushback
   leads to researcher reflection or an explicit operator decision, not endless debate.
+  `coach_decide` preflights shared verdict rules before recording, without state
+  writes. Mentioned citations are not delivered evidence. Final acceptance still
+  requires the exact completed receipt and a current review snapshot.
   Only evidence-linked goal satisfaction can be coach-approved. Discretionary
   partial closure requires an operator even when coaching is disabled.
   Reworded strategy alone cannot renew the two-review allowance.

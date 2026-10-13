@@ -9,7 +9,7 @@ import shutil
 import stat
 import time
 
-from labgoblin.config import environment
+from labgoblin.config import StorageConfig, Watermark, environment, project_storage
 from labgoblin.evidence import (
     Capture, SizeLimitError, contained, copy_bounded, hash_file, publish_bytes, require_space, verify_input_pins,
 )
@@ -19,11 +19,73 @@ from labgoblin.protocol import (
 )
 
 
-REQUEST_FIELDS = {
-    "key", "runner", "argv", "cwd", "source_files", "cpus", "memory_mb", "gpus",
-    "seconds", "environment", "experiment_id", "hypothesis_id", "hypothesis_description",
-    "artifacts", "validators", "input_validators", "hard_memory_limit", "purpose", "research_refs",
+REQUEST_PROPERTIES = {
+    "key": {"type": "string", "minLength": 1, "description": "Stable idempotency key; changed requests need a new key."},
+    "runner": {"type": "string", "description": "Configured runner name; defaults to execution.default_runner."},
+    "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Argument array, not shell text."},
+    "cwd": {"type": "string", "default": ".", "description": "Existing project-relative working directory."},
+    "source_files": {"type": "array", "items": {"type": "string"}, "description": "Explicit project-relative files; defaults to execution.source_files."},
+    "cpus": {"type": "integer", "minimum": 1, "default": 1},
+    "memory_mb": {"type": "integer", "minimum": 1, "default": 1024},
+    "gpus": {"type": "array", "uniqueItems": True, "items": {"type": "string"}, "default": [],
+             "description": "Physical device IDs; use [] for CPU-only work, never a count."},
+    "seconds": {"type": "number", "exclusiveMinimum": 0, "default": 300},
+    "environment": {"type": "object", "additionalProperties": {"type": "string"}},
+    "experiment_id": {"type": "string", "description": "Defaults to key."},
+    "hypothesis_id": {"type": "string", "description": "Optional legacy claim association; research_refs pins exact revisions."},
+    "hypothesis_description": {"type": "string", "description": "Required for a new hypothesis_id. Omit for an existing ID to use its stored statement; do not paraphrase it."},
+    "artifacts": {"type": "array", "items": {"type": "string"},
+                  "description": "Paths relative to LABGOBLIN_OUTPUT_DIR, retained immutably. "
+                                 "Per-file allowance is storage.capture_bytes; per-attempt retention is four times it. "
+                                 "These are storage limits, not model read limits."},
+    "validators": {"type": "array", "items": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
+    "input_validators": {"type": "array", "items": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
+    "hard_memory_limit": {"type": "boolean", "default": False},
+    "purpose": {"type": "string", "enum": ["evaluation", "exploration", "support"], "default": "support"},
+    "research_refs": {"type": "array", "items": {"type": "string"},
+                      "description": "Exact published revision IDs; evaluation requires a hypothesis revision."},
 }
+REQUEST_FIELDS = set(REQUEST_PROPERTIES)
+
+
+def request_schema():
+    return {"type": "object", "additionalProperties": False, "properties": REQUEST_PROPERTIES,
+            "required": ["key", "argv"],
+            "description": "Work manifest structure. Resource fields are top-level, not a resources object. "
+                           "Runtime validation also checks configured limits, paths and exact research identities.",
+            "examples": [{"key": "baseline-v1", "argv": ["python", "experiment.py"],
+                          "source_files": ["experiment.py"], "cpus": 1, "memory_mb": 256,
+                          "gpus": [], "seconds": 60, "artifacts": ["metrics.json"], "purpose": "support"}]}
+
+
+def _request(value):
+    value = table(value, "work request")
+    unknown = set(value) - REQUEST_FIELDS
+    if unknown:
+        raise ValueError(f"Unknown work request fields: {sorted(unknown)}. "
+                         "Use labgoblin schema work --json; cpus, memory_mb and gpus are top-level fields.")
+    return dict(value)
+
+
+def _hypothesis_request(request, hypothesis):
+    effective = dict(request)
+    if hypothesis:
+        statement = text(effective.get("hypothesis_description", ""), "hypothesis_description", empty=True)
+        if statement and statement != hypothesis["statement"]:
+            raise ValueError("Hypothesis has a different statement; omit hypothesis_description to use "
+                             "the stored claim, or explicitly publish a revised hypothesis before submitting.")
+        effective["hypothesis_description"] = hypothesis["statement"]
+    return effective
+
+
+def validate_spec(config, request, *, state=None):
+    request = _request(request)
+    hypothesis = None
+    if state is not None:
+        with state.db.read() as conn:
+            hypothesis = conn.execute("SELECT statement FROM hypotheses WHERE id=?",
+                                      (request.get("hypothesis_id"),)).fetchone()
+    return prepare_spec(config, _hypothesis_request(request, hypothesis), validate_only=True)
 
 
 def _input_revisions(config, root: Path, runner_kind: str) -> dict:
@@ -38,16 +100,16 @@ def _input_revisions(config, root: Path, runner_kind: str) -> dict:
             if runner_kind == "wsl" or (runner_kind == "native" and os.name != "nt"):
                 raise ValueError("Stable input consumption requires native Windows read leases or read-only Docker inputs")
             if not source.is_file():
-                raise ValueError("Stable input preparation requires an explicit small file, not a dataset directory")
-            capture = Capture.read(source, config.storage.capture_bytes)
-            if item.sha256 and capture.digest != item.sha256:
-                raise ValueError(f"Input hash mismatch: {name}")
+                raise ValueError("Stable input preparation requires an explicit file, not a dataset directory")
             target = contained(root, Path("inputs") / name / ("revision" + source.suffix))
-            publish_bytes(target, capture.body)
+            require_space(config.storage, reserve_bytes=source.stat().st_size, destination=root)
+            capture = copy_bounded(source, target, config.storage.capture_bytes)
+            if item.sha256 and capture["sha256"] != item.sha256:
+                raise ValueError(f"Input hash mismatch: {name}")
             target.chmod(stat.S_IREAD)
-            value.update(access_path=str(target), sha256=capture.digest, wsl_path="",
+            value.update(access_path=str(target), sha256=capture["sha256"], wsl_path="",
                          verification_bytes=config.storage.capture_bytes, prepared=True,
-                         bytes=len(capture.body))
+                         bytes=capture["bytes"])
         elif item.sha256:
             if not source.is_file() or hash_file(source, item.verification_bytes) != item.sha256:
                 raise ValueError(f"Input hash mismatch: {name}")
@@ -84,7 +146,7 @@ def checked_inputs(inputs: dict, runner_kind: str):
 
 
 def prepare_spec(config, request: dict, attempt_id: str | None = None, *, validate_only=False, owner_id=None) -> dict:
-    request = table(request, "work request", REQUEST_FIELDS)
+    request = _request(request)
     if len(canonical(request)) > 65536:
         raise ValueError("Work request exceeds its 64 KiB encoded limit")
     key = text(request.get("key"), "idempotency key")
@@ -134,7 +196,11 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None, *, valida
             contained(config.root / "validation-output", item)
         return {"valid": True, "runner": name, "resources": asdict(resources), "seconds": seconds,
                 "source_files": [str(path) for path in sources],
-                "scope": "Manifest/configuration validation; no copying, backend probing or execution"}
+                "capture_limits": {"per_file_bytes": config.storage.capture_bytes,
+                                   "per_attempt_bytes": 4 * config.storage.capture_bytes,
+                                   "metrics_bytes": config.storage.metrics_bytes},
+                "scope": "Manifest/configuration validation; not admission. Existing hypothesis lookup is read-only; "
+                         "no copying, backend probing or execution"}
     root = contained(config.state_dir, Path("attempts") / (attempt_id or identifier()))
     if not root.is_relative_to(config.root):
         raise ValueError("Campaign state escapes the project through a symlink/junction")
@@ -174,7 +240,7 @@ def prepare_spec(config, request: dict, attempt_id: str | None = None, *, valida
         "environment": {**config.execution.environment, **environment(request.get("environment", {}), "environment")},
         "hypothesis_id": hypothesis, "hypothesis_description": statement,
         "experiment_id": text(request.get("experiment_id", key), "experiment_id"),
-        "storage": asdict(config.storage),
+        "storage": asdict(config.storage), "capture_total_bytes": 4 * config.storage.capture_bytes,
     }
     if len(canonical(spec)) > 1024 * 1024:
         raise ValueError("Frozen work spec exceeds 1 MiB")
@@ -188,7 +254,7 @@ def submit(state, config, request: dict, *, turn_id: str | None = None) -> dict:
 
 
 def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
-    request = dict(table(request, "work request", REQUEST_FIELDS))
+    request = _request(request)
     config, fence = state.configuration(config)
     scope_id = "root"
     with state.db.read() as conn:
@@ -238,9 +304,7 @@ def _submit_owned(state, config, request: dict, *, turn_id=None) -> dict:
         if previous["request_digest"] != fingerprint(request):
             raise ValueError("Idempotency key already belongs to a different request")
         return state.attempt(previous["id"])
-    effective = dict(request)
-    if hypothesis and not effective.get("hypothesis_description"):
-        effective["hypothesis_description"] = hypothesis["statement"]
+    effective = _hypothesis_request(request, hypothesis)
     spec = prepare_spec(config, effective, owner_id=state.id)
     if request.get("hypothesis_id") and not hypothesis:
         state.hypothesis(request["hypothesis_id"], request["hypothesis_description"], turn_id=turn_id)
@@ -268,7 +332,9 @@ def queued_runner(config, spec):
                "source_files": list(config.execution.source_files)}
     if "source_files" in spec["request"] and prepared is not None:
         current["source_files"] = prepared["source_files"]
-    if prepared != current or spec["storage"] != asdict(config.storage):
+    recorded_root = Path(spec["root"]).parent.parent.parent
+    if prepared != current or project_storage(
+            spec["storage"], recorded_root=recorded_root, current_root=config.root) != asdict(config.storage):
         raise ValueError("Queued input/environment/source/storage settings changed; resubmit explicitly")
     allowed = config.campaign.resources
     if (spec["cpus"] > allowed.cpus or spec["memory_mb"] > allowed.memory_mb
@@ -332,11 +398,14 @@ def collect_artifacts(state, attempt_id: str, *, recollect=False) -> dict:
     spec = json.loads(attempt["spec"])
     if attempt["status"] == "not_started" or (attempt["status"] == "cancelled" and attempt["started"] is None):
         return state.record_collection(attempt_id, [], "not_performed", "not_performed", "", recollect=recollect)
-    output = Path(spec["output"])
+    output = Path(spec["output"]).resolve()
     paths = {contained(output, name): name for name in spec["artifacts"]}
     if (output / "metrics.json").exists():
         paths[output / "metrics.json"] = "metrics.json"
     rows, errors, validation_errors = [], [], []
+    remaining = spec.get("capture_total_bytes")
+    storage = StorageConfig(volumes={
+        key: Watermark(**value) for key, value in spec["storage"].get("volumes", {}).items()})
     if attempt["nonce"]:
         receipt = json.loads(state.launch(attempt["nonce"])["receipt"])
         validation_errors.extend(receipt["metadata"].get("validation_errors", []))
@@ -353,11 +422,24 @@ def collect_artifacts(state, attempt_id: str, *, recollect=False) -> dict:
             digest = None
             size = observed.st_size
             assurance = "unmanaged"
-            if size <= limit or kind == "metrics":
-                capture = Capture.read(path, limit)
-                size, digest, assurance = len(capture.body), capture.digest, "captured"
+            limitation = None
+            if remaining is not None and size > remaining:
+                limitation = f"Artifact exceeds remaining {remaining}-byte per-attempt capture allowance"
+            elif size > limit:
+                limitation = f"Artifact exceeds its frozen {limit}-byte capture allowance"
+            if limitation is None:
+                require_space(storage, reserve_bytes=size, destination=state.root)
                 retained = contained(state.root, Path("evidence") / oid)
-                publish_bytes(retained, capture.body)
+                if kind == "metrics":
+                    capture = Capture.read(path, limit if remaining is None else min(limit, remaining))
+                    size, digest = len(capture.body), capture.digest
+                    publish_bytes(retained, capture.body)
+                else:
+                    copied = copy_bounded(path, retained, limit if remaining is None else min(limit, remaining))
+                    size, digest = copied["bytes"], copied["sha256"]
+                assurance = "captured"
+                if remaining is not None:
+                    remaining -= size
                 metadata["capture_path"] = str(retained)
                 if kind == "metrics":
                     try:
@@ -366,7 +448,9 @@ def collect_artifacts(state, attempt_id: str, *, recollect=False) -> dict:
                         validation_errors.append(f"{name}: {error}")
                         metadata["validation_error"] = str(error)
             else:
-                metadata["limitation"] = "Large mutable artifact: current path only; bytes were not retained or hashed"
+                metadata["limitation"] = limitation + "; current path only; bytes were not retained or hashed"
+                if remaining is not None or kind == "metrics":
+                    errors.append(f"{name}: {limitation}")
             rows.append({"id": oid, "path": name, "kind": kind, "size": size, "digest": digest,
                          "metadata": metadata, "assurance": assurance})
         except (OSError, ValueError) as error:

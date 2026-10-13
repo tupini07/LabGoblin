@@ -21,7 +21,7 @@ from labgoblin.dashboard_data import (
     FAILED, RESEARCH_SOURCES, attempt_filter, numeric_metrics,
     observation_context, report_text, snapshot, source_preview, read_text as _read_text,
 )
-from labgoblin.evidence import contained, observation, read_json, tail
+from labgoblin.evidence import contained, observation_record, observation_stream, read_json, tail
 from labgoblin.protocol import ACTIVE, LaunchEnvelope, boolean, integer, number, text
 from labgoblin.processes import CampaignLease, process_state
 from labgoblin.paths import configuration_path, state_directory
@@ -217,6 +217,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.view_snapshot = {}
         self.context = {}
         self.connection = None
+        self.artifact_started = False
         parsed = urllib.parse.urlsplit(self.path)
         self.path_name = parsed.path
         self.params = {k: values[0] for k, values in urllib.parse.parse_qs(parsed.query).items()}
@@ -235,6 +236,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.state = self.server.state
             self.root, self.db = self.state.root, self.state.path
+            if self.path_name == "/artifact":
+                self._download()
+                return
             routes = {
                 "/": ("Research brief", self._overview), "/evidence": ("Evidence", self._evidence),
                 "/work": ("Work", self._work), "/history": ("History", self._history),
@@ -258,9 +262,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.view_snapshot = snapshot(self.state, self.connection)
                 self.current = self.view_snapshot["campaign"]
                 self.budget = self.view_snapshot["budget"]
-                if self.path_name == "/artifact":
-                    self._download()
-                    return
                 if self.path_name not in routes:
                     raise DashboardError(404, "This dashboard page does not exist.")
                 title, render = routes[self.path_name]
@@ -276,7 +277,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             logging.getLogger(__name__).debug("Dashboard client disconnected: %s", error)
         except (OSError, sqlite3.Error, ValueError) as error:
             logging.getLogger(__name__).exception("Unable to read dashboard data")
-            self._send(self._page("Data unavailable", _empty("Dashboard data unavailable", str(error))).encode(), status=503)
+            if self.artifact_started:
+                self.close_connection = True
+            else:
+                self._send(self._page("Data unavailable", _empty("Dashboard data unavailable", str(error))).encode(), status=503)
 
     def _chat_snapshot(self, conversation_id):
         value = self.server.observer.snapshot(conversation_id)
@@ -454,7 +458,8 @@ Which conclusions have experimental support?</p></div></div>
             ("Research outcome", _badge(current["research_outcome"])),
             ("Reported research credits", f'{credits["used"]:,.2f}'),
             ("Reserved, not spent", f'{credits["reserved"]:,.2f}'),
-            ("Unreserved credits", "Unlimited" if credits["unlimited"] else f'{credits["remaining"]:,.2f}'),
+            ("Unreserved credits", "Unlimited" if credits["unlimited"] else
+             "Unknown (billing incomplete)" if credits["remaining"] is None else f'{credits["remaining"]:,.2f}'),
         ]) + '<p class="muted">Process liveness is not payload health or scientific success.</p>'
         if credits["unknown"] or credits["estimated"]:
             operations += (f'<p class="notice">{credits["unknown"]} unknown usage record(s); '
@@ -965,13 +970,16 @@ Which conclusions have experimental support?</p></div></div>
                  _escape(json.loads(row["integrated"])["state"]) if row["integrated"] else "Not integrated"]
                 for row in tasks])) + paging
         episodes = self._rows("SELECT * FROM stop_episodes ORDER BY created DESC LIMIT 20")
-        content += _panel("Stopping reviews (latest 20)", _table(["Episode", "State", "Basis", "Coach calls", "Reason", "Response"], [
+        content += _panel("Coaching reviews (latest 20)", _table(["Episode", "State", "Purpose / basis", "Coach calls", "Reason", "Response"], [
             [_escape(row["id"]), _badge(row["state"]),
-             _escape(json.loads(row["proposal"]).get("stop_basis") or "Unclassified"),
+             _escape("Strategy advice (nonbinding)" if json.loads(row["proposal"]).get("review_kind") == "strategy"
+                     else json.loads(row["proposal"]).get("stop_basis") or "Unclassified stopping proposal"),
              str(row["rounds"]), _escape(row["reason"]),
              _link("/journal", "Exact coach decision", entry=row["result_source"]) if row["result_source"] else "No review result"]
             for row in episodes]) + "<p>Discretionary partial closure requires an operator decision. "
                                    "A coach may approve an evidence-linked goal-completion claim, not scientific truth. "
+                                   "Strategy reviews offer nonbinding advice in ordinary research; they cannot stop, "
+                                   "veto, require reflection or certify science. Unavailable advice does not block research. "
                                    "Historical decisions retain their original policy and outcome.</p>")
         from labgoblin import credits
         rows = self._rows("""SELECT l.kind,l.envelope,l.receipt,l.phase FROM launches l WHERE l.kind!='attempt'""")
@@ -1148,7 +1156,7 @@ Which conclusions have experimental support?</p></div></div>
                 [_escape(r["disposition"]), _escape(r["reason"]), _link("/journal", "Exact assessment", entry=r["source_id"])]
                 for r in assessments], empty="No assessment reference recorded", explanation="Captured or validated evidence is not automatically assessed."))
         content += '<div class="actions">' + _link("/job", "Current experiment", id=row["attempt_id"])
-        if row["assurance"] == "captured" and row["size"] <= 1024 * 1024:
+        if row["assurance"] == "captured":
             content += _link("/artifact", "Captured download", id=oid)
         content += "</div>"
         return content + _details("Integrity metadata", _facts([("SHA-256", _escape(row["digest"])), ("Size", _size(row["size"])), ("Observation ID", _escape(oid))]))
@@ -1172,18 +1180,22 @@ Which conclusions have experimental support?</p></div></div>
 
     def _download(self):
         oid = self.params.get("id", "")
-        rows = self._rows("SELECT assurance='captured' AS captured,size FROM observations WHERE id=?", (oid,))
-        if not rows:
+        with self.state.db.read() as conn:
+            row = conn.execute("SELECT assurance FROM observations WHERE id=?", (oid,)).fetchone()
+        if row is None:
             raise DashboardError(404, "Unknown evidence revision.")
-        if not rows[0]["captured"] or rows[0]["size"] > 1024 * 1024:
-            raise DashboardError(409, "No bounded exact capture is available. A mutable current file is not a historical download.")
-        value = observation(self.state.db, oid)
-        body = value["body"]
-        self._headers(200, "application/octet-stream", len(body))
-        self.send_header("Content-Disposition", "attachment")
-        self.send_header("X-Content-SHA256", value["digest"])
-        self.end_headers()
-        self.wfile.write(body)
+        if row["assurance"] != "captured":
+            raise DashboardError(409, "No exact capture is available. A mutable current file is not a historical download.")
+        value = observation_record(self.state.db, oid)
+        with observation_stream(self.state.db, value, preverify=True) as blocks:
+            self.request.settimeout(30)
+            self._headers(200, "application/octet-stream", value["size"])
+            self.send_header("Content-Disposition", "attachment")
+            self.send_header("X-Content-SHA256", value["digest"])
+            self.end_headers()
+            self.artifact_started = True
+            for block in blocks:
+                self.wfile.write(block)
 
     def _resources(self):
         budget = self.budget

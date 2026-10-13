@@ -15,6 +15,39 @@ ACTIVITIES = ("active", "parked", "retired")
 OUTCOMES = ("unassessed", "supported", "refuted", "inconclusive", "blocked")
 RELATIONS = ("context", "informs", "supports", "refutes", "supersedes", "derived_from")
 MAX_BYTES = 32 * 1024
+PUBLICATION_REQUIRED = ["id", "request_id", "title", "body"]
+PUBLICATION_PROPERTIES = {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "request_id": {"type": "string", "minLength": 1, "description": "Unique stable ID for this exact revision, including inline research_updates."},
+    "base": {"type": ["string", "null"], "description": "Exact current revision ID when revising; null/omitted only for a new record."},
+    "kind": {"type": "string", "enum": list(KINDS), "description": "Required when creating a new record."},
+    "title": {"type": "string", "minLength": 1, "maxLength": 240},
+    "body": {"type": "string", "minLength": 1},
+    "activity": {"type": "string", "enum": list(ACTIVITIES), "default": "active"},
+    "outcome": {"type": "string", "enum": list(OUTCOMES), "default": "unassessed"},
+    "links": {"type": "array", "maxItems": 100, "items": {
+        "type": "object", "additionalProperties": False, "required": ["target", "relation"],
+        "properties": {"target": {"type": "string", "minLength": 1},
+                       "relation": {"type": "string", "enum": list(RELATIONS)}}}},
+    "provenance": {"type": "object"},
+}
+
+
+def publication_schema():
+    return {"type": "object", "additionalProperties": False, "properties": PUBLICATION_PROPERTIES,
+            "required": PUBLICATION_REQUIRED,
+            "description": "Research publication and inline research_update structure. All strings must be NUL-free; "
+                           "IDs/titles/body must be nonblank. Runtime checks ownership, revision base and exact links. "
+                           "Researchers publish scientific assessments only in the owned handoff, with delivered/retrieved links.",
+            "allOf": [
+                {"if": {"properties": {"base": {"type": "null"}}}, "then": {"required": ["kind"]}},
+                {"if": {"required": ["outcome"], "properties": {"outcome": {"not": {"const": "unassessed"}}}},
+                 "then": {"required": ["links"], "properties": {"links": {"minItems": 1}}}},
+            ],
+            "examples": [{"id": "comparison-assessment", "request_id": "comparison-assessment-v1",
+                          "kind": "knowledge", "title": "Comparison assessment",
+                          "body": "State the observed result and its limitations.", "outcome": "inconclusive",
+                          "links": [{"target": "REPLACE_WITH_EXACT_DELIVERED_EVIDENCE_ID", "relation": "context"}]}]}
 
 
 def actor(conn, turn_id=None, *, write=False):
@@ -46,8 +79,7 @@ def reference_exists(conn, ref):
 
 
 def publish_in(conn, request, owner):
-    request = dict(table(request, "research publication", {
-        "id", "request_id", "base", "kind", "title", "body", "activity", "outcome", "links", "provenance"}))
+    request = dict(table(request, "research publication", set(PUBLICATION_PROPERTIES)))
     request_id = text(request.get("request_id"), "request_id")
     digest = fingerprint(request)
     replay = conn.execute("SELECT source_id,request_digest FROM research_revisions WHERE request_id=?",

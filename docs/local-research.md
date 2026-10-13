@@ -224,6 +224,43 @@ argv arrays, not shell strings. Claude defaults to `claude --dangerously-skip-pe
 and its child environment removes `ANTHROPIC_API_KEY` for subscription auth.
 Windows batch shims must be replaced by a direct executable argv.
 
+### Large artifacts and bounded reads
+
+`storage.capture_bytes` defaults to **17179869184 (16 GiB) per artifact**.
+New experiments freeze a total immutable-retention allowance of four times
+that value (**64 GiB per attempt** by default), including metrics. Increase
+the setting for larger videos, datasets or checkpoints; zero is not unlimited.
+For example:
+
+```toml
+[storage]
+capture_bytes = 17179869184
+```
+
+Captures, exact file exports and dashboard downloads stream in bounded chunks;
+artifact size does not become model-context size or an equally large memory
+allocation. Metrics keep their separate 256 KiB default. Exceeding an allowance,
+missing output, changed source or insufficient destination space is reported
+explicitly. Free-space watermarks still apply. Native programs can write more
+than the retention allowance: this is not a filesystem quota.
+
+Use `labgoblin evidence observation --id ID --export PATH --json` to export a
+whole verified artifact to a new file outside campaign state. Existing different
+files are never overwritten. Without `--export`, `--offset` and `--bytes` select
+a base64 byte page (at most 1 MiB); inspect `returned_bytes` and `has_more`.
+SDK `research_read` operation `artifact` provides pages of at most 16 KiB;
+operation `observation` still returns metadata. A page read verifies the whole
+object's SHA-256, so repeated reads of large objects incur full verification
+I/O; export once for local analysis rather than paging an entire dataset
+through the model. Downloads preserve exact binary bytes; inline report
+figures and previews remain small.
+
+Limits are frozen at preparation. TOML changes require controller restart and
+apply to new experiments, not already prepared jobs or historical observations.
+Old unmanaged references do not become captured evidence after an upgrade;
+explicit recollection creates a separate observation under the original
+attempt's limits. New packets state the available artifact-storage allowance.
+
 ### Research-turn timeouts
 
 `agent.timeout_seconds` defaults to **1800 seconds** and remains a hard bound
@@ -285,12 +322,26 @@ The CLI must advertise both `--max-ai-credits` and `--usage-output-file`.
 Claude does not support this Copilot-credit setting. Credits are not premium
 request multipliers, tokens or invocations.
 
-Each launch receives the remaining allowance after reservations. Copilot requires
-at least 30 credits per session; ordinary research reserves another 30 for final
-analysis (a sandbox canary adds its own 30-credit minimum). Insufficient remaining
+Each launch receives its allowance after existing commitments and finishing
+reserves. Only actually prepared/ready reasoning scopes share the unreserved
+pool; idle configured slots do not shrink a lone researcher's call.
+Copilot requires at least 30 credits per session. Final analysis reserves at
+least 30, using observed accepted completion costs cautiously when enough
+comparable history exists; `budget --json` exposes the reserve's basis and
+uncertainty. Remaining stopping-coach/reflection steps and sandbox canaries
+also retain their minimums. These are planning reservations, not spent credits.
+Insufficient remaining
 credits close admission rather than being rounded up. The provider accounts for its
 subagents and credit-consuming compaction. Responses already in flight can exceed
 the cap; this is not a guaranteed billing ceiling.
+
+An explicit SDK session-limit event without an acceptable root handoff blocks
+further admission rather than purchasing a smaller retry. The journal retains a
+model-free operational checkpoint, not an invented scientific assessment.
+Inspect retained outputs, receipts and accounting, then use explicit operator
+`resume` if continuation is appropriate; merely restarting cannot clear this
+blocker. Other recovery and accounting blockers must still be resolved. A valid
+handoff is not rejected simply because its session overshot a soft allowance.
 
 Authoritative usage is retained in owned receipts, including failed invocations,
 and is counted exactly once across retries, controller restarts and generations.
@@ -387,6 +438,15 @@ Use `validate --spec work.json`, `submit --spec work.json`, or
 returns nonzero if any item fails. Reusing a key with the identical request is
 idempotent; changing the request requires a new key.
 
+`labgoblin schema work --json` lists all manifest fields, types and a minimal
+example without loading configuration or campaign state. Resources are the
+top-level `cpus`, `memory_mb` and `gpus` fields, not a nested `resources` object;
+`gpus` is an array of physical device IDs, never a numeric count.
+`labgoblin schema research-update --json` similarly documents publications and
+inline handoff updates, including the required stable `request_id` and exact
+revision `base`. These structural descriptions do not replace runtime checks
+of resources, paths, ownership or evidence identities.
+
 `python`/`python3` select the runner's configured interpreter. Argv preserves
 spaces, empty strings, quotes and Unicode. Explicit `source_files` are copied
 with an enforced byte cap and hashes; Git identity alone is not a snapshot.
@@ -400,8 +460,13 @@ object of finite numeric values, not booleans or strings. Optional
 operation's resources, deadline and cancellation; include their source files.
 Successful execution and invalid output remain distinct facts.
 
-Hypothesis-associated work supplies both `hypothesis_id` and a scientific
-`hypothesis_description`, not its own opaque ID. Evaluated statements cannot be
+Work creating a new hypothesis supplies both `hypothesis_id` and a scientific
+`hypothesis_description`, not its own opaque ID. For an existing hypothesis,
+omit the description to reuse its exact stored statement. Validation and
+submission share this lookup; explicitly conflicting descriptions fail before
+source copying. Validation uses read-only campaign state when available and
+still checks the disk candidate configuration, not admission eligibility.
+Evaluated statements cannot be
 changed. Use a new ID and optional `hypothesis set --supersedes OLD_ID` for a
 revised claim. Support/setup/replication work need not invent a hypothesis.
 
@@ -425,6 +490,11 @@ records observations/support work, what changed and why, the governing next
 step, evidence dispositions and a continue/wait/blocked/finalize decision.
 Handoff acceptance, exact acknowledgements and the journal projection are one
 transaction. Writing an unrelated checkpoint cannot substitute for it.
+Accepted `goal_progress` assessments keep original deliverables and unresolved
+gaps visible before the local plan. Update them only when assessments change.
+Branch/milestone `commitment` entries explain decision relevance or useful
+prerequisites, not predicted credit costs; ordinary continuation needs no form.
+Both are revisable researcher judgments, not new operator authority.
 
 `steer --text TEXT` records attributed operator constraints; `--supersedes ID`
 explicitly replaces one. `source set --kind goal|protocol --file PATH` versions
@@ -448,9 +518,17 @@ partial closure needs an explicit operator decision even if a coach accepts it.
 Use `research coach --id EPISODE --decision continue|accept_stop --reason TEXT`
 for a settled unresolved review. See [research-loop.md](research-loop.md) for
 the policy and reference contract.
+With coaching enabled, selected commitment/evidence boundaries can also produce
+nonbinding strategy advice. This cannot stop, veto, prescribe experiments or
+require a separate reflection. Unavailable advice does not block normal research.
 
-Within an owned turn, `research preflight --file HANDOFF.json` (or SDK
-`research_preflight`) checks a complete handoff without accepting it. SDK final
+Within an owned turn, prefer SDK `research_complete`, or
+`research complete --file DRAFT.json`, to validate and write the owned handoff
+in one action. Owned IDs may be omitted; conflicting IDs are rejected.
+`schema handoff --json` exposes the shape. End the turn after successful
+recording; controller acceptance still requires the exact completed receipt.
+Manual result files can still use `research preflight --file HANDOFF.json` (or SDK
+`research_preflight`) to check a complete handoff without accepting it. SDK final
 analysis can correct structure/references once within its original allowance
 and deadline, preserving its draft and error. It cannot change conclusions,
 run new experiments or reopen the inventory. Uncorrected output remains
@@ -528,6 +606,8 @@ view. It leads with a short root-researcher supervisor memo and separate live
 controller/accounting facts. The detailed goal, accepted rationale, lifecycle,
 recent changes and full allowance remain under expandable sections. Recovery
 blockers are promoted; closed/old-generation memos are explicitly historical.
+Brief shows an unknown unreserved balance when final billing is missing, not
+zero or an available allowance; its other research and recovery details remain readable.
 Missing, invalid and pending memos are visible and never invalidate accepted
 science. History > Supervisor memos retains prior versions and evidence links.
 Request an update with `labgoblin research request-memo --id REQUEST_ID --reason

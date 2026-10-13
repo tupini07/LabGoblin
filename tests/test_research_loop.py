@@ -18,10 +18,10 @@ from tests.test_providers import HELP
 from tests.test_state import receipt
 
 
-def campaign(tmp_path, **settings):
+def campaign(tmp_path, *, max_ai_credits=2000, **settings):
     raw = initial_config("loop", "copilot")
     raw["research"].update({"coaching": True, "max_tasks": 4, "max_parallel_agents": 3, **settings})
-    raw["campaign"].update(max_seconds=0, max_invocations=0, max_ai_credits=2000, cpus=4, memory_mb=4096)
+    raw["campaign"].update(max_seconds=0, max_invocations=0, max_ai_credits=max_ai_credits, cpus=4, memory_mb=4096)
     raw["agent"].update(resources={"cpus": 1, "memory_mb": 128}, command=[sys.executable])
     path = tmp_path / "labgoblin.toml"
     path.write_text(tomli_w.dumps(raw), encoding="utf-8")
@@ -133,7 +133,7 @@ def test_atomic_credit_reservations_do_not_give_each_worker_remaining_pool(tmp_p
     two, second_launch = owned(config, state, "worker", second["id"])
     first_allowance = first_launch.metadata["credit_allowance_nano"]
     second_allowance = second_launch.metadata["credit_allowance_nano"]
-    assert first_allowance == (2000 - 120) * credits.NANO // 3
+    assert first_allowance == (2000 - 120) * credits.NANO // 2
     assert abs(first_allowance - second_allowance) <= 1
     assert state.credit_budget()["reserved_nano"] == first_allowance + second_allowance
     assert tasks.get(state, first["id"])["budget"]["reserved_nano"] == first_allowance

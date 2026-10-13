@@ -402,7 +402,14 @@ class Campaign:
                             briefing.prepare(self.state, "coach")
                             turn = self._turn()
                         except ERRORS as error:
-                            self._error(errors, "coaching-preparation", "coaching", error)
+                            if coaching.is_strategy(episode):
+                                reason = f"{type(error).__name__}: {error}"
+                                with self.state.db.write() as conn:
+                                    coaching.unavailable_in(conn, episode, reason)
+                                waiting.append({"work_id": episode["id"],
+                                                "reason": "Optional strategy preparation failed: " + reason})
+                            else:
+                                self._error(errors, "coaching-preparation", "coaching", error)
                 free = config.research.max_parallel_agents - len(self._turns())
                 for scope_id in research_tasks.ready(self.state)[:max(0, free)]:
                     try:
@@ -455,6 +462,14 @@ class Campaign:
                     self._compensate(work["id"])
                     if kind == "turn":
                         self.state.finish_turn(work["id"], str(error), cancelled=True)
+                        if work["kind"] == "coach":
+                            with self.state.db.read() as conn:
+                                episode = conn.execute("""SELECT e.proposal FROM stop_episodes e JOIN packets p
+                                    ON json_extract(p.content,'$.coaching.id')=e.id WHERE p.turn_id=?""",
+                                                       (work["id"],)).fetchone()
+                            if episode and json.loads(episode["proposal"]).get("review_kind") == "strategy":
+                                waiting.append({"work_id": work["id"], "reason": "Optional strategy review skipped: " + str(error)})
+                                continue
                         if work["kind"] == "final_analysis":
                             with self.state.db.read() as conn:
                                 view_id = conn.execute("SELECT view_id FROM generations WHERE id=?", (current["generation"],)).fetchone()[0]
@@ -551,7 +566,8 @@ class Campaign:
                             AND generation=? LIMIT 1""", (current["generation"],)).fetchone()
                     if current["blockers"] or (not live and not self._turns() and not settling and (current["operator_mode"] != "running"
                                      or current["generation_state"] == "closed"
-                                     or (not queued and (no_agent or (not tasks and not self.state.reasoning_due() and not maintenance))))):
+                                     or (not queued and (no_agent or (current["generation_state"] == "open"
+                                         and not tasks and not self.state.reasoning_due() and not maintenance))))):
                         return result
                     time.sleep(poll_seconds)
             except KeyboardInterrupt:

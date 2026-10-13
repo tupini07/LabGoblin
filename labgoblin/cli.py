@@ -10,7 +10,9 @@ import sys
 from labgoblin import __version__, briefing, journal, reporting, results, workspace
 from labgoblin.campaign import Campaign
 from labgoblin.config import initial_config, load_config, parse_config
-from labgoblin.evidence import Capture, atomic_bytes, contained, observation, publish_bytes, read_bytes, read_json, tail
+from labgoblin.evidence import (
+    Capture, atomic_bytes, contained, export_observation, observation_page, publish_bytes, read_bytes, read_json, tail,
+)
 from labgoblin.evidence import retention_candidates, storage_inventory, watermarks
 from labgoblin.protocol import identifier
 from labgoblin.paths import environment_value, present, project_paths
@@ -182,6 +184,8 @@ def parser():
     doctor_parser.add_argument("--provider", action="store_true", help="Also inspect selected provider's help, never a model canary")
     validate = command("validate", "Validate configuration and optionally an experiment manifest, without copying or launch")
     validate.add_argument("--spec", type=Path)
+    schema = command("schema", "Show exact request fields and examples without configuration, state or inference")
+    schema.add_argument("kind", choices=("work", "research-update", "handoff"))
     build = command("build", "Explicitly build a local Docker image using admitted resources and retained context")
     build.add_argument("--runner", required=True)
     build.add_argument("--context", type=Path, required=True)
@@ -201,7 +205,7 @@ def parser():
     dashboard.add_argument("--open-browser", action="store_true")
     reset = command("reset", "Archive the exact supported quiescent campaign; never erase a ledger")
     reset.add_argument("--confirm", required=True, help="Exact campaign ID")
-    submit = command("submit", "Enqueue one argv-form experiment manifest")
+    submit = command("submit", "Enqueue one argv-form experiment manifest; see labgoblin schema work --json")
     submit.add_argument("--spec", type=Path, required=True)
     batch = command("batch-submit", "Enqueue all manifests, preserving per-item failures")
     batch.add_argument("--file", type=Path, required=True)
@@ -225,11 +229,12 @@ def parser():
         logs.add_argument("--stream", choices=("stdout", "stderr"), default="stderr" if name == "errors" else "stdout")
         logs.add_argument("--bytes", type=int, default=64 * 1024)
         logs.add_argument("--stage", choices=("main", "supervisor"), default="main")
-    evidence = command("evidence", "Retrieve one exact observation or a bounded event byte page")
+    evidence = command("evidence", "Retrieve exact evidence byte pages or stream a complete artifact to a file")
     evidence.add_argument("kind", choices=("observation", "event"))
     evidence.add_argument("--id", required=True)
     evidence.add_argument("--offset", type=int, default=0)
     evidence.add_argument("--bytes", type=int, default=64 * 1024)
+    evidence.add_argument("--export", type=Path, help="Stream the whole exact captured observation to a new file, never stdout")
     history = command("journal", "Page journal sources or retrieve a retained entry")
     history.add_argument("action", choices=("list", "entry", "search"))
     history.add_argument("--id")
@@ -276,7 +281,7 @@ def parser():
     hypothesis.add_argument("--label", default="")
     hypothesis.add_argument("--supersedes")
     research = command("research", "Explicit research publication, revision retrieval, search and flat tasks")
-    research.add_argument("action", choices=("list", "search", "read", "history", "publish", "export", "task", "status", "coach", "preflight", "memos", "request-memo"))
+    research.add_argument("action", choices=("list", "search", "read", "history", "publish", "export", "task", "status", "work", "coach", "preflight", "complete", "memos", "request-memo"))
     research.add_argument("--id")
     research.add_argument("--file", type=Path, help="JSON research draft, task request or owned handoff for preflight")
     research.add_argument("--query", default="")
@@ -304,10 +309,17 @@ def execute(args):
         return initialize(args)
     if args.command == "doctor":
         return doctor(root, args)
+    if args.command == "schema":
+        from labgoblin.research_memory import publication_schema
+        if args.kind == "handoff":
+            from labgoblin.protocol import handoff_schema
+            return handoff_schema()
+        return workspace.request_schema() if args.kind == "work" else publication_schema()
     paths = project_paths(root)
     if args.command == "validate":
         config = load_config(paths.config)
-        result = workspace.prepare_spec(config, read_json(args.spec, 65536), validate_only=True) if args.spec else {
+        state = State.open(paths.state) if args.spec and present(paths.state) else None
+        result = workspace.validate_spec(config, read_json(args.spec, 65536), state=state) if args.spec else {
             "valid": True, "revision": config.revision, "schema_version": 4, "inference": "never"}
         return {**result, "configuration_scope": "Disk candidate; not activated"}
     if args.command == "dashboard":
@@ -347,11 +359,12 @@ def execute(args):
                 raise ValueError("Only the operator requests a supervisor memo; researchers supply it with their result")
             from labgoblin.supervisor_memos import request
             return request(state, args.reason, request_id=args.id)
-        if args.action == "preflight":
+        if args.action in ("preflight", "complete"):
             if args.file is None:
-                raise ValueError("Handoff preflight requires --file")
-            return research_tools.preflight(state, read_json(args.file, 16384), turn_id=turn_id,
-                                            invocation_id=environment_value("INVOCATION_ID"))
+                raise ValueError(f"Handoff {args.action} requires --file")
+            operation = research_tools.preflight if args.action == "preflight" else research_tools.complete
+            return operation(state, read_json(args.file, 16384), turn_id=turn_id,
+                             invocation_id=environment_value("INVOCATION_ID"))
         if args.action == "publish":
             if args.file is None:
                 raise ValueError("Publication requires --file pointing to a JSON draft under research")
@@ -372,7 +385,7 @@ def execute(args):
         request = {"operation": "record" if args.action == "read" else args.action}
         if args.id:
             request["id"] = args.id
-        if args.action in ("list", "search", "history", "memos"):
+        if args.action in ("list", "search", "history", "memos", "work"):
             request.update(query=args.query, offset=args.offset, limit=args.limit)
             if args.cutoff is not None:
                 request["cutoff"] = args.cutoff
@@ -513,12 +526,14 @@ def execute(args):
             f"supervisor.{args.stream}.log" if args.stage == "supervisor" else Path("main") / f"{args.stream}.log"))
         return {"work_id": args.id, "stream": args.stream, **tail(path, limit=args.bytes)}
     if args.command == "evidence":
+        if args.export and (args.kind != "observation" or args.offset):
+            raise ValueError("Artifact export requires an observation ID and no byte offset")
         if args.kind == "event":
             value = briefing.event(state.db, args.id, offset=args.offset, limit=args.bytes)
+        elif args.export:
+            value = export_observation(state.db, args.id, args.export)
         else:
-            if args.offset:
-                raise ValueError("Captured observations are retrieved as one exact bounded object")
-            value = observation(state.db, args.id, limit=args.bytes)
+            value = observation_page(state.db, args.id, offset=args.offset, limit=args.bytes)
             body = value.pop("body")
             if body is not None:
                 import base64

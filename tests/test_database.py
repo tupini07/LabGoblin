@@ -76,3 +76,31 @@ def test_read_contention_is_explicit_without_running_a_write(database, monkeypat
         blocker.rollback()
     with db.connection(database) as conn:
         assert conn.execute("SELECT value FROM counter").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("stage", ["connect", "BEGIN IMMEDIATE", "transaction body", "commit", "rollback", "close"])
+def test_slow_stage_reports_location_without_sql_or_payload(database, monkeypatch, caplog, stage):
+    clock = iter((10.0, 11.5))
+    monkeypatch.setattr(db.time, "monotonic", lambda: next(clock))
+    with db._timed_stage(database, stage, True):
+        pass
+    assert len(caplog.records) == 1
+    message = caplog.records[0].message
+    assert str(database) in message
+    assert f"stage={stage}" in message
+    assert "elapsed=1.500s" in message and "write=True" in message
+    assert "test_slow_stage_reports_location_without_sql_or_payload" in message
+
+
+def test_stage_timing_keeps_original_failure_and_quiet_fast_path(database, monkeypatch, caplog):
+    clock = iter((10.0, 10.5, 11.0, 13.0))
+    monkeypatch.setattr(db.time, "monotonic", lambda: next(clock))
+    with db._timed_stage(database, "commit", True):
+        pass
+    assert not caplog.records
+    error = sqlite3.OperationalError("retained original error")
+    with pytest.raises(sqlite3.OperationalError) as failure:
+        with db._timed_stage(database, "transaction body", False):
+            raise error
+    assert failure.value is error
+    assert "stage=transaction body" in caplog.records[0].message

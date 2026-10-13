@@ -181,6 +181,48 @@ def test_existing_hypothesis_statement_is_frozen_on_admission(tmp_path):
     assert "hypothesis_description" not in spec["request"]
 
 
+def test_validation_and_submission_share_readonly_stored_hypothesis_lookup(tmp_path):
+    from tests.test_dashboard import dump
+    config, state, _ = setup(tmp_path)
+    statement = "The deterministic baseline emits score 42."
+    state.hypothesis("h1", statement)
+    manifest = request(hypothesis_id="h1")
+    before = dump(state)
+    assert workspace.validate_spec(config, manifest, state=state)["valid"]
+    assert dump(state) == before
+    assert not (state.root / "attempts").exists()
+    attempt = workspace.submit(state, config, manifest)
+    spec = json.loads(attempt["spec"])
+    assert spec["hypothesis_description"] == statement and spec["request"] == manifest
+    assert "hypothesis_description" not in manifest
+
+
+@pytest.mark.parametrize("description", ["Different claim.", None, 0])
+def test_conflicting_or_invalid_hypothesis_fails_before_source_copy(tmp_path, description):
+    config, state, _ = setup(tmp_path)
+    state.hypothesis("h1", "Original claim.")
+    manifest = request(hypothesis_id="h1", hypothesis_description=description)
+    for action in (lambda: workspace.validate_spec(config, manifest, state=state),
+                   lambda: workspace.submit(state, config, manifest)):
+        with pytest.raises(ValueError, match="different statement|hypothesis_description"):
+            action()
+    assert not (state.root / "attempts").exists()
+    assert not state.attempts()
+
+
+def test_schema_example_and_new_hypothesis_rules_match_validation(tmp_path):
+    config, state, _ = setup(tmp_path)
+    schema = workspace.request_schema()
+    assert set(schema["properties"]) == workspace.REQUEST_FIELDS
+    assert workspace.validate_spec(config, schema["examples"][0], state=state)["valid"]
+    with pytest.raises(ValueError, match="hypothesis_description"):
+        workspace.validate_spec(config, request(hypothesis_id="new"), state=state)
+    assert workspace.validate_spec(config, request(hypothesis_id="new", hypothesis_description="A real claim."),
+                                   state=state)["valid"]
+    with pytest.raises(ValueError, match="schema work --json"):
+        workspace.validate_spec(config, request(resources={"cpus": 1}), state=state)
+
+
 def test_recollection_creates_new_revision_and_old_download_is_unchanged(tmp_path):
     config, state, ledger = setup(tmp_path)
     envelope = finish(state, admit(config, state, ledger))

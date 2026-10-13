@@ -1,15 +1,21 @@
 """Bounded byte capture and durable publication, shared by research views."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import time
 
 from labgoblin.protocol import canonical, identifier, integer, number, text
 from labgoblin.processes import replace_file, unlink_file
+
+
+STREAM_BYTES = 64 * 1024
+OBSERVATION_READ_BYTES = 1024 * 1024
 
 
 class SizeLimitError(ValueError):
@@ -117,15 +123,18 @@ def publish_stream(path: Path, chunks, *, limit: int) -> dict:
 
 
 def copy_bounded(source: Path, target: Path, limit: int) -> dict:
-    integer(limit, "copy byte limit")
+    integer(limit, "copy byte limit", zero=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.{identifier()}.tmp")
     digest = hashlib.sha256()
     total = 0
     try:
         with source.open("rb") as src, temporary.open("xb") as dst:
+            before = os.fstat(src.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("Capture requires a regular file")
             while True:
-                block = src.read(min(64 * 1024, limit - total + 1))
+                block = src.read(min(STREAM_BYTES, limit - total + 1))
                 if not block:
                     break
                 total += len(block)
@@ -133,10 +142,14 @@ def copy_bounded(source: Path, target: Path, limit: int) -> dict:
                     raise SizeLimitError(f"Source copy exceeds remaining {limit}-byte snapshot allowance")
                 dst.write(block)
                 digest.update(block)
+            after = os.fstat(src.fileno())
+            if ((before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                    or total != before.st_size):
+                raise ValueError("Source changed during immutable capture")
             dst.flush()
             os.fsync(dst.fileno())
             if os.name != "nt":
-                import stat
                 os.chmod(temporary, stat.S_IMODE(os.fstat(src.fileno()).st_mode))
         os.link(temporary, target)
     finally:
@@ -237,31 +250,115 @@ def watermarks(storage) -> list[dict]:
     return result
 
 
-def require_space(storage):
+def require_space(storage, *, reserve_bytes=0, destination=None):
+    integer(reserve_bytes, "storage reservation bytes", zero=True)
     failures = [item for item in watermarks(storage) if not item["ready"]]
+    if reserve_bytes:
+        if destination is None:
+            raise ValueError("Storage reservation requires its destination volume")
+        destination = Path(destination)
+        device = destination.stat().st_dev
+        for item in watermarks(storage):
+            if Path(item["path"]).stat().st_dev == device and item["free_bytes"] - reserve_bytes < item["minimum_bytes"]:
+                failures.append(item)
+        free = shutil.disk_usage(destination).free
+        if free < reserve_bytes:
+            raise OSError(f"Storage capture requires {reserve_bytes} free bytes; destination has {free}")
     if failures:
         raise OSError("Storage admission blocked: " + "; ".join(
-            f"{item['name']} has {item['free_bytes']} bytes free; requires {item['minimum_bytes']}"
+            f"{item['name']} has {item['free_bytes']} bytes free; requires {item['minimum_bytes']} "
+            f"plus {reserve_bytes} bytes for capture"
             for item in failures))
 
 
-def observation(db, observation_id: str, *, limit: int = 1024 * 1024) -> dict:
+def observation_record(db, observation_id: str) -> dict:
     with db.read() as conn:
         row = conn.execute("SELECT * FROM observations WHERE id=?", (observation_id,)).fetchone()
     if row is None:
         raise ValueError("Unknown evidence revision")
-    metadata = json.loads(row["metadata"])
-    result = {**dict(row), "metadata": metadata}
-    if row["assurance"] != "captured":
+    return {**dict(row), "metadata": json.loads(row["metadata"])}
+
+
+def verified_blocks(stream, size, digest):
+    """Verify the complete object, including bytes outside a requested page."""
+    integer(size, "captured byte size", zero=True)
+    read, actual, pending = 0, hashlib.sha256(), None
+    before = os.fstat(stream.fileno())
+    if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+        raise ValueError("Retained evidence size changed or is not a regular file")
+    while block := stream.read(min(STREAM_BYTES, size - read + 1)):
+        read += len(block)
+        if read > size:
+            raise ValueError("Retained evidence size changed")
+        actual.update(block)
+        if pending is not None:
+            yield pending
+        pending = block
+    after = os.fstat(stream.fileno())
+    if (read != size or actual.hexdigest() != digest
+            or (before.st_mtime_ns, before.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns)):
+        raise ValueError("Retained evidence revision is unavailable or has been modified")
+    if pending is not None:
+        yield pending
+
+
+@contextmanager
+def observation_stream(db, record, *, preverify=False):
+    if record["assurance"] != "captured":
+        raise ValueError("Current mutable artifact only; no exact retained download")
+    path = contained(db.path.parent, record["metadata"]["capture_path"])
+    with path.open("rb") as stream:
+        if preverify:
+            for _ in verified_blocks(stream, record["size"], record["digest"]):
+                pass
+            stream.seek(0)
+        yield verified_blocks(stream, record["size"], record["digest"])
+
+
+def observation_page(db, observation_id: str, *, offset=0, limit=64 * 1024) -> dict:
+    integer(offset, "observation byte offset", zero=True)
+    integer(limit, "observation read bytes")
+    if limit > OBSERVATION_READ_BYTES:
+        raise ValueError("Observation byte pages cannot exceed 1 MiB; use an exact file export for larger artifacts")
+    result = observation_record(db, observation_id)
+    if offset > result["size"]:
+        raise ValueError("Observation byte offset exceeds the captured size")
+    if result["assurance"] != "captured":
         result["body"] = None
         result["download_status"] = "Current mutable artifact only; no exact retained download"
         return result
-    path = contained(db.path.parent, metadata["capture_path"])
-    capture = Capture.read(path, min(limit, max(1, row["size"])))
-    if capture.digest != row["digest"] or len(capture.body) != row["size"]:
-        raise ValueError("Retained evidence revision is unavailable or has been modified")
-    result.update(body=capture.body, download_status="Exact captured bytes")
+    parts, read = [], 0
+    with observation_stream(db, result) as blocks:
+        for block in blocks:
+            start, end = max(0, offset - read), min(len(block), offset + limit - read)
+            if end > start:
+                parts.append(block[start:end])
+            read += len(block)
+    body = b"".join(parts)
+    result.update(body=body, offset=offset, returned_bytes=len(body), has_more=offset + len(body) < result["size"],
+                  download_status="Exact captured byte page; complete object SHA-256 verified")
     return result
+
+
+def observation(db, observation_id: str, *, limit: int = OBSERVATION_READ_BYTES) -> dict:
+    integer(limit, "observation read bytes")
+    if limit > OBSERVATION_READ_BYTES:
+        raise ValueError("Whole-object observation reads cannot exceed 1 MiB; use byte pages or export")
+    record = observation_record(db, observation_id)
+    if record["assurance"] == "captured" and record["size"] > limit:
+        raise SizeLimitError("Captured observation exceeds the read limit; use byte pages or an exact file export")
+    return observation_page(db, observation_id, limit=limit)
+
+
+def export_observation(db, observation_id: str, target: Path) -> dict:
+    record = observation_record(db, observation_id)
+    target = Path(target).absolute()
+    if target.resolve().is_relative_to(db.path.parent.resolve()):
+        raise ValueError("An artifact export cannot write inside campaign state")
+    with observation_stream(db, record) as blocks:
+        exported = publish_stream(target, blocks, limit=max(1, record["size"]))
+    return {"observation_id": observation_id, **exported, "assurance": "captured",
+            "integrity": "Complete exact retained object; SHA-256 verified; existing files are never overwritten"}
 
 
 def _owned_size(path: Path, *, max_entries=10000):

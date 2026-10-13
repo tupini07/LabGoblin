@@ -114,7 +114,11 @@ def test_focus_is_a_preview_and_exact_rationale_remains_retrievable(state):
     assert accepted.rationale in projected["markdown"]
     assert projected["handoff"]["turn_id"] == current.turn_id
     assert rationale["preview"] is True
-    assert json.loads(rationale["text"]) == {"summary": accepted.summary, "next_step": accepted.next_step}
+    assert json.loads(rationale["text"]) == {"summary": accepted.summary, "rationale": accepted.rationale,
+                                            "next_step": accepted.next_step}
+    assert not rationale["field_coverage"]["rationale"]["truncated"]
+    focus = packet["content"]["research_workspace"]["focus"]["rationale"]
+    assert focus["applicability"] == "current" and focus["preview_included"]
     assert rationale["digest"] == projected["digest"]
     assert journal.page(state.db)["total"] == 1
 

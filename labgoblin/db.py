@@ -2,9 +2,12 @@
 
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
+import logging
+import os
 from pathlib import Path
 import sqlite3
 import time
+import traceback
 
 from labgoblin.config import LabGoblinConfig
 from labgoblin.paths import DATABASE_NAME, database_path
@@ -14,6 +17,7 @@ from labgoblin.protocol import ACTIVE, DATABASE_VERSION, canonical, identifier, 
 APPLICATION_ID = 0x58474533
 ACTIVE_STATUSES = ACTIVE
 BUSY_TIMEOUT_SECONDS = 30
+SLOW_DATABASE_SECONDS = 1
 
 SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -262,34 +266,56 @@ def connection(path: str | Path, *, write: bool = False, lease: bool = True):
 
 
 @contextmanager
+def _timed_stage(path, stage, write):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_DATABASE_SECONDS:
+            callers = " <- ".join(f"{frame.filename}:{frame.lineno}:{frame.name}"
+                                  for frame in traceback.extract_stack(limit=12)[:-1]
+                                  if frame.filename not in (__file__, contextmanager.__code__.co_filename))
+            logging.getLogger(__name__).warning(
+                "Slow SQLite operation [database=%s; stage=%s; write=%s; elapsed=%.3fs; "
+                "pid=%s; callers=%s]", path, stage, write, elapsed, os.getpid(), callers)
+
+
+@contextmanager
 def _connection(path, *, write):
     conn = None
     stage = "connect"
     try:
-        conn = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
-                               uri=True, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        with _timed_stage(path, stage, write):
+            conn = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
+                                   uri=True, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
         conn.row_factory = sqlite3.Row
         stage = "connection settings"
         conn.execute("PRAGMA foreign_keys=ON")
         if not write:
             conn.execute("PRAGMA query_only=ON")
         stage = "BEGIN IMMEDIATE" if write else "BEGIN"
-        conn.execute(stage)
+        with _timed_stage(path, stage, write):
+            conn.execute(stage)
         stage = "transaction body"
-        yield conn
+        with _timed_stage(path, stage, write):
+            yield conn
         stage = "commit"
-        conn.commit()
+        with _timed_stage(path, stage, write):
+            conn.commit()
     except BaseException as error:
         if isinstance(error, sqlite3.Error):
             name = getattr(error, "sqlite_errorname", "unknown")
             error.args = (f"{error} [database={path}; stage={stage}; sqlite={name}; "
                           f"busy_timeout={BUSY_TIMEOUT_SECONDS}s]", *error.args[1:])
         if conn is not None:
-            conn.rollback()
+            with _timed_stage(path, "rollback", write):
+                conn.rollback()
         raise
     finally:
         if conn is not None:
-            conn.close()
+            with _timed_stage(path, "close", write):
+                conn.close()
 
 
 class Database:

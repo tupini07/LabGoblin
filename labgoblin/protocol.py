@@ -313,6 +313,8 @@ class Handoff:
     task_artifacts: tuple[dict, ...] = ()
     research_refs: tuple[str, ...] = ()
     stop_basis: str = ""
+    goal_progress: dict | None = None
+    commitment: dict | None = None
 
     def __post_init__(self):
         for name in ("turn_id", "packet_id", "summary", "rationale", "next_step", "reason"):
@@ -345,6 +347,30 @@ class Handoff:
             raise ValueError("research_updates must be an array")
         for update in self.research_updates:
             table(update, "research update")
+        if self.goal_progress is not None:
+            progress = table(self.goal_progress, "goal_progress", {"coverage", "items"})
+            text(progress.get("coverage"), "goal_progress.coverage")
+            items = progress.get("items")
+            if not isinstance(items, list) or not 1 <= len(items) <= 8:
+                raise ValueError("goal_progress.items must contain one to eight deliverable assessments")
+            for item in items:
+                table(item, "goal progress item", {"deliverable", "status", "assessment", "references"})
+                text(item.get("deliverable"), "goal progress deliverable")
+                text(item.get("assessment"), "goal progress assessment")
+                if item.get("status") not in ("unresolved", "partial", "supported"):
+                    raise ValueError("Goal progress status must be unresolved, partial or supported")
+                strings(item.get("references", []), "goal progress references", empty=item["status"] == "unresolved")
+            if len(canonical(progress)) > 4096:
+                raise ValueError("goal_progress exceeds 4096 UTF-8 bytes; keep detail in referenced research records")
+        if self.commitment is not None:
+            value = table(self.commitment, "commitment",
+                          {"branch", "boundary", "goal_connection", "decision_value", "revisit_when"})
+            for name in ("branch", "goal_connection", "decision_value", "revisit_when"):
+                text(value.get(name), f"commitment.{name}")
+            if len(value["branch"]) > 128 or len(canonical(value)) > 2048:
+                raise ValueError("Commitment exceeds 128 branch characters or 2048 UTF-8 bytes")
+            if value.get("boundary") not in ("branch", "refinement", "milestone"):
+                raise ValueError("Commitment boundary must be branch, refinement or milestone")
         if self.assessment is not None:
             value = table(self.assessment, "closure assessment",
                           {"view_id", "inventory_digest", "assess_all", "exclusions", "limitations"})
@@ -378,3 +404,65 @@ class Handoff:
         value["evidence"] = tuple(EvidenceDisposition.parse(e) for e in evidence)
         value["maintenance"] = strings(value.get("maintenance", []), "maintenance", empty=True)
         return cls(**value)
+
+    def capture_digests(self):
+        """Accept predecessor captures only when the added optional fields are absent."""
+        variants = [asdict(self)]
+        for name, default in (("stop_basis", ""), ("goal_progress", None), ("commitment", None)):
+            if getattr(self, name) == default:
+                variants.extend({key: value for key, value in row.items() if key != name}
+                                for row in list(variants))
+        return {fingerprint(value) for value in variants}
+
+
+def handoff_schema(*, owned=False):
+    from labgoblin.research_memory import publication_schema
+    string = {"type": "string", "minLength": 1}
+    references = {"type": "array", "items": string}
+    properties = {
+        **{key: string for key in ("turn_id", "packet_id", "summary", "rationale", "next_step", "reason")},
+        "disposition": {"type": "string", "enum": ["continue", "wait", "blocked", "finalize"]},
+        "stopping_criterion": {"type": "string"},
+        "stop_basis": {"type": "string", "enum": ["", "goal_satisfied", "operator_needed", "discretionary"]},
+        "research_refs": references,
+        "research_updates": {"type": "array", "items": publication_schema()},
+        "reflection": {"type": "boolean"}, "coaching": {"type": "boolean"},
+        "maintenance": {"type": "array", "items": {"type": "string", "enum": ["report", "compact"]}},
+        "evidence": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["event_id", "disposition", "reason"],
+            "properties": {"event_id": string, "reason": string, "references": references,
+                           "wake_condition": {"type": "string"},
+                           "disposition": {"type": "string", "enum": ["assessed", "excluded", "deferred"]}}}},
+        "assessment": {"type": ["object", "null"], "additionalProperties": False,
+            "required": ["view_id", "inventory_digest", "assess_all", "limitations"],
+            "properties": {"view_id": string, "inventory_digest": string, "assess_all": {"const": True},
+                "limitations": string, "exclusions": {"type": "array", "items": {
+                    "type": "object", "additionalProperties": False, "required": ["attempt_id", "reason"],
+                    "properties": {"attempt_id": string, "reason": string}}}}},
+        "task_artifacts": {"type": "array", "maxItems": 20, "items": {
+            "type": "object", "additionalProperties": False, "required": ["path", "digest"],
+            "properties": {"path": string, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}},
+        "goal_progress": {"type": ["object", "null"], "additionalProperties": False,
+            "description": "Root-only revisable assessment of original deliverables, at most 4096 UTF-8 bytes. "
+                           "Omit when unchanged; accepted history carries it forward. Not certification or new authority.",
+            "required": ["coverage", "items"], "properties": {
+                "coverage": string, "items": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["deliverable", "status", "assessment", "references"],
+                    "properties": {"deliverable": string, "assessment": string, "references": references,
+                                   "status": {"type": "string", "enum": ["unresolved", "partial", "supported"]}}}}}},
+        "commitment": {"type": ["object", "null"], "additionalProperties": False,
+            "description": "Root-only decision relevance at a new branch, refinement batch or milestone; omit otherwise. "
+                           "Explain a decision changed by different outcomes or a concrete prerequisite enabled, not guessed credits.",
+            "required": ["branch", "boundary", "goal_connection", "decision_value", "revisit_when"],
+            "properties": {"branch": {"type": "string", "minLength": 1, "maxLength": 128},
+                           "boundary": {"type": "string", "enum": ["branch", "refinement", "milestone"]},
+                           "goal_connection": string, "decision_value": string, "revisit_when": string}},
+    }
+    required = ["summary", "rationale", "next_step", "disposition", "reason"]
+    if not owned:
+        required = ["turn_id", "packet_id", *required]
+    return {"type": "object", "additionalProperties": False, "properties": properties, "required": required,
+            "description": "One owned handoff, at most 16 KiB. Final acceptance checks ownership, exact references "
+                           "and sealed inventory. research_complete fills omitted turn_id/packet_id, validates, "
+                           "and writes only its owned result; it does not accept science or end the campaign."}

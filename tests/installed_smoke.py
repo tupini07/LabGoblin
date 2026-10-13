@@ -42,6 +42,9 @@ def run(root):
         return json.loads(result.stdout)
 
     command("init", "--non-interactive", "--agent", "copilot", "--ledger", str(ledger))
+    handoff = command("schema", "handoff")
+    assert {"goal_progress", "commitment"} <= handoff["properties"].keys()
+    assert {"turn_id", "packet_id"} <= set(handoff["required"])
     command("machine", "configure", "--ledger", str(ledger), "--cpus", "2", "--memory-mb", "4096", "--headroom-mb", "0")
     command("batch-submit", "--file", str(project / "batch.json"))
     command("run", "--no-agent")
