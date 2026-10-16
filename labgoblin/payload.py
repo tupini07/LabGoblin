@@ -1,6 +1,5 @@
-"""Owned payload execution; the guest entry point uses files, never SQLite."""
+"""Owned native process trees with finite deadlines and bounded output."""
 
-from dataclasses import asdict
 import os
 from pathlib import Path
 import signal
@@ -8,12 +7,9 @@ import subprocess
 import sys
 import time
 
-from labgoblin.evidence import Capture, atomic_json, parse_json, publish_bytes, read_json, verify_input_pins
-from labgoblin.processes import BoundedSpool
-from labgoblin.protocol import (
-    LaunchEnvelope, LaunchReceipt, PreExecutionError, UncertainExecution,
-    Resources, argv, canonical, fingerprint, integer, number,
-)
+from labgoblin.storage import atomic_json, read_json
+from labgoblin.processes import BoundedSpool, temporary_directory
+from labgoblin.protocol import PreExecutionError, UncertainExecution, argv, identifier, integer, number
 
 
 def identity(pid=None, proc_root=Path("/proc")):
@@ -42,29 +38,25 @@ def _members(group, proc_root=Path("/proc")):
 
 def inspect_linux(root, token, proc_root=Path("/proc")):
     boot_id = (proc_root / "sys/kernel/random/boot_id").read_text().strip()
-    for filename in ("payload-handle.json", "process-handle.json"):
-        path = Path(root) / filename
-        if not path.exists():
-            return "unknown"
-        handle = read_json(path, 16384)
-        if handle.get("token") != token:
-            raise ValueError("Payload process ownership mismatch")
-        if "boot_id" not in handle:
-            return "unknown"
-        if handle["boot_id"] != boot_id:
-            return "dead"
-        try:
-            fields = (proc_root / str(handle["pid"]) / "stat").read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
-            fields = None
-        if fields and fields[19] == handle["start_ticks"] and fields[0] != "Z":
-            return "alive"
-        if filename == "process-handle.json":
-            if fields and fields[19] != handle["start_ticks"]:
-                return "unknown"
-            if _members(handle["pid"], proc_root):
-                return "alive"
-    return "dead"
+    path = Path(root) / "process-handle.json"
+    if not path.exists():
+        return "unknown"
+    handle = read_json(path, 16384)
+    if handle.get("token") != token:
+        raise ValueError("Payload process ownership mismatch")
+    if "boot_id" not in handle:
+        return "unknown"
+    if handle["boot_id"] != boot_id:
+        return "dead"
+    try:
+        fields = (proc_root / str(handle["pid"]) / "stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        fields = None
+    if fields and fields[19] != handle["start_ticks"]:
+        return "unknown"
+    if fields and fields[0] != "Z":
+        return "alive"
+    return "alive" if _members(handle["pid"], proc_root) else "dead"
 
 
 def _signal_members(group, signum):
@@ -226,20 +218,15 @@ def process_environment(spec):
     env = {name: os.environ[name] for name in names if name in os.environ}
     if spec.get("provider"):
         env = os.environ.copy()
-        if spec["provider"] == "claude":
-            env.pop("ANTHROPIC_API_KEY", None)
+        for name in list(env):
+            if name.startswith("LABGOBLIN_"):
+                del env[name]
     env.update(spec.get("environment", {}))
     env.update({
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1",
         "OMP_NUM_THREADS": str(spec["cpus"]), "MKL_NUM_THREADS": str(spec["cpus"]),
         "CUDA_VISIBLE_DEVICES": ",".join(spec.get("gpus", [])),
     })
-    if "output" in spec:
-        env["LABGOBLIN_OUTPUT_DIR"] = spec["output"]
-    if "work_id" in spec:
-        env["LABGOBLIN_ATTEMPT_ID"] = spec["work_id"]
-    for name, value in spec.get("inputs", {}).items():
-        env[f"LABGOBLIN_INPUT_{name.upper()}"] = value["access_path"]
     return env
 
 
@@ -256,9 +243,6 @@ def run_process(spec):
     atomic_json(root / "payload-handle.json", {**identity(), "token": token})
     started = time.monotonic()
     deadline = started + spec["seconds"]
-    task_deadline = spec.get("envelope", {}).get("metadata", {}).get("task_deadline")
-    if task_deadline is not None:
-        deadline = min(deadline, started + number(task_deadline, "task deadline") - time.time())
     process = None
     streams = []
     code = None
@@ -267,7 +251,7 @@ def run_process(spec):
     status, reason = "not_started", "Payload was not started"
     stream_stats = {}
     previous_affinity = None
-    cooperative = spec.get("envelope", {}).get("metadata", {}).get("provider", {}).get("transport") == "sdk"
+    cooperative = bool(spec.get("provider"))
     cancel_started = None
     try:
         if cancel.exists():
@@ -278,7 +262,7 @@ def run_process(spec):
             if os.name != "nt":
                 if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
                     raise PreExecutionError("Owned Linux execution requires pidfd support")
-                if hasattr(os, "sched_setaffinity") and spec.get("runner_kind") != "docker":
+                if hasattr(os, "sched_setaffinity"):
                     previous_affinity = os.sched_getaffinity(0)
                     selected = spec.get("cpu_ids")
                     if selected is None:
@@ -319,7 +303,7 @@ def run_process(spec):
                 if cancel.exists():
                     if cancel_started is None:
                         cancel_started = time.monotonic()
-                    grace = spec["envelope"]["metadata"].get("shutdown_grace_seconds", 0) if cooperative else 0
+                    grace = spec.get("shutdown_grace_seconds", 0) if cooperative else 0
                     if time.monotonic() - cancel_started >= grace:
                         status, reason = "cancelled", "Cancellation requested; shutdown grace expired"
                         break
@@ -367,126 +351,40 @@ def run_process(spec):
             "peak_observed_memory_mb": peak_memory}
 
 
-def execute_spec(spec, *, publish_receipt=True):
-    envelope = LaunchEnvelope.parse(spec["envelope"])
-    if envelope.digest != spec["envelope_digest"] or spec["token"] != envelope.key.nonce:
-        raise ValueError("Payload envelope identity mismatch")
-    if (argv(spec["argv"]) != envelope.argv
-            or Resources.parse({key: spec[key] for key in ("cpus", "memory_mb", "gpus")}) != envelope.resources
-            or spec["seconds"] > envelope.timeout_seconds):
-        raise ValueError("Payload command, resources or deadline differ from the frozen authorization")
-    root = Path(spec["root"])
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / "payload-claim.json").open("xb") as stream:
-        stream.write(canonical({"key": asdict(envelope.key), "supervisor": identity()}))
-        stream.flush()
-        os.fsync(stream.fileno())
-    started = time.monotonic()
+def tree_state(root, token):
+    if os.name != "nt":
+        return inspect_linux(root, token)
+    import pywintypes
+    import win32job
     try:
-        input_checks = verify_input_pins(spec.get("inputs", {}))
-    except (OSError, ValueError) as error:
-        receipt = LaunchReceipt(envelope.key, envelope.digest, "not_started", True,
-                                time.monotonic() - started, executed=False,
-                                reason=f"Consumption-path input verification failed: {error}",
-                                metadata={"payload_spec_digest": fingerprint(spec), "payload_executed": False})
-        if publish_receipt:
-            publish_bytes(root / "backend-receipt.json", canonical(asdict(receipt)))
-        return receipt
-    outcomes = []
-    main = None
-    validation_errors = []
-    for stage, commands in (("input-validator", spec.get("input_validators", [])),
-                            ("main", [spec["argv"]]), ("validator", spec.get("validators", []))):
-        if outcomes and outcomes[-1]["status"] != "completed":
-            break
-        for index, command in enumerate(commands):
-            remaining = spec["seconds"] - (time.monotonic() - started)
-            if remaining <= 0:
-                outcomes.append({"status": "timed_out", "reason": "Operation deadline exceeded",
-                                 "returncode": None, "executed": False, "elapsed": 0})
-                if stage == "validator":
-                    validation_errors.append("No deadline remaining for output validation")
-                break
-            name = "main" if stage == "main" else f"{stage}-{index}"
-            child = {**spec, "argv": command, "seconds": remaining,
-                     "root": str(root / name), "job_name": f"labgoblin-{envelope.key.nonce}-{name}"}
-            outcome = run_process(child)
-            outcomes.append({"stage": name, **outcome})
-            if stage == "main":
-                main = outcome
-            if outcome["status"] != "completed":
-                if stage == "validator":
-                    validation_errors.append(f"{name}: {outcome['reason']}")
-                break
-    last = outcomes[-1]
-    status = last["status"]
-    reason = last["reason"]
-    code = last["returncode"]
-    executed = any(outcome["executed"] for outcome in outcomes)
-    if status == "not_started" and executed:
-        status = "failed"
-    if main and main["status"] == "completed" and validation_errors and status not in ("cancelled", "timed_out"):
-        status, reason, code = main["status"], main["reason"], main["returncode"]
-    if main is None:
-        reason = f"Input validation did not admit the payload: {reason}"
-    receipt = LaunchReceipt(
-        envelope.key, envelope.digest, status, True, time.monotonic() - started,
-        returncode=code, reason=reason, executed=executed,
-        metadata={"stages": outcomes, "payload_spec_digest": fingerprint(spec),
-                  "payload_executed": bool(main and main["executed"]),
-                  "validation_errors": validation_errors,
-                  "validation_status": ("invalid" if validation_errors else
-                                        "valid" if spec.get("validators") and main and status == "completed"
-                                        else "unchecked"),
-                  "cpu_ids": spec.get("cpu_ids"),
-                  "input_checks": input_checks,
-                  "cpu_enforcement": "native placement" if spec.get("cpu_ids") is not None
-                  else "container CPU quota" if spec.get("runner_kind") == "docker"
-                  else "guest-local affinity; not host CPU placement"},
-    )
-    if publish_receipt:
-        publish_bytes(root / "backend-receipt.json", canonical(asdict(receipt)))
-    return receipt
-
-
-def inspect_spec(spec):
-    envelope = LaunchEnvelope.parse(spec["envelope"])
-    if spec["envelope_digest"] != envelope.digest:
-        raise ValueError("Payload envelope identity mismatch")
-    root = Path(spec["root"])
-    receipt = root / "backend-receipt.json"
-    if receipt.exists():
-        value = LaunchReceipt.parse(read_json(receipt))
-        if value.key != envelope.key or value.envelope_digest != envelope.digest:
-            raise ValueError("Backend receipt identity mismatch")
-        return "dead"
-    if not (root / "payload-claim.json").exists():
-        return "unknown"
-    states = []
-    for directory in root.iterdir():
-        if directory.is_dir() and (directory.name == "main" or
-                                  directory.name.startswith(("input-validator-", "validator-"))):
-            states.append(inspect_linux(directory, spec["token"]))
-    return "dead" if states and all(state == "dead" for state in states) else "unknown"
-
-
-def main(manifest, inspect=False, *, expected_digest=None):
+        job = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, f"labgoblin-{token}")
+    except pywintypes.error as error:
+        if error.winerror == 2:
+            return "dead"
+        raise UncertainExecution(f"Cannot inspect owned Job Object: {error}") from error
     try:
-        capture = Capture.read(Path(manifest), 1024 * 1024)
-        spec = parse_json(capture.body)
-        if inspect:
-            print(inspect_spec(spec))
-            return 0
-        if expected_digest != capture.digest:
-            raise ValueError("Guest execution mapping differs from its owned launch arguments")
-        receipt = execute_spec(spec)
-        return 0 if receipt.status == "completed" else 1
-    except (OSError, ValueError, RuntimeError) as error:
-        print(f"Payload outcome is unavailable: {type(error).__name__}: {str(error)[:4000]}",
-              file=sys.stderr)
-        return 1
+        count = win32job.QueryInformationJobObject(job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]
+        return "dead" if count == 0 else "alive"
+    finally:
+        job.Close()
 
 
-if __name__ == "__main__":
-    digest = sys.argv[sys.argv.index("--digest") + 1] if "--digest" in sys.argv else None
-    raise SystemExit(main(sys.argv[-1], inspect="--inspect" in sys.argv[1:-1], expected_digest=digest))
+def probe(arguments, *, timeout=30, limit=65536, memory_mb=256):
+    """Explicit model-free local capability probes, not research execution."""
+    with temporary_directory(prefix="labgoblin-probe-") as name:
+        root = Path(name)
+        result = run_process({
+            "argv": arguments, "cwd": str(root), "root": str(root / "logs"),
+            "token": identifier(), "cpus": 1, "memory_mb": memory_mb, "seconds": timeout,
+            "log_bytes": limit, "cancel_path": str(root / "cancel"),
+        })
+        output = {}
+        for stream in ("stdout", "stderr"):
+            paths = [root / "logs" / f"{stream}.log.previous", root / "logs" / f"{stream}.log"]
+            output[stream] = b"".join(path.read_bytes() for path in paths if path.exists()).decode("utf-8", errors="replace")
+        if result["status"] != "completed":
+            raise RuntimeError(f"{arguments[0]}: {result['reason']}; "
+                               f"stderr: {output['stderr'][-4096:]}; stdout: {output['stdout'][-4096:]}")
+        if any(item["truncated"] for item in result["logs"].values()):
+            raise ValueError(f"Probe output exceeded {limit} bytes")
+        return output["stdout"].strip()

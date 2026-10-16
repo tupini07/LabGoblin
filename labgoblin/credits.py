@@ -1,4 +1,4 @@
-"""Copilot credit units and accounting from immutable owned launch receipts."""
+"""Cumulative credit accounting from owned receipts, never premium multipliers."""
 
 from decimal import Decimal, ROUND_CEILING
 import json
@@ -8,16 +8,22 @@ from labgoblin.protocol import BudgetExhausted, UncertainExecution, integer, num
 
 NANO = 1_000_000_000
 MIN_SESSION = 30 * NANO
+COACH_RESERVE = MIN_SESSION
+MAX_CONSULT_RESERVE = 300 * NANO
 
 
-def parse_limit(value, name):
-    if value is None or value == "unlimited":
+def consultation_reserve(allowance, *, enabled=False):
+    if not enabled:
+        return 0
+    return MAX_CONSULT_RESERVE if allowance is None else min(MAX_CONSULT_RESERVE, max(MIN_SESSION, allowance // 10))
+
+
+def parse_limit(value, name="max_ai_credits"):
+    if value == "unlimited":
         return None
     number(value, name)
-    if value < 30:
-        raise ValueError(f"{name} must be at least 30 AI credits, or 'unlimited'")
-    if Decimal(str(value)) * NANO != (Decimal(str(value)) * NANO).to_integral_value():
-        raise ValueError(f"{name} supports at most nine decimal places")
+    if value < 30 or Decimal(str(value)) * NANO != (Decimal(str(value)) * NANO).to_integral_value():
+        raise ValueError(f"{name} must be >=30 credits with at most nine decimal places, or 'unlimited'")
     return value
 
 
@@ -25,96 +31,70 @@ def nano_limit(value):
     return None if value is None else int(Decimal(str(value)) * NANO)
 
 
-def estimate_nano(value):
-    number(value, "estimated credits", zero=True)
-    scaled = Decimal(str(value)) * NANO
-    if scaled != scaled.to_integral_value():
-        raise ValueError("Estimated credits support at most nine decimal places")
-    return int(scaled)
+def argument(value):
+    return format(Decimal(value) / NANO, "f")
 
 
-def argument(nano):
-    return format(Decimal(nano) / NANO, "f")
+def usage_nano(value):
+    if not isinstance(value, dict) or "totalNanoAiu" not in value:
+        raise ValueError("Usage lacks totalNanoAiu; premium-request cost is not AI credits")
+    amount = number(value["totalNanoAiu"], "totalNanoAiu", zero=True)
+    return int(Decimal(str(amount)).to_integral_value(rounding=ROUND_CEILING))
 
 
-def usage_nano(usage):
-    if not isinstance(usage, dict) or "totalNanoAiu" not in usage:
-        raise ValueError("Copilot usage lacks totalNanoAiu; premium-request cost is not AI credits")
-    value = number(usage["totalNanoAiu"], "Copilot totalNanoAiu", zero=True)
-    return int(Decimal(str(value)).to_integral_value(rounding=ROUND_CEILING))
-
-
-def summarize(rows, limit, *, reconciliations=None, estimates=None):
-    used, reserved, unknown = 0, 0, []
-    partial_used, reconciled = 0, []
-    estimated_used, estimated, uncovered = 0, [], []
-    reconciliations = reconciliations or {}
-    estimates = estimates or {}
+def summarize(rows, limit, *, adjustments=None):
+    used, reserved, estimated, partial = 0, 0, 0, 0
+    unknown, covered, active = [], [], []
+    adjustments = adjustments or {}
     for row in rows:
-        if row["phase"] == "revoked":
-            continue
         envelope = json.loads(row["envelope"])
         if not row["receipt"]:
-            allowance = envelope["metadata"].get("credit_allowance_nano")
-            if type(allowance) is int and allowance >= MIN_SESSION:
-                reserved += allowance
-            else:
-                unknown.append(envelope["key"]["work_id"])
-                uncovered.append(envelope["key"]["work_id"])
+            active.append(envelope["id"])
+            if envelope["allowance_nano"] is not None:
+                reserved += integer(envelope["allowance_nano"], "reserved credits")
             continue
         receipt = json.loads(row["receipt"])
-        if receipt.get("executed") is False:
+        if not receipt["executed"]:
             continue
-        try:
-            used += usage_nano(receipt.get("usage"))
-        except ValueError:
-            replacement = reconciliations.get(envelope["key"]["nonce"])
-            if replacement is not None:
-                used += usage_nano(replacement)
-                reconciled.append(envelope["key"]["work_id"])
-            else:
-                partial = receipt.get("metadata", {}).get("partial_usage")
-                value = 0
-                if partial is not None:
-                    value = usage_nano(partial)
-                    used += value
-                    partial_used += value
-                unknown.append(envelope["key"]["work_id"])
-                estimate = estimates.get(envelope["key"]["nonce"])
-                if estimate is None:
-                    uncovered.append(envelope["key"]["work_id"])
-                else:
-                    amount = integer(estimate["estimatedNanoAiu"], "estimated nano-credits", zero=True)
-                    if amount < value:
-                        raise ValueError("Credit estimate is below retained partial usage")
-                    estimated_used += amount - value
-                    estimated.append(envelope["key"]["work_id"])
-    configured = nano_limit(limit)
-    accounted = used + estimated_used
-    remaining = None if configured is None or uncovered else max(0, configured - accounted - reserved)
-    return {
-        "configured": limit, "unlimited": limit is None,
-        "used": used / NANO, "reserved": reserved / NANO,
-        "remaining": None if remaining is None else remaining / NANO,
-        "used_nano": used, "reserved_nano": reserved, "remaining_nano": remaining,
-        "unknown": len(unknown), "unknown_ids": unknown[:20],
-        "uncovered_unknown": len(uncovered), "uncovered_unknown_ids": uncovered[:20],
-        "soft_cap": True, "minimum_session_credits": 30,
-        "partial_used": partial_used / NANO,
-        "reconciled": len(reconciled), "reconciled_ids": reconciled[:20],
-        "estimated": len(estimated), "estimated_ids": estimated[:20],
-        "estimated_used": estimated_used / NANO, "estimated_nano": estimated_used,
-        "accounted_used": accounted / NANO, "accounted_nano": accounted,
-        "remaining_is_estimated": bool(estimated),
-    }
+        if receipt["usage"] is not None:
+            used += usage_nano(receipt["usage"])
+            continue
+        adjustment = adjustments.get(envelope["id"])
+        lower = usage_nano(receipt["metadata"]["partial_usage"]) if receipt["metadata"].get("partial_usage") else 0
+        if adjustment and not adjustment["estimated"]:
+            amount = usage_nano(adjustment["usage"])
+            if amount < lower:
+                raise ValueError("Reconciled usage is below the retained partial lower bound")
+            used += amount
+        else:
+            unknown.append(envelope["id"])
+            partial += lower
+            used += lower
+            if adjustment:
+                amount = usage_nano(adjustment["usage"])
+                if amount < lower:
+                    raise ValueError("Approved estimate is below the retained partial lower bound")
+                estimated += amount - lower
+                covered.append(envelope["id"])
+    uncovered = [item for item in unknown if item not in covered]
+    cap = nano_limit(limit)
+    remaining = None if cap is None or uncovered else max(0, cap - used - estimated - reserved)
+    return {"configured": limit if limit is not None else "unlimited", "soft_cap": True,
+            "used_nano": used, "used": used / NANO, "partial_nano": partial,
+            "estimated_nano": estimated, "estimated": estimated / NANO,
+            "accounted_nano": used + estimated, "reserved_nano": reserved,
+            "remaining_nano": remaining, "remaining": None if remaining is None else remaining / NANO,
+            "unknown": unknown, "uncovered_unknown": uncovered, "active": active,
+            "remaining_is_estimated": bool(covered)}
 
 
-def available(summary, *, reserve=0):
-    if summary["unlimited"]:
-        return None
+def available(summary, *, coach=False, consultant=False):
     if summary["uncovered_unknown"]:
-        raise UncertainExecution("AI credit usage is unknown for an owned invocation; further inference is blocked")
-    remaining = summary["remaining_nano"] - reserve
-    if remaining < MIN_SESSION:
-        raise BudgetExhausted("ai_credits", "AI credit allowance cannot fund another 30-credit session after reservations")
-    return remaining
+        raise UncertainExecution("Final credit usage is unknown; record audited usage or an explicit operator estimate before running")
+    if summary["active"]:
+        raise UncertainExecution("A previous owned execution is unsettled; reconcile it before another admission")
+    allowance = summary["remaining_nano"]
+    required = MIN_SESSION + (COACH_RESERVE if coach else 0) + consultation_reserve(allowance, enabled=consultant)
+    if allowance is not None and allowance < required:
+        raise BudgetExhausted("Remaining allowance cannot fund a researcher and the configured reviews/consultations")
+    return allowance

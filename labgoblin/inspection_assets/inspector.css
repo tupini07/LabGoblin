@@ -1,0 +1,23 @@
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+body { margin: 0 auto; padding: 1.5rem; max-width: 1400px; }
+h1 { margin-bottom: .2rem; font-size: 1.7rem; }
+h1 span, .muted { color: light-dark(#536174, #acb9cc); font-size: .9rem; }
+main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 2rem; }
+section { min-width: 0; }
+label { display: block; margin-top: .8rem; font-weight: 600; }
+input, textarea, select { box-sizing: border-box; width: 100%; padding: .65rem; font: inherit; }
+button { padding: .5rem .8rem; margin: .4rem .3rem .4rem 0; font: inherit; cursor: pointer; }
+button:disabled { cursor: wait; opacity: .6; }
+article { border: 1px solid light-dark(#cad1dc, #465063); border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+article h3 { margin: 0 0 .5rem; font-size: 1rem; }
+pre, .answer, #status, #project, #source-facts, #error { white-space: pre-wrap; overflow-wrap: anywhere; }
+pre { font: .85rem/1.55 ui-monospace, monospace; max-height: 65vh; overflow: auto; }
+.answer { margin: .5rem 0; }
+img { display: block; max-width: 100%; height: auto; border: 1px solid #677; }
+figure { margin: .6rem 0; }
+figcaption { font-size: .85rem; overflow-wrap: anywhere; }
+#error { color: light-dark(#a31515, #ff9999); }
+.references { display: flex; flex-wrap: wrap; }
+.references button { font-size: .85rem; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+#evidence button, article h3 { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+@media (max-width: 850px) { main { grid-template-columns: 1fr; } body { padding: 1rem; } }

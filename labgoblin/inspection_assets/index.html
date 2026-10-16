@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LabGoblin Inspector</title>
+  <link rel="stylesheet" href="/inspector.css">
+  <script src="/inspector.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Research inspector <span>Read-only</span></h1>
+    <p id="project"></p>
+    <div id="status" aria-live="polite">Loading observed facts...</div>
+    <button id="refresh">Refresh facts</button>
+    <p class="muted">Execution completion is not scientific validation. Inspection never steers or restarts research.</p>
+  </header>
+  <p id="error" role="alert"></p>
+  <main>
+    <section aria-labelledby="chat-heading">
+      <h2 id="chat-heading">Ask about the research</h2>
+      <p id="chat-policy"></p>
+      <div id="messages" aria-live="polite"></div>
+      <button id="more-history" hidden>Load more retained conversation</button>
+      <form id="question-form">
+        <label for="question">Question</label>
+        <textarea id="question" rows="3" maxlength="4096" placeholder="Why did it stop? What changed? Show the decisive comparison."></textarea>
+        <button id="ask" type="submit">Ask inspector</button>
+        <button id="cancel" type="button" hidden>Cancel this answer</button>
+      </form>
+    </section>
+    <section aria-labelledby="evidence-heading">
+      <h2 id="evidence-heading">Evidence</h2>
+      <label for="scope">Source</label>
+      <select id="scope"><option value="latest">Latest: captured snapshot when available</option><option value="workspace">Working files (mutable)</option></select>
+      <button id="execution">Execution and stopping details</button>
+      <label for="role">Session role (researcher, coach-0, consult-0, ...)</label>
+      <input id="role" value="researcher">
+      <button id="session">Read session excerpts</button>
+      <label for="path">Relative path</label>
+      <input id="path" value="report.md">
+      <div class="actions">
+        <button id="read">Read file</button>
+        <button id="image">View image</button>
+        <button id="list">List directory</button>
+      </div>
+      <label for="search">Literal text search</label>
+      <input id="search" placeholder="Search selected directory; use . for the project">
+      <button id="find">Search</button>
+      <p id="source-facts" class="muted"></p>
+      <div id="evidence"></div>
+      <button id="next" hidden>Next evidence page</button>
+    </section>
+  </main>
+</body>
+</html>

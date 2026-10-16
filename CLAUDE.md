@@ -1,149 +1,92 @@
 # Contributor guidance
 
-Shared guidance for Claude Code and GitHub Copilot CLI. If a project has a
-higher-precedence Copilot instructions file, update its owned section explicitly;
-do not assume `CLAUDE.md` wins or overwrite unrelated instructions.
+Shared guidance for Claude Code and GitHub Copilot CLI. Update a higher-precedence
+project Copilot instruction file explicitly if one exists; preserve unrelated
+instructions.
 
 ## Product and development
 
-LabGoblin is a local autonomous research harness, not a general workflow engine.
-Python 3.11+, native Windows, prepared WSL2 and local Linux Docker are supported.
-Configuration/campaign schemas are version 4; machine ledger and worker protocol
-remain version 3. They are separately checked; there is no schema migration.
-`paths.py` resolves only LabGoblin names; there are no old-name aliases or
-old-name frozen-helper readers. The same-protocol pre-memo helper manifest stays
-valid without replacement, as documented in the runtime contract. Never rewrite
-admitted envelopes or receipts.
-Do not reintroduce cluster commands, implicit image pulls or environment installs.
+LabGoblin is a small local research harness, not a workflow engine. Python 3.11+,
+native Windows/Linux and an installed authenticated Copilot CLI are supported.
+The core transport is the pinned Copilot SDK. Do not restore legacy research
+schemas, managed Claude/WSL/Docker backends, dashboards or orchestration under a
+second mode. Keep original attribution and historical reports unchanged.
 
 ```powershell
 python -m pip install -e .
 python -m pytest tests -q
 ```
 
-Use the selected environment's executable when `python` is not on PATH.
-Runtime dependencies are declared in `setup.py`. The pinned Copilot SDK is core;
-`docker-build` is the optional pinned adapter. Do not add tools or modify shared
-environments merely to make a test pass. Real provider calls always need explicit
-authorization and a persisted invocation allowance outside the test campaign.
+Use the selected environment's executable when `python` is unavailable. Declare
+runtime dependencies in `setup.py`; do not install tools or alter shared
+environments to make tests pass. Real provider calls require explicit approval
+and a persisted allowance outside the evaluated research project.
 
-## Ownership of state and modules
+## Core invariants
 
-| Module | Authority |
-|---|---|
-| `config.py`, `protocol.py` | Strict typed configuration, versioned records, finite/unlimited limits. |
-| `initialization.py`, `setup_assistant.py`, `setup_runtime.py` | Reviewed publication, foreground scoped conversation and owned stdio runtime. |
-| `db.py`, `state.py` | Campaign transactions, exact IDs, control revisions, generations and accepted research. |
-| `scheduler.py` | Shared one-time grants, fairness, native placement and separate consumer receipts. |
-| `campaign.py` | Recovery-first progression; no direct unguarded lifecycle writes. |
-| `processes.py`, `worker.py`, `payload.py`, `backends.py` | Owned trees, frozen helpers, exact envelopes/receipts and bounded streams. |
-| `agent.py`, `agent_policy.py`, `agent_worker.py` | Uniform admitted Claude/Copilot invocations and fixed maintenance. |
-| `workspace.py`, `evidence.py` | Bounded source copies, input assurance and immutable captured evidence. |
-| `briefing.py`, `journal.py` | Exact bounded packets, one owned delta, protected directives and retained history. |
-| `research_memory.py`, `research_tools.py` | Explicit draft publication, immutable revisions and common CLI/SDK boundaries. |
-| `research_tasks.py`, `coaching.py` | Flat scope ownership/integration and non-prescriptive pre-stop review. |
-| `supervisor_memos.py` | Optional owned human communication, coalesced requests and immutable history; not scientific authority. |
-| `results.py`, `reporting.py` | Read-only projections, complete source inventories and immutable reports. |
-| `cli.py`, `dashboard*.py`, `static` | Structured local commands and read-only dashboard/observer. |
-
-## Invariants for changes
-
-- Never hold a campaign writer transaction while entering the ledger or probing
-  a backend, nor a ledger writer while querying a campaign.
-- Grants and armed launch incarnations are one-time. Unknown ownership is not
-  death, unused budget, permission to retry, or permission to release.
-- Workers consume frozen envelopes/helpers, not current TOML. Guest payloads
-  write qualified receipts, never host SQLite.
-- Each acquired controller activates one configuration snapshot, after recovery.
-  Submission/build preparation uses that snapshot and an ownership/config fence;
-  all TOML edits require restart. Do not reset accounting or rewrite queued evidence.
-  Cold native relocation requires a preserved whole-project directory alias.
-  Normalize only configuration location and local storage paths in memory;
-  historical snapshots, envelopes, receipts and external paths stay unchanged.
-- Terminal init uses the core SDK but no research/observer ledger grant. It has
-  no setup usage cap, saved draft, arbitrary command or model-side Apply capability.
-  Explicit noninteractive/JSON init never starts the SDK. Keep per-file consent,
-  fixed approved probes, exact previews and incomplete-publication guards.
-- Windows launches use `processes.background_options()` and assigned Job Objects
-  before payload resume. Keep independent breakaway and windowless descendants;
+- One persistent ordinary researcher owns scientific choices and working files.
+  A coach can inspect evidence and ask a concrete stopping question; it cannot
+  prescribe a workflow or edit research. Only an explicitly enabled host-owned
+  consultation tool may start a read-only adviser, never arbitrary agents.
+- Stopping guidance targets the original goal or supported exhaustion of credible
+  feasible avenues, not merely a defensible negative report. Keep alternatives
+  in ordinary notes; no method quotas or scientific-completion state machine.
+- Stopping reviews may continue in the same researcher session. Ten consecutive
+  follow-up reviews without evidence-grounded meaningful progress checkpoint by
+  default; progress resets only that counter. Clear repetition can checkpoint
+  earlier after two no-progress follow-ups. Do not infer progress from file churn.
+  Initial acceptance is provisional and supplies one neutral closing challenge;
+  never repeat it after a follow-up or reset. `needs_operator` requires a concrete
+  permission/input/scope question, not an operational limit or scientific uncertainty.
+  `checkpointed` is unfinished work, not scientific exhaustion. Cancellation,
+  deadlines, spending and genuine operator dependencies retain precedence.
+  No separate reflection, compaction, report or final-analysis calls.
+  Normal completion is not independent scientific validation.
+- One controller freezes configuration, goal, instructions and helpers per
+  execution, after recovery. TOML changes require a new execution. Explicit
+  resumes preserve all prior spending and retained evidence.
+- Resource grants and supervisor claims are one-use. Observe/probe outside ledger
+  writer transactions. Unknown ownership is not death, unused budget, permission
+  to release, or permission to retry. Never impersonate an observer/build.
+- The shared ledger and its exchange envelope stay v3-readable for existing
+  installed consumers. Private execution format 4 is verified inside that
+  envelope. Configuration/project format 5 has no campaign database or migration.
+  Never rewrite old admitted envelopes, receipts or frozen installations.
+- Windows launches use `background_options()` and Job Objects assigned before
+  payload resume. Preserve independent breakaway and windowless descendants;
   `DETACHED_PROCESS` is not an equivalent substitute.
-- Status/dashboard reads never initialize, migrate, reconcile, acknowledge or
-  mutate research. Archival reset requires quiescence and exclusive reader access.
-- Only campaign admission time and managed invocations accept `0` as unlimited.
-  GPU hours use explicit `"unlimited"`; numeric zero still permits no GPU time.
-  Unlimited GPU hours do not bypass device grants or finite job deadlines.
-  Task lifetime accepts positive seconds or explicit `"unlimited"` (stored as
-  null); finite task deadlines remain pinned in provider/experiment envelopes.
-  Unlimited task lifetime never removes operation deadlines or invocation limits.
-  Ordinary work cannot consume a finite generation's final-analysis reserve.
-- Copilot credits use `"unlimited"` or a >=30 soft cap. Aggregate owned receipt
-  `totalNanoAiu`, never premium multipliers. Unknown spend blocks capped inference
-  unless an operator explicitly approves an audited estimate. Estimates count
-  against the cap but stay separate from reported usage and scientific revisions;
-  preserve credit usage across restarts and final-analysis/canary reservations.
-  Observer credits are a separate campaign-scoped machine-ledger allowance.
-- Copilot research defaults to the owned SDK transport and a 1800-second hard
-  deadline. Activity distinguishes pending responses/tools from idle sessions;
-  the shutdown grace is inside that deadline. Partial usage never proves final
-  spend. Credit reconciliation appends attributed evidence, never rewrites receipts.
-- Accepted handoff, exact evidence dispositions, next action and journal entry
-  commit together. Human text or unrelated file changes cannot satisfy a turn.
-- Fresh focus comes from accepted, generation/authority-qualified handoffs, not
-  the newest publication. Workers use their own charter-qualified checkpoint.
-  Preserve exact selected revisions and label historical/discovery context;
-  operator authority, sealed inventory and pending evidence precede optional
-  previews. Operational completion is not scientific assessment or root adoption.
-- Carry root goal-gap assessments only from accepted, authority-qualified
-  handoffs; omission means unchanged. Commitment boundaries explain decision
-  relevance or concrete prerequisites, not invented task-credit forecasts.
-  Strategic advice is nonbinding, evidence-coalesced and separate from stopping
-  authority. Unavailable advice cannot block otherwise admissible research.
-- Typed completion validates and writes only its owned result, without accepting
-  science; keep final receipt checks and optional memo independence. Explicit SDK
-  session-limit exhaustion without acceptable completion cannot buy a smaller
-  retry. Retain an operational checkpoint and require operator resume.
-- Divide credits among actual ready/prepared commitments, not idle configured
-  slots. Observed accepted completion costs inform an explicitly uncertain
-  finishing reserve, never billing estimates or lower scientific standards.
-- Root supervisor memos use a separately captured optional sidecar, never change
-  handoff digests or reject valid science for a memo error. Report issues visibly.
-  Cover only delivered/retrieved requests at the packet cutoff and own-turn
-  milestones. Memo publication/requests cannot advance scientific progress,
-  renew coaching, schedule paid reporting, approve exceptions or wake research.
-- Published research revisions, captured observations and report sources are
-  immutable. Revise a hypothesis by advancing its head; attempts keep exact
-  pinned revisions. Retiring a record never deletes evidence. General knowledge
-  need not be attached to a hypothesis.
-- Serialize root decisions and allow one active turn per scope. Worker events
-  cannot acknowledge root events; worker summaries cannot overwrite root strategy.
-  Native agents remain trusted, not filesystem-isolated by these service checks.
-- Coaching is campaign-owned, read-only and non-prescriptive. Intercept a stop
-  before sealing; missing/stale/failed review is not acceptance. Bounded pushback
-  leads to researcher reflection or an explicit operator decision, not endless debate.
-  `coach_decide` preflights shared verdict rules before recording, without state
-  writes. Mentioned citations are not delivered evidence. Final acceptance still
-  requires the exact completed receipt and a current review snapshot.
-  Only evidence-linked goal satisfaction can be coach-approved. Discretionary
-  partial closure requires an operator even when coaching is disabled.
-  Reworded strategy alone cannot renew the two-review allowance.
-- Every role shares campaign credits, invocation limits and machine resources.
-  Use one campaign credit setting and derive call reservations transactionally;
-  there are no new per-task/coach/call credit settings. Native provider spawning
-  is not an alternative to managed delegation. Recursive spawning is rejected.
-- Summaries are derived hints. Never delete retained sources, active operator
-  authority or governing rationale during compaction. Archive growth alone does
-  not authorize paid compaction; bounded fresh packets already limit context.
-- Closure seals its denominator. At most one additional analysis, no automatic
-  new experiments/retry cycle, and no equation of process success with research.
-  Preflight shares acceptance validation but rolls back all state/artifact writes.
-  SDK final analysis may correct structure once in its original session; preserve
-  drafts/errors and forbid altered conclusions, allowance renewal or inventory changes.
-- Observer sessions are fresh empty-mode SDK sessions, with curated read-only
-  tools, separate allowance and owned machine admission. No steering, arbitrary
-  commands/files, research-session attachment, or research-state writes.
-- Bounded reads/spools and explicit truncation are shared conventions. Stream
-  pressure must not disable cancellation or finite deadlines.
+- Linux process sessions require pidfd-safe shutdown; monitored RSS is not a hard
+  kernel memory quota. Native execution is trusted, not a hostile-code sandbox.
+- All executions have finite deadlines, with shutdown grace inside them. Bounded
+  spools must keep draining and retain explicit truncation/error information.
+- Aggregate integer `totalNanoAiu`, not premium multipliers. All roles share one
+  cumulative research project pool. Independent inspection has a separately
+  authorized cumulative pool; never borrow research allowance for chat.
+  Idle-session limit updates reassign only observed
+  remaining allowance; they never renew an exhausted session or reset usage.
+- Optional consultations reserve headroom before caller limits are assigned.
+  Keep adviser spending, exact caller/session identities and evidence in the
+  existing run receipt. Unknown usage blocks inference; no overlapping limits,
+  recursive advisers, parallel research branches or second canonical plan.
+  Targeted claim reviews reuse this capability and pool, not another runtime role.
+  A coach must await an active consultation before deciding. Review arguments,
+  not reviewer agreement; preserve scope/coverage and return objections to the
+  same researcher. No compulsory review on every stop or proof-certification claim.
+- Partial usage cannot prove final spending. Unknown usage blocks new admission.
+  Operator estimates are explicit, receipt-bound, additive records separate from
+  reported usage; later final evidence never rewrites historical receipts.
+- Keep normal research files editable and captured execution snapshots immutable.
+  Stream large artifacts, enforce bounds, and explicitly list excluded sources.
+  Do not silently treat truncation, incomplete retention or process success as
+  scientific completion.
+- Status and machine reads never initialize, reconcile or mutate research.
+  The on-demand inspector uses fresh empty-mode sessions, only curated evidence
+  tools and genuine `inspection-run` grants. Keep its history outside research,
+  require explicit finite approval, and never add steering or background inference.
+  Citation captures bind terminal receipts; live/truncated coverage stays explicit.
+  Do not add automatic image pulls, environment installs, remote execution or
+  unrestricted nested provider calls to the research loop. Advisers have only
+  curated evidence reads and verified public retrieval; adding a custom tool
+  must not change the ordinary researcher's coding permissions.
 
-See `docs/runtime-protocol.md` for the detailed contract and
-`docs/local-research.md` for supported user operations. Preserve attribution and
-the original historical reports; do not treat their generators as runtime tools.
+See `docs/runtime-protocol.md` and `docs/local-research.md` for the exact boundaries.

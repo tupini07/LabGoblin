@@ -1,295 +1,203 @@
 # LabGoblin
 
-**Local autonomous research with Claude Code or GitHub Copilot CLI.**
+**An ordinary Copilot researcher, with a small execution harness and optional
+stopping review.**
 
-LabGoblin runs a long investigation as fresh, bounded research sessions and
-independently supervised experiments. It preserves why decisions were made,
-shares CPU/RAM/GPU admission across campaigns, recovers owned work after
-controller exit, and distinguishes successful execution from assessed research.
-Native Windows, an explicitly prepared WSL2 distro, and local Linux Docker are
-supported. No backend or provider is silently substituted.
+LabGoblin gives one persistent Copilot SDK session a research question, short
+instructions and a normal workspace. The researcher writes code, runs experiments,
+keeps notes and produces a report. There are no hypothesis-registration forms,
+research handoffs, publication transactions, separate reflection agents or
+mandatory final-analysis calls.
 
-**Derived from [Roger Creus Castanyer's xgenius](https://github.com/roger-creus/xgenius),
-not a drop-in replacement for the original SLURM harness.** This independently
-developed local-runtime edition lives at [tupini07/LabGoblin](https://github.com/tupini07/LabGoblin).
-Original authorship, MIT copyright and historical reports remain credited below.
+An optional read-only coach reviews the proposed stopping point. Useful feedback
+returns to the **same researcher conversation**. By default, ten consecutive
+follow-up reviews without meaningful progress end in an unfinished checkpoint;
+evidence-grounded progress resets that counter, not time or spending limits.
+Initial approval is provisional: the first follow-up supplies a neutral
+evidence-grounded challenge when the first coach would accept stopping.
+The challenge is never repeated within an execution. Later reviews can accept
+or request useful further work; coach-off runs remain one ordinary conversation.
+`needs_operator` requires a concrete missing permission, input or scope decision.
+Approaching the deadline or repeating an unproductive stopping discussion instead
+produces `checkpointed`, not scientific completion or a new human research question.
+The stopping standard is the original goal's evidence requirements or supported
+exhaustion of credible feasible avenues, not merely an honest bounded negative
+report. Unresolved controls and promising untried approaches deserve scrutiny;
+exhausted ideas are not proof of impossibility.
+The harness owns resources, cumulative spending, cancellation and retained
+execution evidence; it does not decide what constitutes scientific truth.
 
-**Fresh campaigns use configuration and campaign schema 4.** The shared machine
-ledger and frozen-worker protocol remain at version 3. Old campaign formats are
-rejected, not migrated; retain their compatible installation to inspect them.
-Cluster/SSH/SBATCH/Singularity operations are removed. Never replace an old
-machine ledger while its workers might still be running; establish quiescence
-with the old installation before setting up a fresh runtime.
+An optional `labgoblin_consult` tool lets the researcher or coach ask a fresh,
+read-only scientific adviser about related work, assumptions or alternative
+approaches. It returns a cited brief, not a new plan or experiment. The researcher
+still owns the notes and scientific choices; there is no continuous sidecar.
+With consultation enabled, the coach requests a targeted **claim review** when
+stopping depends on a consequential, insufficiently checked scientific claim.
+The adviser challenges assumptions and looks for counterexamples; objections
+return to the same researcher. This is not a compulsory reviewer at every stop,
+an independent experimental reproduction, or scientific certification.
 
-**LabGoblin has no xgenius compatibility aliases.** Use the `labgoblin` command,
-`labgoblin.toml` and `.labgoblin/labgoblin.db`. Old command/import names, environment
-variables and frozen helpers are not supported, even for schema-3 installations.
-Initialize a new campaign rather than renaming old research state. See
-[names and existing installations](docs/local-research.md#names-and-existing-installations)
-before replacing an old installation or changing the shared ledger location.
+An on-demand **read-only inspector** provides local browser chat, cited evidence,
+images and factual execution/spending status. It never attaches to or steers the
+researcher. Browsing is model-free; questions require an explicitly authorized,
+separate cumulative inspection allowance.
 
-## Start a local investigation
+Python 3.11+, native Windows and native Linux are supported. Copilot CLI must be
+installed and authenticated separately. Native execution is trusted, **not a
+hostile-code sandbox**.
 
-Use Python 3.11+ in a persistent environment. Install and authenticate the
-standalone `copilot` CLI or Claude Code separately. Install LabGoblin from this
-GitHub checkout; these instructions do not assume a published PyPI release.
-If you already have a checkout, use its existing path rather than cloning or
-renaming it.
+## Start
+
+Install from this checkout into a persistent environment; these instructions do
+not assume a published PyPI release:
 
 ```powershell
-git clone https://github.com/tupini07/LabGoblin.git
-Set-Location LabGoblin
 python -m pip install -e .
-Set-Location ..
-New-Item -ItemType Directory my-research
-Set-Location my-research
-labgoblin init --agent copilot
-```
-
-In an interactive terminal, `init` starts a **Copilot-assisted setup conversation**.
-The pinned Copilot SDK is installed with LabGoblin; the local CLI must already be
-installed and authenticated. Setup helps define the question, evidence, protocol,
-inputs and operational settings, then previews exact changes for your approval.
-It does not start research or configure machine capacity.
-
-Use `init --non-interactive` for deterministic starter files without SDK startup,
-authentication or inference. `--json` also selects this mode; redirected input
-without either flag is an error. The initial research provider remains Claude
-unless `--agent copilot` is supplied. `--setup-model MODEL` changes only the
-setup conversation, not the eventual research model.
-
-Setup shares your conversation and separately approved file text, never silently
-scans a repository or reads datasets. `/context PATH` selects context,
-`/review` previews configuration/documents and versioned protocol/constraints,
-and `/cancel` leaves the campaign untouched. No setup usage cap or resume feature
-is imposed; no experiments, builds or installs are available to the assistant.
-
-Review `labgoblin.toml`, then configure the shared machine envelope explicitly.
-This example permits two managed CPUs and 4 GiB of reserved RAM, plus 2 GiB of
-unallocated headroom; it is not a recommendation for every workstation:
-
-```powershell
+labgoblin init .\my-research --goal-file .\question.md --model auto --credits 1000
 labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
-labgoblin doctor --provider --json
-labgoblin run
+labgoblin run .\my-research
 ```
 
-The envelope includes research and maintenance reasoning, not just experiments.
-The generated agent allowance is a starter estimate, not a measured provider
-requirement. Existing incompatible ledgers block admission rather than hiding
-older reservations behind a new file.
+`init` is deterministic and never calls a model. Without `--goal-file`, edit the
+generated `research_goal.md` before running. Existing goal and instruction files
+are preserved. Review `labgoblin.toml` and `.github\copilot-instructions.md`;
+starting `run` authorizes the configured research execution and its credit pool.
+The machine example is a capacity choice, not a recommendation for every host.
 
-The [research workspace and coaching guide](docs/research-loop.md) describes
-revisable hypotheses, unlinked knowledge, explicit reflection and optional flat
-worker tasks. Coaching challenges premature stopping without choosing scientific
-methods. Coaching and delegation are opt-in, share campaign budgets, and do not
-enable recursive managers or change existing campaigns.
+The researcher runs alone by default. Add `--coach` during initialization, or set
+`coach = true` before a new run, to enable stopping review. The default execution
+deadline is 90 minutes, including shutdown and any stopping reviews. A controller
+restart does not reset spending or extend already-admitted work.
+`max_stalled_reviews = 10` controls the consecutive no-progress ceiling, not
+the total number of reviews; set it in TOML or with `init --max-stalled-reviews`.
 
-The starter campaign limits are **one hour and ten managed provider invocations**.
-For a long investigation, review them deliberately. `max_seconds = 0` and
-`max_invocations = 0` mean unlimited admission time and unlimited managed
-invocations respectively; no other zero means unlimited. Every operation still
-has a finite deadline, and an open generation reserves its final analysis.
-Managed invocations are not API-call, token, or spending caps.
+## Ordinary research, small controls
 
-`research.task_max_seconds = "unlimited"` removes the aggregate worker-task
-lifetime cap (normally 7200 seconds), so multi-hour jobs can run while the worker
-yields. Each job still has an explicit finite deadline; task invocation limits,
-shared campaign budgets, ownership and cancellation remain enforced.
-
-`campaign.max_gpu_hours = "unlimited"` removes the cumulative GPU-hour cap;
-numeric `0` still permits no GPU time. Explicit GPU devices, shared admission,
-usage accounting and finite job deadlines remain enforced.
-
-Research turns default to a **30-minute hard deadline**. Copilot research uses
-the local CLI through its SDK, recording response/tool activity and partial
-credit checkpoints. In-progress responses and tools are not mistaken for idle
-sessions; a bounded shutdown grace captures final usage before forced termination.
-Activity never extends the hard limit. Claude retains the CLI transport.
-
-For Copilot, set `campaign.max_ai_credits = 1000` to bound cumulative research
-across researcher, workers, coaching, reflection and maintenance. This is the
-only research credit setting; per-task usage remains visible, but tasks do not
-have separate caps. The controller automatically shares and reserves the pool.
-This is a **soft credit cap**. New configs expose it as `"unlimited"` until
-you choose a limit. Values must be at least 30 credits; `0` is not unlimited here.
-Usage survives restarts and reopening, includes retries/maintenance/final analysis,
-and reserves final-analysis allowance. In-flight responses can overshoot.
-Missing usage blocks capped inference by default rather than counting as zero.
-Recovered final usage can be appended with the operator-only `reconcile-credits`
-command; partial usage cannot clear an unknown record or rewrite a receipt.
-If final usage cannot be recovered, an operator can explicitly approve a separate
-`estimate-credits` budget charge. It counts against the existing cap but remains
-labeled as estimated, never verified usage; the remaining allowance is approximate.
-`dashboard.chat.max_ai_credits` is a separate campaign-scoped chat allowance,
-also retained across dashboard restarts. Setup remains outside both allowances.
-
-**All TOML changes require restarting the controller, including budgets.**
-A run loads one snapshot; separate-process submissions use that snapshot too.
-Press Ctrl+C to leave the controller (pausing new admission), edit and validate
-the file, run `labgoblin run` to load it, then `labgoblin resume` and
-`labgoblin run` to continue. This preserves the same campaign, accounting and
-admitted work. `stop` retires work; it is not a configuration-reload command.
-
-See the [operating guide](docs/local-research.md) for complete configuration,
-budgets, provenance, Docker builds, and recovery. The
-[synthetic example](examples/local-synthetic/README.md) runs without a dataset,
-GPU, or model call when used with `--no-agent`.
-
-## Control and observe
+The researcher works with `research-notes.md`, `report.md`, code and `artifacts\`.
+Keep large read-only source datasets in `inputs\` or outside the workspace;
+the harness does not duplicate them into result snapshots.
 
 | Command | Meaning |
 |---|---|
-| `run` | Recover compatible owned work, then continue eligible research. |
-| `run --no-agent` | Run/recover submitted experiments without inference. |
-| `pause` / `resume` | Gate new admission / resume an open generation. Armed work can finish. |
-| `stop` | Stop admission, retire queued work, drain admitted work, retain a partial handoff. No final model call. |
-| `cancel --id ID` | Request cancellation of exactly one owned attempt. |
-| `reopen` | Start a new generation after quiescent closure/stop; cumulative budgets remain. |
-| `status` / `budget` | Read only: no reconciliation, inference, or state initialization. |
-| `reconcile --state-dir PATH` | Recover supported state even when current TOML is broken or missing. |
-| `steer --text TEXT` | Record an attributed operator constraint, not an anonymous journal edit. |
-| `report --no-agent` | Publish an immutable deterministic HTML/Markdown inventory without inference. |
-| `report` / `compact` | Request fixed, resource-admitted safe-point maintenance. |
-| `storage inventory` | Inspect bounded owned-file sizes and retained references. |
-| `storage retention --dry-run` | Review proven-unowned preparation candidates; never delete. |
-| `reset --confirm CAMPAIGN_ID` | Archive supported quiescent state; never erase the machine ledger or auto-restart. |
+| `init PROJECT` | Create a fresh project without inference or overwriting existing state. |
+| `run PROJECT` | Start the first execution, or adopt its still-running independent supervisor. |
+| `run PROJECT --resume` | Explicitly start another conversation from retained files, using the remaining cumulative allowance. |
+| `status PROJECT` | Read execution state, loaded configuration and accounting; never reconcile or start work. |
+| `inspect PROJECT --open` | Browse research evidence locally, without model calls or research changes. |
+| `stop PROJECT` | Request bounded cancellation of exactly this project's owned execution. |
+| `reconcile PROJECT` | Retire only proven-dead owned executions; never replay research. |
+| `record-usage PROJECT ...` | Append explicitly confirmed final usage or a separately labeled operator estimate. |
+| `machine status` | Inspect shared resource capacity and reservations. |
 
-Commands support `--json` and return nonzero on failure. `--project PATH` selects
-the project explicitly. Control requests accept stable `--request-id` and
-`--expected-revision` values for retry-safe scripts.
+Commands produce JSON and return nonzero on failure or an incomplete run.
+Ctrl+C requests cancellation; abrupt controller death instead leaves the
+independent worker to finish within its original deadline. A new `run` adopts that
+worker rather than starting a duplicate. `--resume` after a settled execution
+starts a new provider conversation, not a promised resurrection of an interrupted
+SDK session.
 
-The controller is not the owner of running payload trees. Its exit does not
-cancel already admitted work; their independent supervisors retain deadlines
-and completion receipts. Unknown ownership keeps its resource reservation.
-Do not manually delete a grant, invent a receipt, or retry uncertain work.
-
-## Evidence and research closure
-
-An experiment manifest has an idempotency key, argv array, explicit source files,
-resources, a finite deadline, and relative output artifacts. Small metric
-documents are captured once: parsing, hashing, historical reports and downloads
-use those same bytes. A mutable large file is not advertised as an exact
-historical download. Scientific statements become immutable when first admitted;
-a changed claim requires a new hypothesis ID.
-
-Each research turn receives a versioned packet and returns one owned delta
-handoff. Exact evidence acknowledgements, decisions, and the journal projection
-commit together. Operator constraints remain outside model-written summaries,
-and historical source revisions survive compaction.
-Branch retirement does not end the campaign. A coach may approve an
-evidence-linked goal-completion claim, but discretionary partial closure needs
-the operator. Already-completed waits resume normal evidence assessment.
-Archive growth alone no longer launches paid compaction.
-
-Finalization seals the complete attempt inventory, including failed, cancelled,
-unperformed and still-running admitted work. At most one additional analysis
-assesses the sealed evidence, including late replications. Missing allowance,
-failed analysis, or a request for more work produces an honest incomplete outcome,
-not an automatic paid loop. The harness checks reference/value integrity and
-explicit coverage; it does **not** certify scientific truth, novelty or adequacy.
-Handoff preflight is available through CLI/SDK. SDK final analysis permits one
-structure-only correction inside its existing session budget and deadline,
-without reopening evidence or changing scientific conclusions.
-
-## Research dashboard
+## Inspect without steering
 
 ```powershell
-labgoblin dashboard --open-browser
+labgoblin inspect .\my-research --open
+# Optional paid questions: choose an installed/enabled model and a separate allowance.
+labgoblin inspect .\my-research --open --credits 100 --model MODEL_ID --reasoning-effort medium
 ```
 
-The read-only loopback dashboard defaults to `http://127.0.0.1:8765`, organized
-around four destinations:
+The first command is view-only, even if chat was authorized previously.
+The second authorizes a **cumulative** inspection soft cap, not another 100
+credits on each restart. No model runs until you submit a question. Each answer
+uses a fresh restricted session, bounded previous chat and freshly read evidence.
+It can explain findings and show captured PNG/JPEG images, but cannot run code,
+retrieve external literature, edit files or restart research.
 
-| Destination | Purpose |
-|---|---|
-| **Brief** | Short researcher-authored supervisor memo, separate live controller/accounting snapshot, and expandable research context. |
-| **Evidence** | Hypothesis statements, assessment references, exact measurements and side-by-side inspection. |
-| **Work** | Experiment state, named recovery blockers, safe inspection commands and readable resource limits. |
-| **History** | Supervisor memo versions, generation outcomes, folded journal entries, retained reports and immutable source inventories. |
+Use the exact loopback URL printed by the command; its fragment authorizes that
+browser tab. History and captured citations live outside the research workspace.
+Completed executions prefer immutable snapshots; live reads and truncated
+session evidence are labeled. Ctrl+C closes the inspector and cancels its own
+pending answer, not research. See the operating guide for bounds and recovery.
 
-Interpretations are attributed research records, not automatically generated
-verdicts. Validation warnings follow evidence into historical drilldowns.
-Comparison shows exact values without inventing pairing, units or aggregate
-effects. Registered reports open in a digest-verified Markdown reader.
+## Spending and evidence
 
-**Mark caught up** saves a browser-local, campaign-generation viewing checkpoint;
-it never acknowledges research events. **Check for updates** announces changed
-records without replacing what you are reading; **Refresh** explicitly updates
-the page. Opening either view never reconciles or runs inference. Markdown
-disables raw HTML and images; assets are packaged locally.
+`max_ai_credits` is one project-wide **soft cap**, including every researcher,
+coach and adviser session across explicit resumes. It defaults to 1000; `"unlimited"` is an
+explicit alternative, not the meaning of numeric zero. Reported usage comes from
+`totalNanoAiu`, not premium-request multipliers. In-flight responses can overshoot.
+Unknown final usage blocks another admission; partial checkpoints do not become
+final bills. Approved estimates stay separate from reported usage.
 
-### Dashboard Copilot observer
+When coaching is enabled, the researcher and coach share that pool. The initial
+researcher leaves the provider's 30-credit minimum for a stopping review.
+Unused allowance is reassigned
+from **observed spending**, including an in-place update of the idle researcher's
+cumulative session ceiling before any continuation. There are no task-cost
+forecasts or per-role credit settings.
 
-The pinned SDK is a normal LabGoblin dependency. Run `labgoblin dashboard`
-from the campaign directory.
-Chat is enabled by default. Use `--no-chat` or `[dashboard.chat] enabled = false`
-to disable it; an explicit `--chat` or `--no-chat` overrides that configuration.
-If the SDK installation is broken, ordinary pages still work and chat explains
-how to repair it. No packages are installed automatically. Chat settings are
-loaded by the dashboard process and require its own restart.
-**Ask Copilot** starts inference only when you send a question. The observer gets
-curated, bounded, read-only tools for recorded state, metrics, historical rationale
-and exact source revisions. It cannot steer research, attach to its provider
-session, run commands, or read arbitrary files, logs, datasets or artifact bodies.
-Each question retains its page context and exact source/view references. These
-are retrieval hints, not a frozen snapshot of every subsequent tool result;
-historical evidence remains distinct from current recorded state.
+Consultations are separately opt-in: use `init --consultant` or set
+`consultant = true` before a new execution. This authorizes workspace evidence
+reads and public literature retrieval, not uploads or arbitrary agent spawning.
+Researcher, coach and advisers all share the same project pool. Consultation
+headroom is reserved before assigning caller limits: 10% of the remaining
+allowance, at least 30 and at most 300 credits (300 for an unlimited project).
+The reserve is shared across consultations, not renewed for each call.
+Each consultation has at most five minutes, within the original run deadline.
+See the operating guide for exact bounds, failure behavior and retained artifacts.
 
-Chat, drafts, open/closed state and maximized layout survive navigation/reload
-while the dashboard process remains alive. **Close** hides it; **New chat** clears
-it; **Maximize/Restore** changes the reading layout. Cancellation and visible
-machine-capacity waiting are supported. Chat is not persisted across server
-restarts. Observer invocation allowance and usage are separate from research,
-but its owned SDK processes still acquire machine capacity.
+Each execution keeps frozen instructions/configuration/helpers, bounded provider
+events and logs, qualified spending records, a terminal receipt and an immutable
+workspace snapshot. Snapshots retain regular source/output files, including
+multi-gigabyte artifacts, within explicit byte/file-count limits. Excluded inputs,
+environments, common credential paths (including `.env*`), state, caches, links
+and special files are listed. These exclusions are not a general secret scanner.
+Working files remain editable; this is not a database of every scientific interpretation.
 
-## Boundaries
+**A completed process or an accepting coach is not independent validation.**
+Read the report, inspect decisive artifacts and check any domain-specific
+evaluation before adopting a scientific result.
 
-Trusted native execution is not a hostile-code sandbox. CPU placement is not a
-CPU-time quota; WSL memory monitoring is not a kernel-hard memory limit. The
-ledger coordinates cooperating LabGoblin consumers, not every process or OS user.
-Explicit free-space monitoring is a soft safeguard, not a filesystem quota.
-Optional Copilot sandboxing fails closed when its prepared policy is unavailable.
+## A deliberately breaking simplification
 
-No automatic image pulls, remote compute, pushes, uploads or shared-environment
-installations are part of the research loop. A trusted provider can still use
-its own tools: define approved data disclosure and operational constraints.
-Do not put credentials in persisted manifests or environment overrides.
+Version 3 uses configuration/project format **5**, an internal execution format
+**4**, and the shared machine ledger's existing **3** exchange format. There is
+no scientific campaign database and no campaign migration.
 
-## Development and historical work
+The legacy implementation is preserved locally at commit
+`9efa22bc88fd95ac23a3b4685a218ff913031c9c`.
+Keep its compatible installation for existing campaigns. This replacement rejects
+old state without modifying it. It does not upgrade old helpers or receipts,
+replace a live ledger, or clear somebody else's reservations.
 
-Install with `python -m pip install -e .`, then run `python -m pytest tests -q`.
-See [contributor runtime contracts](docs/runtime-protocol.md) and `CLAUDE.md`.
-Guest/browser/build acceptance requires explicit opt-in and already prepared
-environments. Ordinary tests never invoke a real research model.
+Claude, managed WSL/Docker backends, assisted setup, delegated research scopes,
+the old dashboard/observer orchestration, structured publications, supervisor memos and dedicated
+report/compaction/final-analysis jobs are retired from this runtime. There is no
+second legacy orchestrator hidden behind a simple-mode flag. No automatic image
+pulls, environment installations, remote execution, uploads or unrestricted
+nested model sessions are part of the new loop. Only the explicitly enabled,
+host-owned consultation tool can start an adviser inside research. The independent
+on-demand inspector does not restore that orchestration or change the research loop.
 
-The checked-in CI workflow covers Windows Python 3.11/3.13, a prepared Chromium
-browser, wheel/sdist identity, and a fresh installed-wheel synthetic run.
-Windows regressions use an isolated virtual environment: CPython's launcher
-permits intentional supervisor breakaway from its immediate Windows Job Object,
-unlike the bare hosted interpreter. Runtime ownership checks remain unchanged.
-SDK conversations use doubles; CI neither authenticates Copilot nor downloads
-its runtime. Run `python -I tests/installed_smoke.py --root NEW_EMPTY_DIRECTORY`
-with a separately installed wheel to exercise the shipped example without
-source-import leakage.
+See the [operating guide](docs/local-research.md), [research and coaching
+guide](docs/research-loop.md), [execution contract](docs/runtime-protocol.md) and
+[small example](examples/local-synthetic/README.md).
 
-With explicit authorization for live setup usage and an authenticated local
-Copilot CLI, run `python -m tests.setup_acceptance --live --root NEW_EMPTY_DIRECTORY`.
-This synthetic rehearsal uses the real SDK, tools and initialization path with
-scripted operator input: approved context sharing, declined probes, correction,
-preview/cancel and exact Apply. It does not test physical keyboard interaction
-or start research. The helper reserves up to eight operator prompts in its own
-SQLite allowance, records SDK usage and keeps its synthetic transcript outside
-the generated campaign; this is not a product setup quota or a money limit.
+## Development and attribution
 
-The illustrated [Atari](examples/auto-cleanrl-report/report.html) and
-[Craftax](examples/auto-craftax-report/report.html) reports are **historical v1
-artifacts**, not supported v2 onboarding. Their original cluster methods,
-figures and conclusions are preserved.
+```powershell
+python -m pip install -e .
+python -m pytest tests -q
+```
 
-## Attribution and citation
+Ordinary tests use model-free SDK doubles, including a real local stdio protocol
+fixture and actual native process trees. Paid evaluations require separate,
+explicit authorization and a persisted allowance outside the evaluated project.
 
-LabGoblin builds on Roger Creus Castanyer's xgenius.
+LabGoblin is derived from
+[Roger Creus Castanyer's xgenius](https://github.com/roger-creus/xgenius), not a
+drop-in replacement for its SLURM harness. The original [Atari
+report](examples/auto-cleanrl-report/report.html), [Craftax
+report](examples/auto-craftax-report/report.html), figures and generators are
+preserved historical material, not validation or runtime tools for this edition.
+
 The original software citation remains:
 
 ```bibtex

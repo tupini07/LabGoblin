@@ -1,134 +1,83 @@
-"""Versioned local runtime records shared by controllers and owned workers."""
+"""Small typed execution records. There is no schema for scientific reasoning."""
 
 from dataclasses import asdict, dataclass, field
-import hashlib
-import json
 import math
 import re
 import uuid
 
+from labgoblin.storage import canonical, digest
 
-CONFIG_VERSION = 4
-DATABASE_VERSION = 4
+
+CONFIG_VERSION = 5
 LEDGER_VERSION = 3
-WORKER_VERSION = 3
-PACKET_BYTES = 64 * 1024
-PACKET_EVENTS = 64
-HANDOFF_BYTES = 16 * 1024
-ACTIVE = ("queued", "starting", "running", "recovery_required")
-TERMINAL = ("completed", "failed", "cancelled", "timed_out", "interrupted", "not_started")
-PROVIDER_KINDS = ("research", "reflection", "coach", "worker", "final_analysis", "report", "compact", "canary", "observer")
+WORKER_VERSION = 4
+TERMINAL = {"completed", "checkpointed", "needs_operator", "review_unavailable", "budget_exhausted",
+            "failed", "cancelled", "timed_out", "interrupted", "not_started"}
 
 
 class PreExecutionError(RuntimeError):
-    """The owned launch boundary proves that user/provider code did not start."""
+    """Execution is proven not to have started."""
 
 
 class UncertainExecution(RuntimeError):
-    """Execution or owned-tree quiescence cannot be established."""
+    """Execution, spending or owned-tree quiescence is unresolved."""
 
 
-class AdmissionWait(ValueError):
-    """A valid request must wait for existing commitments to drain."""
+class BudgetExhausted(ValueError):
+    pass
 
 
-class AdmissionClosed(ValueError):
-    """Current control, generation, recovery or budget forbids admission."""
-
-
-class BudgetExhausted(AdmissionClosed):
-    def __init__(self, dimension: str, message: str):
-        self.dimension = dimension
-        super().__init__(message)
-
-
-def identifier() -> str:
+def identifier():
     return uuid.uuid4().hex
 
 
-def number(value, name: str, *, zero: bool = False) -> int | float:
+def number(value, name, *, zero=False):
     if (type(value) not in (int, float) or not math.isfinite(value)
             or value < 0 or (value == 0 and not zero)):
         raise ValueError(f"{name} must be {'nonnegative' if zero else 'positive'} and finite")
     return value
 
 
-def integer(value, name: str, *, zero: bool = False) -> int:
+def integer(value, name, *, zero=False):
     if type(value) is not int:
         raise ValueError(f"{name} must be an integer")
-    number(value, name, zero=zero)
-    return value
+    return number(value, name, zero=zero)
 
 
-def text(value, name: str, *, empty: bool = False) -> str:
+def text(value, name, *, empty=False):
     if not isinstance(value, str) or "\0" in value or (not empty and not value.strip()):
-        raise ValueError(f"{name} must be a {'possibly empty ' if empty else 'nonempty '}string without NUL")
+        raise ValueError(f"{name} must be a {'possibly empty' if empty else 'nonempty'} string without NUL")
     return value
 
 
-def strings(value, name: str, *, empty: bool = False) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)) or (not empty and not value):
-        raise ValueError(f"{name} must be {'an' if empty else 'a nonempty'} array of strings")
-    return tuple(text(item, name) for item in value)
-
-
-def argv(value, name: str = "argv") -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)) or not value:
-        raise ValueError(f"{name} must be a nonempty argument array")
-    return (text(value[0], name), *(text(item, name, empty=True) for item in value[1:]))
-
-
-def table(value, name: str, allowed: set[str] | None = None) -> dict:
-    if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
-        raise ValueError(f"{name} must be an object/table")
-    if allowed is not None and set(value) - allowed:
-        raise ValueError(f"Unknown {name} fields: {sorted(set(value) - allowed)}")
-    return value
-
-
-def boolean(value, name: str) -> bool:
+def boolean(value, name):
     if type(value) is not bool:
         raise ValueError(f"{name} must be boolean")
     return value
 
 
-def canonical(value) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                      allow_nan=False).encode("utf-8")
+def table(value, name, allowed=None):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{name} must be an object")
+    if allowed is not None and set(value) - set(allowed):
+        raise ValueError(f"Unknown {name} fields: {sorted(set(value) - set(allowed))}")
+    return value
 
 
-def fingerprint(value) -> str:
-    return hashlib.sha256(canonical(value)).hexdigest()
+def argv(value):
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("argv must be a nonempty string array")
+    return tuple(text(item, "argv", empty=index > 0) for index, item in enumerate(value))
 
 
-def require_version(value, expected: int, kind: str):
+def require_version(value, expected, kind):
     if type(value) is not int or value != expected:
         raise ValueError(f"Unsupported {kind} version {value!r}; expected {expected}. "
-                         "Old formats are not migrated; initialize a fresh local campaign.")
+                         "Use the preserved legacy runtime for old campaigns; no migration is performed.")
 
 
-@dataclass(frozen=True)
-class Limit:
-    value: int | float
-
-    def __post_init__(self):
-        number(self.value, "limit", zero=True)
-
-    def allows(self, used: int | float, additional: int | float = 0) -> bool:
-        number(used, "used", zero=True)
-        number(additional, "additional", zero=True)
-        return self.value == 0 or used + additional <= self.value
-
-    def exhausted(self, used: int | float) -> bool:
-        number(used, "used", zero=True)
-        return self.value != 0 and used >= self.value
-
-    def view(self, used: int | float, reserved: int | float = 0) -> dict:
-        number(used, "used", zero=True)
-        number(reserved, "reserved", zero=True)
-        return {"configured": self.value, "unlimited": self.value == 0, "used": used,
-                "reserved": reserved,
-                "remaining": None if self.value == 0 else max(0, self.value - used - reserved)}
+def fingerprint(value):
+    return digest(value)
 
 
 @dataclass(frozen=True)
@@ -138,331 +87,113 @@ class Resources:
     gpus: tuple[str, ...] = ()
 
     def __post_init__(self):
-        integer(self.cpus, "resources.cpus")
-        integer(self.memory_mb, "resources.memory_mb")
-        strings(self.gpus, "resources.gpus", empty=True)
-        if len(set(self.gpus)) != len(self.gpus):
-            raise ValueError("resources.gpus must contain unique physical device identities")
+        integer(self.cpus, "cpus")
+        integer(self.memory_mb, "memory_mb")
+        if not isinstance(self.gpus, tuple) or len(set(self.gpus)) != len(self.gpus):
+            raise ValueError("gpus must contain unique device identities")
+        for gpu in self.gpus:
+            text(gpu, "gpu")
 
     @classmethod
-    def parse(cls, value: dict) -> "Resources":
-        value = table(value, "resources", {"cpus", "memory_mb", "gpus"})
-        return cls(integer(value.get("cpus"), "resources.cpus"),
-                   integer(value.get("memory_mb"), "resources.memory_mb"),
-                   strings(value.get("gpus", []), "resources.gpus", empty=True))
-
-
-@dataclass(frozen=True)
-class LaunchKey:
-    campaign_id: str
-    generation: int
-    work_id: str
-    grant_id: str
-    nonce: str
-
-    def __post_init__(self):
-        integer(self.generation, "generation")
-        for name in ("campaign_id", "work_id", "grant_id", "nonce"):
-            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", text(getattr(self, name), name)):
-                raise ValueError(f"Invalid {name}")
-
-    @classmethod
-    def parse(cls, value: dict) -> "LaunchKey":
-        value = table(value, "launch key", set(cls.__dataclass_fields__))
-        missing = set(cls.__dataclass_fields__) - set(value)
-        if missing:
-            raise ValueError(f"Missing launch key fields: {sorted(missing)}")
-        return cls(**value)
+    def parse(cls, value):
+        value = table(value, "resources", cls.__dataclass_fields__)
+        gpus = value.get("gpus", [])
+        if not isinstance(gpus, (list, tuple)):
+            raise ValueError("gpus must be an array")
+        return cls(value.get("cpus"), value.get("memory_mb"), tuple(gpus))
 
 
 @dataclass(frozen=True)
 class LaunchEnvelope:
-    key: LaunchKey
-    kind: str
-    argv: tuple[str, ...]
-    cwd: str
+    id: str
+    project_id: str
+    project: str
     root: str
-    state_path: str
     ledger_path: str
     ledger_id: str
-    timeout_seconds: float
+    argv: tuple[str, ...]
     resources: Resources
-    config_revision: str
-    environment: dict[str, str] = field(default_factory=dict)
-    metadata: dict = field(default_factory=dict)
+    cpu_ids: tuple[int, ...]
+    config: dict
+    allowance_nano: int | None
+    launcher: dict
+    runtime: dict
+    prompt_sha256: str
     protocol: int = WORKER_VERSION
 
     def __post_init__(self):
-        require_version(self.protocol, WORKER_VERSION, "worker")
-        if self.kind not in ("attempt", "build", *PROVIDER_KINDS):
-            raise ValueError(f"Unknown launch kind: {self.kind}")
-        argv(self.argv)
-        number(self.timeout_seconds, "timeout_seconds")
-        for name in ("cwd", "root", "state_path", "ledger_path", "ledger_id", "config_revision"):
+        require_version(self.protocol, WORKER_VERSION, "execution")
+        for name in ("id", "project_id"):
+            if not re.fullmatch(r"[a-f0-9]{32}", text(getattr(self, name), name)):
+                raise ValueError(f"Invalid {name}")
+        for name in ("project", "root", "ledger_path", "ledger_id", "prompt_sha256"):
             text(getattr(self, name), name)
-        for name, value in table(self.environment, "environment").items():
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
-                raise ValueError(f"Invalid environment variable name: {name}")
-            text(value, f"environment.{name}", empty=True)
-        table(self.metadata, "metadata")
+        argv(self.argv)
+        if (len(self.cpu_ids) != self.resources.cpus or len(set(self.cpu_ids)) != len(self.cpu_ids)
+                or any(type(cpu) is not int or cpu < 0 for cpu in self.cpu_ids)):
+            raise ValueError("CPU placement must name the exact granted CPU set")
+        if self.allowance_nano is not None:
+            integer(self.allowance_nano, "credit allowance")
+        for name in ("config", "launcher", "runtime"):
+            table(getattr(self, name), name)
         canonical(asdict(self))
 
     @property
-    def digest(self) -> str:
-        return fingerprint(asdict(self))
+    def digest(self):
+        return digest(asdict(self))
 
     @classmethod
-    def parse(cls, value: dict) -> "LaunchEnvelope":
-        value = dict(table(value, "launch envelope", set(cls.__dataclass_fields__)))
-        require_version(value.get("protocol"), WORKER_VERSION, "worker")
-        required = {"key", "kind", "argv", "cwd", "root", "state_path", "ledger_path",
-                    "ledger_id", "timeout_seconds", "resources", "config_revision"}
-        if required - set(value):
-            raise ValueError(f"Missing launch envelope fields: {sorted(required - set(value))}")
-        value["key"] = LaunchKey.parse(value["key"])
-        value["resources"] = Resources.parse(value["resources"])
+    def parse(cls, value):
+        value = dict(table(value, "envelope", cls.__dataclass_fields__))
+        require_version(value.get("protocol"), WORKER_VERSION, "execution")
+        if set(cls.__dataclass_fields__) - set(value):
+            raise ValueError("Execution envelope is incomplete")
         value["argv"] = argv(value["argv"])
+        value["resources"] = Resources.parse(value["resources"])
+        if not isinstance(value["cpu_ids"], list):
+            raise ValueError("CPU placement must be an array")
+        value["cpu_ids"] = tuple(value["cpu_ids"])
         return cls(**value)
 
 
 @dataclass(frozen=True)
 class LaunchReceipt:
-    key: LaunchKey
+    id: str
     envelope_digest: str
     status: str
-    quiescent: bool
     elapsed: float
+    executed: bool
     returncode: int | None = None
     reason: str = ""
-    executed: bool = True
     usage: dict | None = None
     metadata: dict = field(default_factory=dict)
+    quiescent: bool = True
     protocol: int = WORKER_VERSION
 
     def __post_init__(self):
-        require_version(self.protocol, WORKER_VERSION, "worker")
-        text(self.envelope_digest, "envelope_digest")
-        number(self.elapsed, "receipt elapsed", zero=True)
-        if self.quiescent is not True or self.status not in TERMINAL:
-            raise ValueError("A terminal receipt must establish owned-operation quiescence")
-        if self.returncode is not None and type(self.returncode) is not int:
-            raise ValueError("Receipt returncode must be an integer or null")
-        if self.status == "completed" and self.returncode != 0:
-            raise ValueError("A completed receipt requires returncode zero")
+        require_version(self.protocol, WORKER_VERSION, "receipt")
+        text(self.id, "receipt id")
+        text(self.envelope_digest, "envelope digest")
+        number(self.elapsed, "elapsed", zero=True)
         boolean(self.executed, "executed")
+        if self.quiescent is not True or self.status not in TERMINAL:
+            raise ValueError("A terminal receipt requires proven owned-tree quiescence")
         if self.status == "not_started" and self.executed:
-            raise ValueError("not_started requires proven non-execution")
+            raise ValueError("not_started cannot describe an executed payload")
+        if self.returncode is not None and type(self.returncode) is not int:
+            raise ValueError("returncode must be an integer or null")
+        if self.status == "completed" and self.returncode != 0:
+            raise ValueError("Completed execution requires returncode zero")
         text(self.reason, "receipt reason", empty=self.status == "completed")
         if self.usage is not None:
-            table(self.usage, "provider usage")
+            table(self.usage, "usage")
         table(self.metadata, "receipt metadata")
         canonical(asdict(self))
 
     @classmethod
-    def parse(cls, value: dict) -> "LaunchReceipt":
-        value = dict(table(value, "launch receipt", set(cls.__dataclass_fields__)))
-        require_version(value.get("protocol"), WORKER_VERSION, "worker")
-        required = {"key", "envelope_digest", "status", "quiescent", "elapsed"}
-        if required - set(value):
-            raise ValueError(f"Missing receipt fields: {sorted(required - set(value))}")
-        value["key"] = LaunchKey.parse(value["key"])
+    def parse(cls, value):
+        value = table(value, "receipt", cls.__dataclass_fields__)
+        require_version(value.get("protocol"), WORKER_VERSION, "receipt")
+        if set(cls.__dataclass_fields__) - set(value):
+            raise ValueError("Execution receipt is incomplete")
         return cls(**value)
-
-
-@dataclass(frozen=True)
-class EvidenceDisposition:
-    event_id: str
-    disposition: str
-    reason: str
-    references: tuple[str, ...] = ()
-    wake_condition: str = ""
-
-    def __post_init__(self):
-        text(self.event_id, "event_id")
-        text(self.reason, "evidence.reason")
-        if self.disposition not in ("assessed", "excluded", "deferred"):
-            raise ValueError("Evidence disposition must be assessed, excluded or deferred")
-        strings(self.references, "references", empty=True)
-        text(self.wake_condition, "wake_condition", empty=self.disposition != "deferred")
-
-    @classmethod
-    def parse(cls, value: dict) -> "EvidenceDisposition":
-        value = dict(table(value, "evidence disposition", set(cls.__dataclass_fields__)))
-        if {"event_id", "disposition", "reason"} - set(value):
-            raise ValueError("Evidence requires event_id, disposition and reason")
-        value["references"] = strings(value.get("references", []), "references", empty=True)
-        return cls(**value)
-
-
-@dataclass(frozen=True)
-class Handoff:
-    turn_id: str
-    packet_id: str
-    summary: str
-    rationale: str
-    next_step: str
-    disposition: str
-    reason: str
-    evidence: tuple[EvidenceDisposition, ...] = ()
-    stopping_criterion: str = ""
-    maintenance: tuple[str, ...] = ()
-    assessment: dict | None = None
-    research_updates: tuple[dict, ...] = ()
-    reflection: bool = False
-    coaching: bool = False
-    task_artifacts: tuple[dict, ...] = ()
-    research_refs: tuple[str, ...] = ()
-    stop_basis: str = ""
-    goal_progress: dict | None = None
-    commitment: dict | None = None
-
-    def __post_init__(self):
-        for name in ("turn_id", "packet_id", "summary", "rationale", "next_step", "reason"):
-            text(getattr(self, name), name)
-        if self.disposition not in ("continue", "wait", "blocked", "finalize"):
-            raise ValueError("Disposition must be continue, wait, blocked or finalize")
-        text(self.stopping_criterion, "stopping_criterion", empty=self.disposition != "finalize")
-        if self.stop_basis not in ("", "goal_satisfied", "operator_needed", "discretionary"):
-            raise ValueError("stop_basis must be goal_satisfied, operator_needed or discretionary")
-        if self.stop_basis and self.disposition not in ("blocked", "finalize"):
-            raise ValueError("stop_basis applies only to a blocked/finalize proposal")
-        if self.stop_basis == "goal_satisfied" and self.disposition != "finalize":
-            raise ValueError("Goal satisfaction requires a finalize proposal")
-        if len({e.event_id for e in self.evidence}) != len(self.evidence):
-            raise ValueError("Evidence event IDs must be unique")
-        if set(self.maintenance) - {"report", "compact"}:
-            raise ValueError("Only report and compact maintenance may be requested")
-        boolean(self.reflection, "reflection")
-        boolean(self.coaching, "coaching")
-        strings(self.research_refs, "handoff research_refs", empty=True)
-        if not isinstance(self.task_artifacts, (list, tuple)) or len(self.task_artifacts) > 20:
-            raise ValueError("task_artifacts must contain at most 20 returned files")
-        for artifact in self.task_artifacts:
-            table(artifact, "task artifact", {"path", "digest"})
-            text(artifact.get("path"), "task artifact path")
-            digest = text(artifact.get("digest"), "task artifact digest")
-            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-                raise ValueError("Task artifact digest must be a lowercase SHA-256")
-        if not isinstance(self.research_updates, (list, tuple)):
-            raise ValueError("research_updates must be an array")
-        for update in self.research_updates:
-            table(update, "research update")
-        if self.goal_progress is not None:
-            progress = table(self.goal_progress, "goal_progress", {"coverage", "items"})
-            text(progress.get("coverage"), "goal_progress.coverage")
-            items = progress.get("items")
-            if not isinstance(items, list) or not 1 <= len(items) <= 8:
-                raise ValueError("goal_progress.items must contain one to eight deliverable assessments")
-            for item in items:
-                table(item, "goal progress item", {"deliverable", "status", "assessment", "references"})
-                text(item.get("deliverable"), "goal progress deliverable")
-                text(item.get("assessment"), "goal progress assessment")
-                if item.get("status") not in ("unresolved", "partial", "supported"):
-                    raise ValueError("Goal progress status must be unresolved, partial or supported")
-                strings(item.get("references", []), "goal progress references", empty=item["status"] == "unresolved")
-            if len(canonical(progress)) > 4096:
-                raise ValueError("goal_progress exceeds 4096 UTF-8 bytes; keep detail in referenced research records")
-        if self.commitment is not None:
-            value = table(self.commitment, "commitment",
-                          {"branch", "boundary", "goal_connection", "decision_value", "revisit_when"})
-            for name in ("branch", "goal_connection", "decision_value", "revisit_when"):
-                text(value.get(name), f"commitment.{name}")
-            if len(value["branch"]) > 128 or len(canonical(value)) > 2048:
-                raise ValueError("Commitment exceeds 128 branch characters or 2048 UTF-8 bytes")
-            if value.get("boundary") not in ("branch", "refinement", "milestone"):
-                raise ValueError("Commitment boundary must be branch, refinement or milestone")
-        if self.assessment is not None:
-            value = table(self.assessment, "closure assessment",
-                          {"view_id", "inventory_digest", "assess_all", "exclusions", "limitations"})
-            for name in ("view_id", "inventory_digest", "limitations"):
-                text(value.get(name), f"assessment.{name}")
-            if value.get("assess_all") is not True:
-                raise ValueError("Assessment must explicitly cover every listed observation except named exclusions")
-            exclusions = value.get("exclusions", [])
-            if not isinstance(exclusions, list):
-                raise ValueError("Assessment exclusions must be an array")
-            seen = set()
-            for item in exclusions:
-                table(item, "assessment exclusion", {"attempt_id", "reason"})
-                text(item.get("attempt_id"), "exclusion.attempt_id")
-                text(item.get("reason"), "exclusion.reason")
-                if item["attempt_id"] in seen:
-                    raise ValueError("Duplicate assessment exclusion")
-                seen.add(item["attempt_id"])
-        if len(canonical(asdict(self))) > HANDOFF_BYTES:
-            raise ValueError(f"Handoff exceeds {HANDOFF_BYTES} encoded bytes")
-
-    @classmethod
-    def parse(cls, value: dict) -> "Handoff":
-        value = dict(table(value, "handoff", set(cls.__dataclass_fields__)))
-        required = {"turn_id", "packet_id", "summary", "rationale", "next_step", "disposition", "reason"}
-        if required - set(value):
-            raise ValueError(f"Missing handoff fields: {sorted(required - set(value))}")
-        evidence = value.get("evidence", [])
-        if not isinstance(evidence, list):
-            raise ValueError("evidence must be an array")
-        value["evidence"] = tuple(EvidenceDisposition.parse(e) for e in evidence)
-        value["maintenance"] = strings(value.get("maintenance", []), "maintenance", empty=True)
-        return cls(**value)
-
-    def capture_digests(self):
-        """Accept predecessor captures only when the added optional fields are absent."""
-        variants = [asdict(self)]
-        for name, default in (("stop_basis", ""), ("goal_progress", None), ("commitment", None)):
-            if getattr(self, name) == default:
-                variants.extend({key: value for key, value in row.items() if key != name}
-                                for row in list(variants))
-        return {fingerprint(value) for value in variants}
-
-
-def handoff_schema(*, owned=False):
-    from labgoblin.research_memory import publication_schema
-    string = {"type": "string", "minLength": 1}
-    references = {"type": "array", "items": string}
-    properties = {
-        **{key: string for key in ("turn_id", "packet_id", "summary", "rationale", "next_step", "reason")},
-        "disposition": {"type": "string", "enum": ["continue", "wait", "blocked", "finalize"]},
-        "stopping_criterion": {"type": "string"},
-        "stop_basis": {"type": "string", "enum": ["", "goal_satisfied", "operator_needed", "discretionary"]},
-        "research_refs": references,
-        "research_updates": {"type": "array", "items": publication_schema()},
-        "reflection": {"type": "boolean"}, "coaching": {"type": "boolean"},
-        "maintenance": {"type": "array", "items": {"type": "string", "enum": ["report", "compact"]}},
-        "evidence": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["event_id", "disposition", "reason"],
-            "properties": {"event_id": string, "reason": string, "references": references,
-                           "wake_condition": {"type": "string"},
-                           "disposition": {"type": "string", "enum": ["assessed", "excluded", "deferred"]}}}},
-        "assessment": {"type": ["object", "null"], "additionalProperties": False,
-            "required": ["view_id", "inventory_digest", "assess_all", "limitations"],
-            "properties": {"view_id": string, "inventory_digest": string, "assess_all": {"const": True},
-                "limitations": string, "exclusions": {"type": "array", "items": {
-                    "type": "object", "additionalProperties": False, "required": ["attempt_id", "reason"],
-                    "properties": {"attempt_id": string, "reason": string}}}}},
-        "task_artifacts": {"type": "array", "maxItems": 20, "items": {
-            "type": "object", "additionalProperties": False, "required": ["path", "digest"],
-            "properties": {"path": string, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}},
-        "goal_progress": {"type": ["object", "null"], "additionalProperties": False,
-            "description": "Root-only revisable assessment of original deliverables, at most 4096 UTF-8 bytes. "
-                           "Omit when unchanged; accepted history carries it forward. Not certification or new authority.",
-            "required": ["coverage", "items"], "properties": {
-                "coverage": string, "items": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
-                    "type": "object", "additionalProperties": False,
-                    "required": ["deliverable", "status", "assessment", "references"],
-                    "properties": {"deliverable": string, "assessment": string, "references": references,
-                                   "status": {"type": "string", "enum": ["unresolved", "partial", "supported"]}}}}}},
-        "commitment": {"type": ["object", "null"], "additionalProperties": False,
-            "description": "Root-only decision relevance at a new branch, refinement batch or milestone; omit otherwise. "
-                           "Explain a decision changed by different outcomes or a concrete prerequisite enabled, not guessed credits.",
-            "required": ["branch", "boundary", "goal_connection", "decision_value", "revisit_when"],
-            "properties": {"branch": {"type": "string", "minLength": 1, "maxLength": 128},
-                           "boundary": {"type": "string", "enum": ["branch", "refinement", "milestone"]},
-                           "goal_connection": string, "decision_value": string, "revisit_when": string}},
-    }
-    required = ["summary", "rationale", "next_step", "disposition", "reason"]
-    if not owned:
-        required = ["turn_id", "packet_id", *required]
-    return {"type": "object", "additionalProperties": False, "properties": properties, "required": required,
-            "description": "One owned handoff, at most 16 KiB. Final acceptance checks ownership, exact references "
-                           "and sealed inventory. research_complete fills omitted turn_id/packet_id, validates, "
-                           "and writes only its owned result; it does not accept science or end the campaign."}

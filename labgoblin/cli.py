@@ -1,596 +1,155 @@
-"""Local-only command surface with structured, bounded results."""
+"""Local research without a scientific workflow engine."""
 
 import argparse
-from dataclasses import asdict
+from decimal import Decimal
 import json
 from pathlib import Path
 import sqlite3
 import sys
 
-from labgoblin import __version__, briefing, journal, reporting, results, workspace
-from labgoblin.campaign import Campaign
-from labgoblin.config import initial_config, load_config, parse_config
-from labgoblin.evidence import (
-    Capture, atomic_bytes, contained, export_observation, observation_page, publish_bytes, read_bytes, read_json, tail,
-)
-from labgoblin.evidence import retention_candidates, storage_inventory, watermarks
-from labgoblin.protocol import identifier
-from labgoblin.paths import environment_value, present, project_paths
-from labgoblin.initialization import INSTRUCTIONS, SECTION_START, SECTION_END, instruction_text
-from labgoblin.scheduler import ResourceLedger, ledger_path
-from labgoblin.state import State
-
-
-class Parser(argparse.ArgumentParser):
-    def error(self, message):
-        raise ValueError(message)
-
-
-def _instructions(path: Path, state):
-    old = read_bytes(path, 256 * 1024) if path.exists() else b""
-    updated = instruction_text(old.decode("utf-8"))
-    if updated.encode("utf-8") == old:
-        return
-    if path.exists():
-        backup = state.source("instruction_backup", old, origin="operator-command",
-                              metadata={"path": str(path)})
-        if read_bytes(path, 256 * 1024) != old:
-            raise ValueError(f"Instructions changed concurrently; preserved original source {backup}")
-        atomic_bytes(path, updated.encode("utf-8"))
-    else:
-        publish_bytes(path, updated.encode("utf-8"))
-
-
-def initialize(args):
-    from labgoblin import initialization
-    root = Path(args.project).resolve()
-    ledger = args.ledger or ledger_path()
-    initialization.preflight(root, existing_config=args.existing_config)
-    if args.non_interactive or args.json:
-        if args.setup_model is not None:
-            raise ValueError("--setup-model applies only to interactive initialization")
-        prepared = initialization.basic(root, ledger, provider=args.agent, existing_config=args.existing_config,
-                                         install_copilot_instructions=args.install_copilot_instructions)
-    else:
-        if args.existing_config:
-            raise ValueError("--existing-config requires --non-interactive or --json; existing campaigns are not edited by setup")
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            raise ValueError("Assisted init requires an interactive terminal; use init --non-interactive or --json")
-        import asyncio
-        from labgoblin.setup_assistant import assist
-        prepared = asyncio.run(assist(root, ledger, provider=args.agent,
-                                      install_copilot_instructions=args.install_copilot_instructions,
-                                      model=args.setup_model))
-    return initialization.apply(prepared)
-
-
-def doctor(root, args):
-    from labgoblin import agent, backends
-    checks = []
-
-    def check(name, action):
-        try:
-            value = action()
-            checks.append({"check": name, "ok": True, "result": value})
-            return value
-        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
-            checks.append({"check": name, "ok": False, "error": f"{type(error).__name__}: {error}"})
-            return None
-
-    state = None
-    try:
-        state = State.open(project_paths(root).state)
-        checks.append({"check": "state", "ok": True, "campaign_id": state.id})
-    except (OSError, ValueError, sqlite3.Error) as error:
-        checks.append({"check": "state", "ok": False, "error": str(error)})
-    if state:
-        location, identity = state.ledger_identity()
-        check("machine", lambda: ResourceLedger(location, expected_id=identity or None).capacity())
-    config = check("configuration", lambda: load_config(root))
-    if config:
-        checks[-1]["result"] = {"revision": config.revision, "scope": "Disk candidate; requires controller restart"}
-        if config.research.coaching or config.research.max_tasks:
-            from labgoblin.research_tools import capabilities
-            check("research-roles", capabilities)
-        name = args.runner or config.execution.default_runner
-        if name not in config.runners:
-            checks.append({"check": "runner", "ok": False, "error": f"Unknown runner: {name}"})
-        else:
-            check("runner:" + name, lambda: backends.validate_runner(asdict(config.runners[name])))
-        check("storage", lambda: watermarks(config.storage))
-        if args.provider:
-            check("provider-help-only", lambda: agent.inspect_provider(
-                config.agent, max_ai_credits=config.campaign.max_ai_credits))
-    return {"checks": checks, "failed": sum(not item["ok"] for item in checks),
-            "inference": "never", "scope": "Selected backend and optionally provider help; no canaries, image pulls or installations"}
-
-
-def archive_campaign(state, confirm):
-    from labgoblin.db import connection
-    from labgoblin.processes import CampaignLease, process_state
-    if confirm != state.id:
-        raise ValueError("reset requires --confirm with the exact campaign ID from status")
-    with CampaignLease(state.root, exclusive=True):
-        with connection(state.path, lease=False) as conn:
-            current = conn.execute("SELECT id,controller FROM campaign").fetchone()
-            if current["id"] != confirm or not State._quiescent(conn):
-                raise ValueError("Reset requires the same quiescent campaign and fully released allocations")
-            if current["controller"] and process_state(json.loads(current["controller"])) != "dead":
-                raise ValueError("Reset refuses a live or unknown controller")
-            if conn.execute("SELECT 1 FROM attempts WHERE collection='pending' LIMIT 1").fetchone():
-                raise ValueError("Reset requires pending collection to finish; use stop and reconcile")
-            metadata = dict(conn.execute("SELECT key,value FROM meta"))
-        ledger_path = Path(metadata["ledger_path"])
-        if ledger_path.exists() or metadata["ledger_id"]:
-            ledger = ResourceLedger(ledger_path, expected_id=metadata["ledger_id"] or None)
-            with ledger.read() as conn:
-                row = conn.execute("""SELECT g.token FROM grants g LEFT JOIN consumer_runs r ON r.token=g.token
-                    WHERE g.state IN ('pending','granted') AND
-                    (g.owner_id=? OR json_extract(g.owner,'$.campaign_id')=?
-                    OR json_extract(r.envelope,'$.state_path')=?) LIMIT 1""",
-                    (state.id, state.id, str(state.path))).fetchone()
-            if row:
-                raise ValueError(f"Reset refuses unreleased machine consumer {row['token']}")
-        parent = contained(state.root.parent, state.root.name + "-archives")
-        parent.mkdir(exist_ok=True)
-        target = parent / ("campaign-" + identifier())
-        state.root.rename(target)
-        publish_bytes(target.with_name(target.name + ".lock"), b"\0")
-    return {"archived_campaign": state.id, "archive": str(target),
-            "retained": "Project configuration, goal, source files and shared machine ledger are unchanged",
-            "next": "Use init --existing-config --non-interactive with an explicit --ledger to create fresh state; no automatic research restart"}
+from labgoblin import credits, runtime
+from labgoblin.config import Config
+from labgoblin.paths import machine_ledger_path
+from labgoblin.protocol import UncertainExecution
+from labgoblin.scheduler import ResourceLedger
+from labgoblin.storage import read_text
 
 
 def parser():
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--project", default=argparse.SUPPRESS, help="Project root (default: current directory)")
-    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Emit structured JSON")
-    root = Parser(prog="labgoblin", description="Local autonomous research for Claude and Copilot")
-    root.add_argument("--project", default=environment_value("PROJECT", "."))
-    root.add_argument("--json", action="store_true")
-    root.add_argument("--version", action="version", version=__version__)
+    root = argparse.ArgumentParser(description="LabGoblin: an ordinary Copilot researcher with optional review and consultation")
     commands = root.add_subparsers(dest="command", required=True)
-
-    def command(name, help):
-        return commands.add_parser(name, help=help, parents=[common])
-
-    init = command("init", "Create fresh schema-4 local campaign state")
-    init.add_argument("--agent", choices=("claude", "copilot"), default="claude")
-    init.add_argument("--non-interactive", action="store_true", help="Use starter settings without Copilot authentication or inference")
-    init.add_argument("--setup-model", help="Model for the setup conversation, not the research campaign")
+    init = commands.add_parser("init", help="Create a fresh local project; never starts a model")
+    init.add_argument("project", nargs="?", default=".")
+    init.add_argument("--goal-file", type=Path)
+    init.add_argument("--model", default="auto")
+    init.add_argument("--reasoning-effort", default="medium")
+    init.add_argument("--credits", default="1000")
+    init.add_argument("--timeout", type=float, default=5400)
+    init.add_argument("--cpus", type=int, default=2)
+    init.add_argument("--memory-mb", type=int, default=4096)
+    init.add_argument("--gpu", action="append", default=[])
+    init.add_argument("--coach", action=argparse.BooleanOptionalAction, default=False)
+    init.add_argument("--max-stalled-reviews", type=int, default=10,
+                      help="Consecutive follow-up reviews without meaningful progress before an incomplete checkpoint")
+    init.add_argument("--consultant", action=argparse.BooleanOptionalAction, default=False,
+                      help="Allow bounded read-only adviser calls and public literature retrieval within the project pool")
     init.add_argument("--ledger", type=Path)
-    init.add_argument("--install-copilot-instructions", action="store_true")
-    init.add_argument("--existing-config", action="store_true", help="Initialize fresh state using an existing supported config, without migration")
-    instructions = command("instructions", "Explicitly install/update the owned research instructions section")
-    instructions.add_argument("--target", choices=("claude", "copilot"), required=True)
-    run = command("run", "Recover owned work and continue eligible research")
-    run.add_argument("--no-agent", action="store_true")
-    run.add_argument("--once", action="store_true")
-    for name in ("pause", "resume", "stop", "reopen"):
-        control = command(name, f"Request {name} with revision-fenced idempotency")
-        control.add_argument("--request-id")
-        control.add_argument("--expected-revision", type=int)
-    cancel = command("cancel", "Cancel an exact owned attempt")
-    cancel.add_argument("--id", required=True)
-    machine = command("machine", "Inspect or explicitly configure the shared machine ledger")
-    machine.add_argument("action", choices=("status", "configure", "reconcile"))
-    machine.add_argument("--ledger", type=Path)
-    machine.add_argument("--cpus", type=int)
-    machine.add_argument("--memory-mb", type=int)
-    machine.add_argument("--headroom-mb", type=int, default=2048)
-    machine.add_argument("--gpus", default="")
-    doctor_parser = command("doctor", "Run bounded model-free diagnostics, without inference or installation")
-    doctor_parser.add_argument("--runner")
-    doctor_parser.add_argument("--provider", action="store_true", help="Also inspect selected provider's help, never a model canary")
-    validate = command("validate", "Validate configuration and optionally an experiment manifest, without copying or launch")
-    validate.add_argument("--spec", type=Path)
-    schema = command("schema", "Show exact request fields and examples without configuration, state or inference")
-    schema.add_argument("kind", choices=("work", "research-update", "handoff"))
-    build = command("build", "Explicitly build a local Docker image using admitted resources and retained context")
-    build.add_argument("--runner", required=True)
-    build.add_argument("--context", type=Path, required=True)
-    build.add_argument("--include", action="append", required=True, help="Explicit relative source file; repeat as needed (Dockerfile always included)")
-    build.add_argument("--cpus", type=int, default=1, help="Build container CPUs; one additional client CPU is reserved")
-    build.add_argument("--memory-mb", type=int, default=1024, help="Build container RAM; 256 MiB client RAM is additionally reserved")
-    build.add_argument("--seconds", type=float, default=600, help="Positive build deadline and maximum capacity wait")
-    storage = command("storage", "Inspect owned sizes/references or review bounded retention candidates")
-    storage.add_argument("action", choices=("inventory", "retention"))
-    storage.add_argument("--dry-run", action="store_true")
-    storage.add_argument("--limit", type=int, default=25)
-    storage.add_argument("--offset", type=int, default=0)
-    dashboard = command("dashboard", "Serve the read-only loopback dashboard")
-    dashboard.add_argument("--port", type=int, default=8765)
-    dashboard.add_argument("--chat", action=argparse.BooleanOptionalAction, default=None,
-                           help="Enable on-demand observer chat (default); --no-chat overrides configuration")
-    dashboard.add_argument("--open-browser", action="store_true")
-    reset = command("reset", "Archive the exact supported quiescent campaign; never erase a ledger")
-    reset.add_argument("--confirm", required=True, help="Exact campaign ID")
-    submit = command("submit", "Enqueue one argv-form experiment manifest; see labgoblin schema work --json")
-    submit.add_argument("--spec", type=Path, required=True)
-    batch = command("batch-submit", "Enqueue all manifests, preserving per-item failures")
-    batch.add_argument("--file", type=Path, required=True)
-    command("status", "Observe campaign state without reconciliation or inference")
-    command("budget", "Observe finite/unlimited admission budgets")
-    credit_reconcile = command("reconcile-credits", "Append audited final provider usage without rewriting receipts")
-    credit_reconcile.add_argument("--id", required=True, help="Exact interrupted invocation ID")
-    credit_reconcile.add_argument("--file", type=Path, required=True, help="Final, identity-bound SDK usage record")
-    credit_reconcile.add_argument("--confirm", required=True, help="Exact campaign ID")
-    credit_reconcile.add_argument("--reason", required=True)
-    credit_estimate = command("estimate-credits", "Approve an audited budget estimate, not a final usage record")
-    credit_estimate.add_argument("--id", required=True, help="Exact interrupted invocation ID")
-    credit_estimate.add_argument("--credits", type=float, required=True, help="Estimated total credits for this invocation")
-    credit_estimate.add_argument("--confirm", required=True, help="Exact campaign ID")
-    credit_estimate.add_argument("--reason", required=True)
-    reconcile = command("reconcile", "Recover recorded launches without loading current TOML")
-    reconcile.add_argument("--state-dir", type=Path)
-    for name in ("logs", "errors"):
-        logs = command(name, "Read bounded owned stream tails")
-        logs.add_argument("--id", required=True, help="Attempt or invocation ID")
-        logs.add_argument("--stream", choices=("stdout", "stderr"), default="stderr" if name == "errors" else "stdout")
-        logs.add_argument("--bytes", type=int, default=64 * 1024)
-        logs.add_argument("--stage", choices=("main", "supervisor"), default="main")
-    evidence = command("evidence", "Retrieve exact evidence byte pages or stream a complete artifact to a file")
-    evidence.add_argument("kind", choices=("observation", "event"))
-    evidence.add_argument("--id", required=True)
-    evidence.add_argument("--offset", type=int, default=0)
-    evidence.add_argument("--bytes", type=int, default=64 * 1024)
-    evidence.add_argument("--export", type=Path, help="Stream the whole exact captured observation to a new file, never stdout")
-    history = command("journal", "Page journal sources or retrieve a retained entry")
-    history.add_argument("action", choices=("list", "entry", "search"))
-    history.add_argument("--id")
-    history.add_argument("--limit", type=int, default=20)
-    history.add_argument("--offset", type=int, default=0)
-    history.add_argument("--query")
-    history.add_argument("--after", type=int, default=0)
-    history.add_argument("--cutoff", type=int)
-    steer = command("steer", "Record an attributed, versioned operator constraint")
-    steering_text = steer.add_mutually_exclusive_group(required=True)
-    steering_text.add_argument("--text")
-    steering_text.add_argument("--file", type=Path)
-    steer.add_argument("--scope", default="campaign")
-    steer.add_argument("--supersedes")
-    steer.add_argument("--request-id")
-    source = command("source", "Read or commit an exact versioned goal/evaluation protocol")
-    source.add_argument("action", choices=("show", "set"))
-    source.add_argument("--kind", choices=("goal", "protocol"), required=True)
-    source_text = source.add_mutually_exclusive_group()
-    source_text.add_argument("--file", type=Path)
-    source_text.add_argument("--text")
-    source.add_argument("--expected-revision", type=int)
-    compact = command("compact", "Queue one scoped safe-point compaction request")
-    compact.add_argument("--no-agent", action="store_true", help="Only show archive coverage; do not request inference")
-    view = command("view", "Retrieve bounded pages of an exact retained research/report source view")
-    view.add_argument("--id", required=True)
-    view.add_argument("--offset", type=int, default=0)
-    view.add_argument("--limit", type=int, default=25)
-    view.add_argument("--attempt", help="Retrieve exact byte-paged member detail instead of inventory rows")
-    report = command("report", "Queue an immutable-source report, or publish an inventory without inference")
-    report.add_argument("--no-agent", action="store_true")
-    report.add_argument("--select", action="append", dest="selected", help="Select an attempt while retaining the full denominator")
-    report.add_argument("--selection-reason", default="Complete generation inventory")
-    result = command("results", "Page DB-backed results or export an immutable CSV snapshot")
-    result.add_argument("--generation", type=int)
-    result.add_argument("--hypothesis")
-    result.add_argument("--limit", type=int, default=25)
-    result.add_argument("--offset", type=int, default=0)
-    result.add_argument("--export", type=Path)
-    hypothesis = command("hypothesis", "Create/query a scientific claim with immutable evaluated statements")
-    hypothesis.add_argument("action", choices=("set", "show"))
-    hypothesis.add_argument("--id", required=True)
-    hypothesis.add_argument("--statement")
-    hypothesis.add_argument("--label", default="")
-    hypothesis.add_argument("--supersedes")
-    research = command("research", "Explicit research publication, revision retrieval, search and flat tasks")
-    research.add_argument("action", choices=("list", "search", "read", "history", "publish", "export", "task", "status", "work", "coach", "preflight", "complete", "memos", "request-memo"))
-    research.add_argument("--id")
-    research.add_argument("--file", type=Path, help="JSON research draft, task request or owned handoff for preflight")
-    research.add_argument("--query", default="")
-    research.add_argument("--limit", type=int, default=20)
-    research.add_argument("--offset", type=int, default=0)
-    research.add_argument("--cutoff", type=int)
-    research.add_argument("--output", type=Path)
-    research.add_argument("--decision", choices=("continue", "accept_stop"))
-    research.add_argument("--reason")
+    run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
+    run.add_argument("project", nargs="?", default=".")
+    run.add_argument("--resume", action="store_true", help="Explicitly continue from files, preserving all prior spending")
+    for name, help_text in (("status", "Read state and accounting without mutation"),
+                            ("stop", "Request bounded cancellation of this project's owned tree"),
+                            ("reconcile", "Recover only proven-dead owned executions; never starts research")):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("project", nargs="?", default=".")
+        if name == "reconcile":
+            command.add_argument("--inspection", action="store_true",
+                                 help="Recover only separately owned inspector executions")
+    record = commands.add_parser("record-usage", help="Append operator-confirmed final usage or an explicitly labeled estimate")
+    record.add_argument("project", nargs="?", default=".")
+    record.add_argument("--run", required=True)
+    record.add_argument("--credits", required=True)
+    record.add_argument("--reason", required=True)
+    record.add_argument("--confirm", required=True, help="Exact project ID")
+    record.add_argument("--estimate", action="store_true")
+    record.add_argument("--inspection", action="store_true", help="Record only separate inspection spending")
+    inspect = commands.add_parser("inspect", help="Open a read-only local research inspector; no model calls until a question")
+    inspect.add_argument("project", nargs="?", default=".")
+    inspect.add_argument("--port", type=int, default=0, help="Loopback port; zero chooses an available port")
+    inspect.add_argument("--open", action="store_true", help="Open the printed token-qualified URL in your browser")
+    inspect.add_argument("--credits", help="Explicit separate cumulative inspection soft cap; omitted means view-only")
+    inspect.add_argument("--model", help="Explicit inspection model, required when enabling paid questions")
+    inspect.add_argument("--reasoning-effort", default="medium")
+    inspect.add_argument("--timeout", type=float, default=300, help="Per-question deadline including shutdown")
+    machine = commands.add_parser("machine", help="Explicit shared native resource capacity")
+    machine_commands = machine.add_subparsers(dest="machine_command", required=True)
+    show = machine_commands.add_parser("status")
+    show.add_argument("--ledger", type=Path, default=machine_ledger_path())
+    configure = machine_commands.add_parser("configure")
+    configure.add_argument("--ledger", type=Path, default=machine_ledger_path())
+    configure.add_argument("--cpus", type=int, required=True)
+    configure.add_argument("--memory-mb", type=int, required=True)
+    configure.add_argument("--headroom-mb", type=int, default=2048)
+    configure.add_argument("--gpu", action="append", default=[])
     return root
 
 
-def _record_retrieval(state, reference_id):
-    turn_id = environment_value("TURN_ID")
-    if turn_id:
-        state.retrieved(turn_id, reference_id)
-
-
-def execute(args):
-    root = Path(args.project).resolve()
-    turn_id = environment_value("TURN_ID")
-    if turn_id and args.command in ("init", "run", "pause", "resume", "stop", "reopen", "reconcile", "machine", "instructions", "dashboard"):
-        raise ValueError("Research roles cannot operate campaign controllers or machine configuration")
-    if args.command == "init":
-        return initialize(args)
-    if args.command == "doctor":
-        return doctor(root, args)
-    if args.command == "schema":
-        from labgoblin.research_memory import publication_schema
-        if args.kind == "handoff":
-            from labgoblin.protocol import handoff_schema
-            return handoff_schema()
-        return workspace.request_schema() if args.kind == "work" else publication_schema()
-    paths = project_paths(root)
-    if args.command == "validate":
-        config = load_config(paths.config)
-        state = State.open(paths.state) if args.spec and present(paths.state) else None
-        result = workspace.validate_spec(config, read_json(args.spec, 65536), state=state) if args.spec else {
-            "valid": True, "revision": config.revision, "schema_version": 4, "inference": "never"}
-        return {**result, "configuration_scope": "Disk candidate; not activated"}
-    if args.command == "dashboard":
-        from labgoblin.dashboard import run_dashboard
-        if not 0 <= args.port <= 65535:
-            raise ValueError("Dashboard port must be between 0 and 65535")
-        run_dashboard(str(paths.config), args.port, chat=args.chat,
-                      open_browser=args.open_browser, json_output=args.json)
-        return None
-    if args.command == "instructions":
-        target = root / ("CLAUDE.md" if args.target == "claude" else ".github")
-        if args.target == "copilot":
-            target /= "copilot-instructions.md"
-        _instructions(target, State.open(paths.state))
-        return {"path": str(target), "owned_section": SECTION_START}
-    if args.command == "machine":
-        project_state = State.open(paths.state) if args.ledger is None and present(paths.state) else None
-        recorded, identity = project_state.ledger_identity() if project_state else (ledger_path(), "")
-        location = args.ledger or recorded
-        if args.action == "configure":
-            if args.cpus is None or args.memory_mb is None:
-                raise ValueError("machine configure requires --cpus and --memory-mb")
-            if identity and not Path(location).exists():
-                raise ValueError("The recorded machine ledger is missing; it will not be replaced with empty capacity")
-            ledger = ResourceLedger(location, expected_id=identity or None) if Path(location).exists() else ResourceLedger.create(location)
-            ledger.configure(args.cpus, args.memory_mb, tuple(filter(None, args.gpus.split(","))), args.headroom_mb)
-        else:
-            ledger = ResourceLedger(location, expected_id=identity or None)
-        recovery = ledger.recover_consumers() if args.action == "reconcile" else []
-        return {"ledger_id": ledger.id, "path": str(ledger.path), "capacity": ledger.capacity(), "grants": ledger.rows(),
-                "consumer_recovery": recovery, "errors": [row for row in recovery if row.get("error")]}
-    state = State.open(args.state_dir if args.command == "reconcile" and args.state_dir else paths.state)
-    if args.command == "research":
-        from labgoblin import research_memory, research_tools
-        if args.action == "request-memo":
-            if turn_id:
-                raise ValueError("Only the operator requests a supervisor memo; researchers supply it with their result")
-            from labgoblin.supervisor_memos import request
-            return request(state, args.reason, request_id=args.id)
-        if args.action in ("preflight", "complete"):
-            if args.file is None:
-                raise ValueError(f"Handoff {args.action} requires --file")
-            operation = research_tools.preflight if args.action == "preflight" else research_tools.complete
-            return operation(state, read_json(args.file, 16384), turn_id=turn_id,
-                             invocation_id=environment_value("INVOCATION_ID"))
-        if args.action == "publish":
-            if args.file is None:
-                raise ValueError("Publication requires --file pointing to a JSON draft under research")
-            return research_memory.publish_file(state, args.file, turn_id=turn_id)
-        if args.action == "export":
-            if not args.id or args.output is None:
-                raise ValueError("Export requires --id and --output")
-            return research_memory.export(state, args.id, args.output, turn_id=turn_id)
-        if args.action == "task":
-            if args.file is None:
-                raise ValueError("Task operation requires --file")
-            return research_tools.task(state, read_json(args.file, 32768), turn_id=turn_id)
-        if args.action == "coach":
-            if turn_id:
-                raise ValueError("Request coaching in your handoff; only the operator resolves a review")
-            from labgoblin.coaching import resolve
-            return resolve(state, args.id, args.decision, args.reason)
-        request = {"operation": "record" if args.action == "read" else args.action}
-        if args.id:
-            request["id"] = args.id
-        if args.action in ("list", "search", "history", "memos", "work"):
-            request.update(query=args.query, offset=args.offset, limit=args.limit)
-            if args.cutoff is not None:
-                request["cutoff"] = args.cutoff
-        return research_tools.read(state, request, turn_id=turn_id)
-    if args.command == "build":
-        if environment_value("TURN_ID"):
-            raise ValueError("Image builds are explicit operator operations, not nested research-turn work")
-        from labgoblin.backends import build
-        return build(state, None, args.runner, args.context, args.include,
-                     cpus=args.cpus, memory_mb=args.memory_mb, timeout=args.seconds)
-    if args.command == "storage":
-        if args.action == "retention":
-            if not args.dry_run:
-                raise ValueError("Retention is dry-run only; pass --dry-run. No delete/apply mode exists.")
-            return retention_candidates(state, limit=args.limit, offset=args.offset)
-        return storage_inventory(state, limit=args.limit, offset=args.offset)
-    if args.command == "reset":
-        if environment_value("TURN_ID"):
-            raise ValueError("A research turn cannot archive its own campaign")
-        return archive_campaign(state, args.confirm)
-    if args.command == "run":
-        return Campaign(state=state).run(no_agent=args.no_agent, once=args.once)
-    if args.command in ("pause", "resume", "stop", "reopen"):
-        revision = state.campaign()["revision"] if args.expected_revision is None else args.expected_revision
-        value = state.control(args.command, args.request_id or identifier(), revision)
-        recovery = Campaign(state=state).reconcile()
-        return {**value, "campaign": state.campaign(), "recovery": recovery, "errors": recovery["errors"]}
-    if args.command == "cancel":
-        if turn_id:
-            from labgoblin.research_memory import actor
-            with state.db.read() as conn:
-                owner = actor(conn, turn_id, write=True)
-                target = state.attempt(args.id)
-                if owner["scope_id"] != "root" and owner["scope_id"] != target["scope_id"]:
-                    raise ValueError("Workers may cancel only their own attempts")
-        value = state.cancel_attempt(args.id)
-        recovery = Campaign(state=state).reconcile()
-        return {**value, "attempt": state.attempt(args.id), "recovery": recovery, "errors": recovery["errors"]}
-    if args.command == "status":
-        return {"campaign": state.campaign(), "budget": state.budget(), "results": results.page(state.db)}
-    if args.command == "budget":
-        return state.budget()
-    if args.command == "reconcile-credits":
-        if environment_value("TURN_ID"):
-            raise ValueError("Credit reconciliation is an explicit operator operation, not a research action")
-        value = state.reconcile_credit(args.id, read_bytes(args.file, 256 * 1024),
-                                       confirm=args.confirm, reason=args.reason)
-        return {**value, "ai_credits": state.credit_budget()}
-    if args.command == "estimate-credits":
-        if environment_value("TURN_ID"):
-            raise ValueError("Credit estimation is an explicit operator operation, not a research action")
-        value = state.estimate_credit(args.id, args.credits, confirm=args.confirm, reason=args.reason)
-        return {**value, "ai_credits": state.credit_budget()}
-    if args.command == "steer":
-        if environment_value("TURN_ID"):
-            raise ValueError("A research turn cannot author or revoke operator constraints")
-        body = read_bytes(args.file, 65536).decode("utf-8") if args.file else args.text
-        return state.directive(body, scope=args.scope, supersedes=args.supersedes, request_id=args.request_id)
-    if args.command == "source":
-        with state.db.read() as conn:
-            head = conn.execute("SELECT source_id,revision FROM source_heads WHERE name=?", (args.kind,)).fetchone()
-        if args.action == "show":
-            if not head:
-                raise ValueError("No retained source revision exists for this kind")
-            _record_retrieval(state, head["source_id"])
-            return {**journal.entry(state.db, head["source_id"]), "head_revision": head["revision"]}
-        if environment_value("TURN_ID"):
-            raise ValueError("Research turns cannot replace the operator goal or evaluation protocol")
-        if args.file is None and args.text is None:
-            raise ValueError("Source set requires --file or --text")
-        body = read_bytes(args.file, 1024 * 1024) if args.file else args.text.encode("utf-8")
-        body.decode("utf-8")
-        metadata, fence = {}, None
-        if args.kind == "goal":
-            config, fence = state.configuration()
-            path = contained(config.root, config.project.research_goal)
-            metadata["observed_file_digest"] = Capture.read(path, 1024 * 1024).digest
-        source_id = state.source(args.kind, body, origin="operator-command", head=args.kind,
-                                 expected_revision=args.expected_revision if args.expected_revision is not None else
-                                 (head["revision"] if head else 0), metadata=metadata, notify=True,
-                                 configuration_fence=fence)
-        return journal.entry(state.db, source_id)
-    if args.command == "compact":
-        if args.no_agent:
-            return {**journal.page(state.db), "inference": "not_requested",
-                    "reason": "Exact archive access remains available without a summary invocation"}
-        if environment_value("TURN_ID"):
-            raise ValueError("Request researcher maintenance in the owned handoff, not as an operator command")
-        return state.request_maintenance("compact")
-    if args.command == "report":
-        if environment_value("TURN_ID"):
-            raise ValueError("Request report maintenance in the owned handoff")
-        options = reporting.selection_options(args.selected, args.selection_reason)
-        if args.no_agent:
-            view = reporting.seal_view(state, **options)
-            return reporting.publish_report(state, view["id"])
-        return state.request_maintenance("report", options=options)
-    if args.command == "view":
-        if args.attempt:
-            return reporting.member(state.db, args.id, args.attempt, offset=args.offset)
-        value = reporting.page(state.db, args.id, offset=args.offset, limit=args.limit)
-        turn_id = environment_value("TURN_ID")
-        if turn_id:
-            state.retrieved_view(turn_id, value)
+def credit_value(value):
+    if value == "unlimited":
         return value
-    if args.command == "reconcile":
-        return {**Campaign(state=state).reconcile(), "campaign": state.campaign()}
-    if args.command in ("submit", "batch-submit"):
-        if args.command == "submit":
-            attempt = workspace.submit(state, None, read_json(args.spec, 65536),
-                                       turn_id=environment_value("TURN_ID"))
-            return {"attempt_id": attempt["id"], "status": attempt["status"]}
-        data = read_json(args.file)
-        manifests = data.get("experiments") if isinstance(data, dict) else data
-        if not isinstance(manifests, list) or not manifests:
-            raise ValueError("Batch must contain a nonempty experiments array")
-        items = []
-        for manifest in manifests:
-            try:
-                attempt = workspace.submit(state, None, manifest, turn_id=environment_value("TURN_ID"))
-                items.append({"ok": True, "attempt_id": attempt["id"], "status": attempt["status"]})
-            except (OSError, ValueError, sqlite3.Error) as error:
-                items.append({"ok": False, "error": str(error)[:4000]})
-        return {"items": items, "failed": sum(not item["ok"] for item in items)}
-    if args.command in ("logs", "errors"):
-        if args.bytes > 64 * 1024:
-            raise ValueError("Log responses cannot exceed 64 KiB")
-        with state.db.read() as conn:
-            row = conn.execute("SELECT envelope FROM launches WHERE work_id=? ORDER BY created DESC LIMIT 1",
-                               (args.id,)).fetchone()
-        if row is None:
-            raise ValueError("No owned launch exists for this work ID")
-        from labgoblin.protocol import LaunchEnvelope
-        from labgoblin.worker import launch_directory
-        envelope = LaunchEnvelope.parse(json.loads(row["envelope"]))
-        directory = launch_directory(envelope)
-        path = contained(state.root, directory / (
-            f"supervisor.{args.stream}.log" if args.stage == "supervisor" else Path("main") / f"{args.stream}.log"))
-        return {"work_id": args.id, "stream": args.stream, **tail(path, limit=args.bytes)}
-    if args.command == "evidence":
-        if args.export and (args.kind != "observation" or args.offset):
-            raise ValueError("Artifact export requires an observation ID and no byte offset")
-        if args.kind == "event":
-            value = briefing.event(state.db, args.id, offset=args.offset, limit=args.bytes)
-        elif args.export:
-            value = export_observation(state.db, args.id, args.export)
-        else:
-            value = observation_page(state.db, args.id, offset=args.offset, limit=args.bytes)
-            body = value.pop("body")
-            if body is not None:
-                import base64
-                value["base64"] = base64.b64encode(body).decode("ascii")
-        _record_retrieval(state, args.id)
-        return value
-    if args.command == "journal":
-        if args.action == "entry":
-            if not args.id:
-                raise ValueError("journal entry requires --id")
-            value = journal.entry(state.db, args.id)
-            _record_retrieval(state, args.id)
-            return value
-        if args.action == "search":
-            value = journal.search(state.db, args.query, after=args.after, cutoff=args.cutoff)
-            for match in value["matches"]:
-                _record_retrieval(state, match["id"])
-            return value
-        return journal.page(state.db, limit=args.limit, offset=args.offset, cutoff=args.cutoff)
-    if args.command == "results":
-        if args.export:
-            if args.hypothesis:
-                raise ValueError("CSV export scopes by generation, not a hidden hypothesis subset")
-            return results.export(state.db, args.export, generation=args.generation)
-        return results.page(state.db, generation=args.generation, hypothesis_id=args.hypothesis,
-                            limit=args.limit, offset=args.offset)
-    if args.command == "hypothesis":
-        if args.action == "set":
-            state.hypothesis(args.id, args.statement, label=args.label, supersedes=args.supersedes,
-                             turn_id=environment_value("TURN_ID"))
-        return results.hypothesis(state.db, args.id)
-    raise ValueError(f"Unknown command: {args.command}")
-
-
-def main(argv=None):
-    argv = sys.argv[1:] if argv is None else argv
     try:
-        args = parser().parse_args(argv)
-        value = execute(args)
-        if value is None:
+        scaled = Decimal(value)
+    except ArithmeticError as error:
+        raise ValueError("Credits must be a number or 'unlimited'") from error
+    if not scaled.is_finite() or scaled < 0 or scaled * credits.NANO != (scaled * credits.NANO).to_integral_value():
+        raise ValueError("Credits must be nonnegative and have at most nine decimal places")
+    return int(scaled) if scaled == scaled.to_integral_value() else float(scaled)
+
+
+def main(arguments=None):
+    args = parser().parse_args(arguments)
+    try:
+        if args.command == "init":
+            config = Config(model=args.model, reasoning_effort=args.reasoning_effort,
+                            max_ai_credits=credit_value(args.credits), timeout_seconds=args.timeout,
+                            cpus=args.cpus, memory_mb=args.memory_mb, gpus=tuple(args.gpu),
+                            coach=args.coach, max_stalled_reviews=args.max_stalled_reviews, consultant=args.consultant,
+                            ledger=str(args.ledger.resolve()) if args.ledger else "")
+            result = runtime.initialize(args.project, config,
+                                        goal=read_text(args.goal_file) if args.goal_file else None)
+        elif args.command == "run":
+            result = runtime.run(args.project, resume=args.resume)
+        elif args.command == "status":
+            result = runtime.status(args.project)
+        elif args.command == "stop":
+            result = runtime.stop(args.project)
+        elif args.command == "reconcile":
+            if args.inspection:
+                from labgoblin.inspector import Inspector
+                result = Inspector(args.project).reconcile()
+            else:
+                result = runtime.reconcile(args.project)
+        elif args.command == "record-usage":
+            value = credit_value(args.credits)
+            if value == "unlimited":
+                raise ValueError("Usage must be an actual numeric amount")
+            amount = int(Decimal(str(value)) * credits.NANO)
+            if args.inspection:
+                from labgoblin.inspector import Inspector
+                result = Inspector(args.project).record_usage(args.run, amount, args.reason,
+                                                              confirmation=args.confirm, estimated=args.estimate)
+            else:
+                result = runtime.record_usage(args.project, args.run, amount, args.reason,
+                                              confirmation=args.confirm, estimated=args.estimate)
+        elif args.command == "inspect":
+            from labgoblin.inspector import Inspector
+            from labgoblin.inspection_server import serve
+            inspector = Inspector(args.project)
+            if args.credits is not None:
+                inspector.approve(credit_value(args.credits), model=args.model,
+                                  reasoning_effort=args.reasoning_effort, timeout=args.timeout)
+            serve(inspector, port=args.port, chat=args.credits is not None, open_browser=args.open)
             return 0
-        failed = bool(value.get("failed") or value.get("errors") or value.get("unresolved")
-                      or value.get("campaign", {}).get("blockers"))
-        print(json.dumps(value, indent=2, allow_nan=False))
-        return 1 if failed else 0
-    except (KeyboardInterrupt, EOFError):
-        if "--json" in argv:
-            print(json.dumps({"cancelled": True, "reason": "Operator cancelled"}))
         else:
-            print("labgoblin: cancelled", file=sys.stderr)
+            if args.machine_command == "configure":
+                ledger = (ResourceLedger(args.ledger) if args.ledger.exists()
+                          else ResourceLedger.create(args.ledger))
+                ledger.configure(args.cpus, args.memory_mb, tuple(args.gpu), args.headroom_mb)
+            else:
+                ledger = ResourceLedger(args.ledger)
+            result = {"id": ledger.id, "path": str(ledger.path), "capacity": ledger.capacity(), "grants": ledger.rows()}
+        print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+        if args.command == "run" and result["status"] != "completed":
+            return 1
+        return 0
+    except KeyboardInterrupt:
+        print(json.dumps({"error": ("Inspector closed; research was not stopped" if args.command == "inspect" else
+                                  "Cancellation requested; allow the owned worker to settle, then inspect status")}),
+              file=sys.stderr)
         return 130
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
-        detail = {"error": {"type": type(error).__name__, "message": str(error)[:4000]}}
-        if "--json" in argv:
-            print(json.dumps(detail, allow_nan=False))
-        else:
-            print(f"labgoblin: {detail['error']['message']}", file=sys.stderr)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, UncertainExecution) as error:
+        print(json.dumps({"error": {"type": type(error).__name__, "message": str(error)}},
+                         ensure_ascii=False), file=sys.stderr)
         return 1
 
 

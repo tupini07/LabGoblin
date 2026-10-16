@@ -29,57 +29,6 @@ def temporary_directory(*, prefix):
                 time.sleep(0.05)
 
 
-class CampaignLease:
-    """Shared reader lifetime versus an exclusive, fail-fast archive/reset."""
-
-    def __init__(self, root: Path, *, exclusive=False):
-        root = Path(root)
-        self.path = root.with_name(root.name + ".lock")
-        self.exclusive = exclusive
-        self.handle = None
-
-    def __enter__(self):
-        if os.name == "nt":
-            import pywintypes
-            import win32con
-            import win32file
-            self.handle = win32file.CreateFile(
-                str(self.path), win32con.GENERIC_READ,
-                win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE,
-                None, win32con.OPEN_EXISTING, 0, None)
-            self.overlapped = pywintypes.OVERLAPPED()
-            flags = win32con.LOCKFILE_FAIL_IMMEDIATELY | (win32con.LOCKFILE_EXCLUSIVE_LOCK if self.exclusive else 0)
-            try:
-                win32file.LockFileEx(self.handle, flags, 0, 1, self.overlapped)
-            except pywintypes.error as error:
-                self.handle.Close()
-                self.handle = None
-                raise ValueError("Campaign has live readers or an archive/reset in progress") from error
-        else:
-            import fcntl
-            self.handle = self.path.open("rb")
-            try:
-                fcntl.flock(self.handle, (fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-            except OSError as error:
-                self.handle.close()
-                self.handle = None
-                raise ValueError("Campaign has live readers or an archive/reset in progress") from error
-        return self
-
-    def close(self):
-        if self.handle is not None:
-            if os.name == "nt":
-                import win32file
-                win32file.UnlockFileEx(self.handle, 0, 1, self.overlapped)
-                self.handle.Close()
-            else:
-                self.handle.close()
-            self.handle = None
-
-    def __exit__(self, *args):
-        self.close()
-
-
 class BoundedDiagnostic(io.TextIOBase):
     def __init__(self, stream, limit=65536):
         if type(limit) is not int or limit <= 0:

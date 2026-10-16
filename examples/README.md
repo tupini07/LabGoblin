@@ -8,4 +8,4 @@ scientific reports**. Their recorded methods, cluster references, figures and
 conclusions are preserved, not ported into claims about the current runtime.
 Their generator scripts are historical material, not supported runtime tools,
 and neither those scripts nor the historical report bundles are published in
-the v2 package.
+the current package.

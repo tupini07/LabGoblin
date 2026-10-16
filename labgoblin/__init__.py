@@ -1,3 +1,3 @@
 """LabGoblin: local autonomous research, derived from Roger Creus Castanyer's xgenius."""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"

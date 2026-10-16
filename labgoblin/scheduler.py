@@ -4,14 +4,16 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
-import re
 import sqlite3
 import time
 
 from labgoblin.db import connection
 from labgoblin import credits
 from labgoblin.paths import machine_ledger_path
-from labgoblin.protocol import LEDGER_VERSION, Resources, canonical, fingerprint, identifier, integer, require_version, text
+from labgoblin.protocol import (
+    LEDGER_VERSION, LaunchEnvelope, LaunchReceipt, Resources, canonical, fingerprint, identifier, integer,
+    require_version, text,
+)
 
 
 APPLICATION_ID = 0x58474C33
@@ -42,6 +44,57 @@ CREATE INDEX consumer_runs_phase ON consumer_runs(phase,created);
 """
 
 
+def _wire_envelope(envelope, *, inspection=False):
+    # Preserve the ledger's v3 exchange shape so installed legacy readers can observe pending runs.
+    return {
+        "protocol": 3,
+        "key": {"campaign_id": envelope.project_id, "generation": 1, "work_id": envelope.id,
+                "grant_id": envelope.id, "nonce": envelope.id},
+        "kind": "observer" if inspection else "research", "argv": list(envelope.argv), "cwd": envelope.project, "root": envelope.root,
+        "state_path": str(Path(envelope.project) / ".labgoblin" / "project.json"),
+        "ledger_path": envelope.ledger_path, "ledger_id": envelope.ledger_id,
+        "timeout_seconds": envelope.config["timeout_seconds"], "resources": asdict(envelope.resources),
+        "config_revision": fingerprint(envelope.config), "environment": {},
+        "metadata": {"simple_envelope": asdict(envelope), "credit_allowance_nano": envelope.allowance_nano},
+    }
+
+
+def _wire_receipt(receipt, envelope, *, inspection=False):
+    wire = _wire_envelope(envelope, inspection=inspection)
+    return {
+        "protocol": 3, "key": wire["key"],
+        "envelope_digest": fingerprint(wire),
+        "status": receipt.status if receipt.status in
+        ("completed", "failed", "cancelled", "timed_out", "interrupted", "not_started") else "failed",
+        "quiescent": receipt.quiescent, "elapsed": receipt.elapsed, "returncode": receipt.returncode,
+        "reason": receipt.reason, "executed": receipt.executed, "usage": receipt.usage,
+        "metadata": {"simple_receipt": asdict(receipt), "partial_usage": receipt.metadata.get("partial_usage")},
+    }
+
+
+def _consumer(row):
+    if row is None:
+        return None
+    row = dict(row)
+    wire = json.loads(row["envelope"])
+    if "simple_envelope" not in wire.get("metadata", {}):
+        raise ValueError("This is not a simplified research execution; use its owning installed runtime")
+    envelope = LaunchEnvelope.parse(wire["metadata"]["simple_envelope"])
+    inspection = wire.get("kind") == "observer"
+    expected = _wire_envelope(envelope, inspection=inspection)
+    if canonical(wire) != canonical(expected) or row["digest"] != fingerprint(expected) or row["token"] != envelope.id:
+        raise ValueError("Ledger envelope identity mismatch")
+    row["envelope"], row["digest"] = canonical(asdict(envelope)).decode(), envelope.digest
+    if row["receipt"]:
+        wire_receipt = json.loads(row["receipt"])
+        receipt = LaunchReceipt.parse(wire_receipt["metadata"]["simple_receipt"])
+        if canonical(wire_receipt) != canonical(_wire_receipt(receipt, envelope, inspection=inspection)):
+            raise ValueError("Ledger receipt identity mismatch")
+        row["receipt"] = canonical(asdict(receipt)).decode()
+    row["inspection"] = inspection
+    return row
+
+
 def ledger_path() -> Path:
     return machine_ledger_path()
 
@@ -63,9 +116,9 @@ def sample_machine(gpus: tuple[str, ...] = ()) -> MachineSample:
     cpus = tuple(process.cpu_affinity()) if hasattr(process, "cpu_affinity") else tuple(range(os.cpu_count() or 1))
     visible, busy = set(), set()
     if gpus:
-        from labgoblin.backends import command
+        from labgoblin.payload import probe
         for query, target in (("--query-gpu=uuid", visible), ("--query-compute-apps=gpu_uuid", busy)):
-            output = command(["nvidia-smi", query, "--format=csv,noheader"], timeout=10)
+            output = probe(["nvidia-smi", query, "--format=csv,noheader"], timeout=10)
             target.update(line.strip() for line in output.splitlines() if line.strip())
     return MachineSample(cpus, memory.total // (1024 * 1024), memory.available // (1024 * 1024),
                          frozenset(visible), frozenset(busy),
@@ -74,28 +127,14 @@ def sample_machine(gpus: tuple[str, ...] = ()) -> MachineSample:
 
 def request_eligible(row: dict) -> tuple[bool, str]:
     """Observe owners outside the ledger writer transaction."""
-    from labgoblin.processes import alive
-    from labgoblin.state import State
+    from labgoblin.processes import process_state
     try:
         owner = json.loads(row["owner"])
-        if owner["kind"] in ("observer", "build"):
-            return (True, "") if alive(owner["handle"]) else (False, "Consumer owner is unavailable")
-        state = State.open(owner["state_dir"])
-        with state.db.read() as conn:
-            campaign = dict(conn.execute("SELECT * FROM campaign").fetchone())
-            allocation = conn.execute("SELECT state,revision FROM allocations WHERE token=?", (row["token"],)).fetchone()
-            maintenance = conn.execute("""SELECT 1 FROM maintenance WHERE turn_id=? AND origin='operator'
-                AND state='running' AND revision=? AND generation=?""",
-                                       (row["work_id"], campaign["revision"], campaign["generation"])).fetchone()
-        if (state.id != row["owner_id"] or campaign["generation"] != owner["generation"]
-                or campaign["revision"] != owner["revision"]
-                or not allocation or allocation["state"] not in ("requested", "granted", "attached")):
-            return False, "Admission intent was superseded or revoked"
-        if campaign["operator_mode"] not in (("ready", "running", "stopped") if maintenance else ("ready", "running")):
-            return False, "Campaign operator intent prevents admission"
-        if not campaign["controller"] or not alive(json.loads(campaign["controller"])):
-            return False, "Controller is not currently available to accept a grant"
-        return True, ""
+        if owner["kind"] not in ("research-run", "inspection-run"):
+            # Other installed runtimes retain responsibility for their own admission intent.
+            return bool(row["eligible"]), row["reason"]
+        state = process_state(owner["handle"])
+        return (True, "") if state == "alive" else (False, f"Research controller ownership is {state}")
     except (OSError, sqlite3.Error, ValueError, RuntimeError, KeyError) as error:
         return False, f"Admission owner cannot be verified: {error}"
 
@@ -192,15 +231,12 @@ class ResourceLedger:
                 owner: dict, *, native: bool) -> dict:
         for label, value in (("token", token), ("owner_id", owner_id), ("work_id", work_id), ("kind", kind)):
             text(value, label)
-        if owner.get("kind") not in ("campaign", "observer", "build"):
-            raise ValueError("Resource owner must be a campaign, observer or explicit build")
-        if owner["kind"] in ("observer", "build"):
-            handle = owner.get("handle")
-            if (not isinstance(handle, dict) or type(handle.get("pid")) is not int
-                    or type(handle.get("created")) not in (int, float) or handle.get("token") != owner_id):
-                raise ValueError("Consumer owner requires an exact PID, creation time and consumer identity")
-        if type(native) is not bool:
-            raise ValueError("native placement selection must be boolean")
+        if kind not in ("research-run", "inspection-run") or owner.get("kind") != kind or native is not True:
+            raise ValueError("This runtime admits only native research or read-only inspection runs")
+        handle = owner.get("handle")
+        if (not isinstance(handle, dict) or type(handle.get("pid")) is not int
+                or type(handle.get("created")) not in (int, float) or handle.get("token") != owner_id):
+            raise ValueError("Research owner requires an exact PID, creation time and project identity")
         request = {"owner_id": owner_id, "work_id": work_id, "kind": kind,
                    "resources": asdict(resources), "owner": owner, "native": native}
         digest = fingerprint(request)
@@ -313,123 +349,89 @@ class ResourceLedger:
             row = conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone()
             return dict(row) if row else None
 
-    def arm_consumer(self, envelope, *, max_invocations: int | None = None):
-        if envelope.kind == "observer":
-            integer(max_invocations, "observer invocation allowance")
-        elif envelope.kind != "build" or max_invocations is not None:
-            raise ValueError("Only observers and explicit builds have machine-owned authorizations")
+    def arm_consumer(self, envelope, *, adjustments=None, inspection=False):
+        from labgoblin.config import Config
+        config = Config.parse(envelope.config)
+        kind = "inspection-run" if inspection else "research-run"
+        if inspection and (config.coach or config.consultant or config.gpus or config.credit_limit is None):
+            raise ValueError("Inspection requires a finite separate allowance and no research roles or GPUs")
         if envelope.ledger_id != self.id or Path(envelope.ledger_path) != self.path:
-            raise ValueError("Consumer authorization has the wrong ledger identity")
-        key = envelope.key
-        expected_root = self.path.parent / (envelope.kind + "s") / key.campaign_id / key.grant_id
-        if (not all(re.fullmatch(r"[a-f0-9]{32}", item) for item in (key.campaign_id, key.grant_id))
-                or Path(envelope.root).resolve() != expected_root.resolve()):
-            raise ValueError("Consumer transport root must belong to its exact consumer and grant")
+            raise ValueError("Research authorization has the wrong ledger identity")
+        expected_root = Path(envelope.project) / ".labgoblin" / "runs" / envelope.id
+        if Path(envelope.root).resolve() != expected_root.resolve():
+            raise ValueError("Execution directory must belong to its exact project and grant")
         with self.write() as conn:
-            grant = conn.execute("SELECT * FROM grants WHERE token=?", (key.grant_id,)).fetchone()
-            if (not grant or grant["state"] != "granted" or grant["owner_id"] != key.campaign_id
-                    or grant["work_id"] != key.work_id or json.loads(grant["owner"]).get("kind") != envelope.kind
-                    or grant["kind"] != envelope.kind or bool(grant["native"]) != (envelope.kind == "observer")
+            grant = conn.execute("SELECT * FROM grants WHERE token=?", (envelope.id,)).fetchone()
+            if (not grant or grant["state"] != "granted" or grant["owner_id"] != envelope.project_id
+                    or grant["work_id"] != envelope.id or grant["kind"] != kind or not grant["native"]
+                    or json.loads(grant["owner"]) != {"kind": kind, "handle": envelope.launcher}
                     or grant["cpus"] != envelope.resources.cpus or grant["memory_mb"] != envelope.resources.memory_mb
                     or json.loads(grant["gpus"]) != list(envelope.resources.gpus)
-                    or json.loads(grant["native_cpus"]) != envelope.metadata.get("cpu_ids")):
-                raise ValueError("Consumer authorization differs from its machine grant")
-            old = conn.execute("SELECT digest FROM consumer_runs WHERE token=?", (key.grant_id,)).fetchone()
+                    or json.loads(grant["native_cpus"]) != list(envelope.cpu_ids)):
+                raise ValueError("Research authorization differs from its machine grant")
+            old = conn.execute("SELECT digest FROM consumer_runs WHERE token=?", (envelope.id,)).fetchone()
             if old:
-                if old["digest"] != envelope.digest:
-                    raise ValueError("Consumer grant was already armed with another envelope")
-                return
-            if max_invocations is not None:
-                used = conn.execute("""SELECT COUNT(*) FROM consumer_runs r JOIN grants g ON g.token=r.token
-                    WHERE g.owner_id=? AND g.kind='observer'""", (key.campaign_id,)).fetchone()[0]
-                if used >= max_invocations:
-                    raise ValueError("Dashboard observer invocation allowance exhausted; no automatic retries")
-                limit = envelope.metadata.get("max_ai_credits")
-                campaign_id = json.loads(grant["owner"]).get("campaign_id")
-                if limit is not None:
-                    credits.parse_limit(limit, "observer AI credit allowance")
-                    if not campaign_id or envelope.metadata.get("credit_campaign_id") != campaign_id:
-                        raise ValueError("Observer credit allowance lacks its exact campaign scope")
-                    allowance = credits.available(self.observer_credit_budget(campaign_id, limit, connection=conn))
-                    if envelope.metadata.get("credit_allowance_nano") != allowance:
-                        raise ValueError("Observer credit allowance changed before arming; retry admission")
+                raise ValueError("A research grant is one-use and was already armed")
+            rows = self._runs(conn, envelope.project_id, inspection=inspection)
+            budget = credits.summarize(rows, config.credit_limit, adjustments=adjustments)
+            if envelope.allowance_nano != credits.available(budget, coach=config.coach, consultant=config.consultant):
+                raise ValueError("Research allowance changed before arming")
             conn.execute("INSERT INTO consumer_runs(token,envelope,digest,phase,created) VALUES(?,?,?,'armed',?)",
-                         (key.grant_id, canonical(asdict(envelope)).decode(), envelope.digest, time.time()))
+                         (envelope.id, canonical(_wire_envelope(envelope, inspection=inspection)).decode(),
+                          fingerprint(_wire_envelope(envelope, inspection=inspection)), time.time()))
 
     def claim_consumer(self, envelope, handle: dict) -> bool:
         if (type(handle.get("pid")) is not int or type(handle.get("created")) not in (int, float)
-                or handle.get("token") != envelope.key.nonce):
+                or handle.get("token") != envelope.id):
             raise ValueError("Consumer claim requires its exact supervisor incarnation")
         with self.write() as conn:
-            row = conn.execute("SELECT digest,phase FROM consumer_runs WHERE token=?", (envelope.key.grant_id,)).fetchone()
-            grant = conn.execute("SELECT state FROM grants WHERE token=?", (envelope.key.grant_id,)).fetchone()
+            row = _consumer(conn.execute("SELECT * FROM consumer_runs WHERE token=?", (envelope.id,)).fetchone())
+            grant = conn.execute("SELECT state FROM grants WHERE token=?", (envelope.id,)).fetchone()
             if not row or row["digest"] != envelope.digest or not grant or grant["state"] != "granted":
                 raise ValueError("Consumer launch lacks its matching armed grant")
             if row["phase"] != "armed":
                 return False
             conn.execute("UPDATE consumer_runs SET phase='executing',supervisor=? WHERE token=?",
-                         (canonical(handle).decode(), envelope.key.grant_id))
+                         (canonical(handle).decode(), envelope.id))
             return True
 
     def finish_consumer(self, receipt):
-        from labgoblin.protocol import LaunchEnvelope
         with self.write() as conn:
-            row = conn.execute("SELECT * FROM consumer_runs WHERE token=?", (receipt.key.grant_id,)).fetchone()
+            row = _consumer(conn.execute("SELECT * FROM consumer_runs WHERE token=?", (receipt.id,)).fetchone())
             if row is None:
                 raise ValueError("No armed consumer owns this receipt")
             envelope = LaunchEnvelope.parse(json.loads(row["envelope"]))
-            if receipt.key != envelope.key or receipt.envelope_digest != envelope.digest:
+            if receipt.id != envelope.id or receipt.envelope_digest != envelope.digest:
                 raise ValueError("Consumer receipt ownership mismatch")
             encoded = canonical(asdict(receipt)).decode()
             if row["receipt"] and row["receipt"] != encoded:
                 raise ValueError("Consumer already has a different terminal receipt")
+            if row["phase"] == "armed":
+                from labgoblin.processes import process_state
+                if (receipt.executed or receipt.status != "not_started" or row["supervisor"] is not None
+                        or process_state(envelope.launcher) != "dead"):
+                    raise ValueError("Pre-claim recovery requires the exact dead launcher and no committed claim")
+            elif row["phase"] == "executing" and receipt.metadata.get("supervisor") != json.loads(row["supervisor"]):
+                raise ValueError("Receipt does not identify its committed supervisor")
             conn.execute("UPDATE consumer_runs SET phase='quiescent',receipt=?,ended=? WHERE token=?",
-                         (encoded, time.time(), receipt.key.grant_id))
+                         (canonical(_wire_receipt(receipt, envelope, inspection=row["inspection"])).decode(), time.time(), receipt.id))
             conn.execute("UPDATE grants SET state='released',released=?,reason='' WHERE token=? AND state!='released'",
-                         (time.time(), receipt.key.grant_id))
+                         (time.time(), receipt.id))
 
     def consumer_run(self, token) -> dict | None:
         with self.read() as conn:
             row = conn.execute("SELECT * FROM consumer_runs WHERE token=?", (token,)).fetchone()
-            return dict(row) if row else None
+            return _consumer(row)
 
-    def observer_usage(self, owner_id) -> dict:
+    @staticmethod
+    def _runs(conn, project_id, *, inspection=False):
+        return [_consumer(row) for row in conn.execute("""SELECT r.* FROM consumer_runs r
+            JOIN grants g ON g.token=r.token WHERE g.owner_id=? AND g.kind=?
+            ORDER BY r.created,r.token""", (project_id, "inspection-run" if inspection else "research-run"))]
+
+    def runs(self, project_id, *, inspection=False):
         with self.read() as conn:
-            counts = {row["phase"]: row["count"] for row in conn.execute("""SELECT r.phase,COUNT(*) AS count
-                FROM consumer_runs r JOIN grants g ON g.token=r.token
-                WHERE g.owner_id=? AND g.kind='observer' GROUP BY r.phase""", (owner_id,))}
-        return {"committed": sum(counts.values()), "phases": counts,
-                "scope": "Invocation count is per dashboard process; AI credit accounting is separate"}
-
-    def observer_credit_budget(self, campaign_id, limit, *, connection=None):
-        from contextlib import nullcontext
-        with self.read() if connection is None else nullcontext(connection) as conn:
-            rows = conn.execute("""SELECT r.envelope,r.receipt,r.phase FROM consumer_runs r
-                JOIN grants g ON g.token=r.token WHERE g.kind='observer'
-                AND json_extract(g.owner,'$.campaign_id')=?""", (campaign_id,))
-            return {**credits.summarize(rows, limit),
-                    "scope": "Dashboard chat for this campaign across dashboard restarts; excludes research and setup"}
-
-    def recover_consumers(self) -> list[dict]:
-        from labgoblin.evidence import read_json
-        from labgoblin.protocol import LaunchEnvelope, LaunchReceipt
-        with self.read() as conn:
-            pending = [dict(row) for row in conn.execute(
-                "SELECT token,envelope FROM consumer_runs WHERE phase!='quiescent' ORDER BY created LIMIT 128")]
-        outcomes = []
-        for row in pending:
-            envelope = LaunchEnvelope.parse(json.loads(row["envelope"]))
-            receipt_path = Path(envelope.root) / "backend-receipt.json"
-            if receipt_path.exists():
-                try:
-                    self.finish_consumer(LaunchReceipt.parse(read_json(receipt_path)))
-                    outcomes.append({"token": row["token"], "state": "released"})
-                except (OSError, ValueError, sqlite3.Error) as error:
-                    outcomes.append({"token": row["token"], "error": str(error)})
-            else:
-                outcomes.append({"token": row["token"], "state": "awaiting_owned_receipt",
-                                 "reason": "Missing receipt is not proof of non-execution or quiescence"})
-        return outcomes
+            return self._runs(conn, project_id, inspection=inspection)
 
     def rows(self, *, limit: int = 100, offset: int = 0, history: bool = False) -> list[dict]:
         integer(limit, "limit")

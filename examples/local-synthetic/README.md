@@ -1,35 +1,40 @@
-# Synthetic mean-shift study
+# Small local example
 
-Copy this directory into a new, dedicated project before running. The example
-uses generated `[2, 4, 6]` values, no private data, dependencies, network or GPUs.
+This deterministic example is for understanding the files and launch path, not
+for measuring research quality. No dataset, GPU or third-party experiment
+dependency is needed.
+
+To run just the experiment without inference:
 
 ```powershell
-labgoblin init --non-interactive --agent copilot
-labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
-labgoblin batch-submit --file batch.json --json
-labgoblin run --no-agent --json
-labgoblin results --json
-labgoblin report --no-agent --json
-labgoblin dashboard --open-browser
+python experiment.py --offset 0 --output artifacts\baseline.json
+python experiment.py --offset 0 --output artifacts\replication.json
+python experiment.py --offset 1 --output artifacts\changed.json
 ```
 
-These operations make **no model calls**. Inspect the baseline/replication means
-of 4 and shifted mean of 5. Process completion and a deterministic report are
-not a model-assessed research closure. Stop this mechanical run with `labgoblin
-stop`, or run `labgoblin run` to explicitly authorize the configured research
-provider to assess the evidence within its reviewed budgets.
+The three means are 4, 4 and 5. These are ordinary commands/files; there is no
+experiment manifest or special output environment variable.
 
-For an autonomous exercise from fresh state, omit manual batch submission and
-start `labgoblin run`; the research goal asks the agent to submit that batch.
-Review its provider/model/effort and resources first.
+To let the researcher investigate the question, copy this directory to a fresh
+workspace, install/authenticate Copilot explicitly, and choose a spending limit:
 
-To exercise a prepared WSL/Docker runner, add it to `labgoblin.toml` following
-`docs/local-research.md`, then change each manifest's `runner` before submission
-(or give changed requests new keys). Native Python is selected by init; guest
-Python must already exist. Never pull an image or install into shared
-environments implicitly. The optional Dockerfile can be built explicitly with
-`build --runner container --context . --include experiment.py`; the approved
-`python:3.11-slim` base must already be present.
+```powershell
+labgoblin init . --model auto --credits 300
+labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
+labgoblin run .
+```
 
-This is a runtime demonstration, not a statistically interesting experiment.
-Only the fixed inputs and stated arithmetic claim are supported by its evidence.
+The existing `research_goal.md` is preserved. Initialization is model-free;
+`run` **uses paid inference**. Add `--coach` at initialization to include a stopping
+review in the same spending pool. Inspect `report.md`, `artifacts`,
+`labgoblin status .` and the immutable execution directory under `.labgoblin\runs`.
+
+The installed-wheel qualification uses a fixed local SDK protocol double and
+does not authenticate or call a real model:
+
+```powershell
+python -I tests\installed_smoke.py --root NEW_EMPTY_DIRECTORY
+```
+
+Run that command using the separately installed wheel's interpreter, not an
+editable source installation.
