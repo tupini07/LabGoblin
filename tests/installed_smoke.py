@@ -50,7 +50,7 @@ assert read_json(snapshot / "artifacts" / "metrics.json")["means"] == [4, 4, 5]
 assert runtime.status(project)["budget"]["remaining"] == 290
 assert not ledger.rows()
 consulting = root / "consulting"
-runtime.initialize(consulting, Config(cpus=1, memory_mb=1024, timeout_seconds=60,
+runtime.initialize(consulting, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
                                      coach=True, consultant=True, max_ai_credits=1000, ledger=str(ledger.path)),
                    goal="Qualify a model-free research and coach consultation.")
 publish_json(consulting / "fixture-provider.json", {"model_free": True, "root": str(consulting),
@@ -62,7 +62,7 @@ assert len([s for s in advised["usage"]["sessions"] if s["role"].startswith("con
 assert len(list((consulting / "artifacts" / "consultations").glob("*.md"))) == 2
 assert not ledger.rows()
 claim_review = root / "claim-review"
-runtime.initialize(claim_review, Config(cpus=1, memory_mb=1024, timeout_seconds=60,
+runtime.initialize(claim_review, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
                                        coach=True, consultant=True, max_ai_credits=1000, ledger=str(ledger.path)),
                    goal="Determine whether x*x-x is nonnegative for all real x.")
 publish_json(claim_review / "fixture-provider.json", {"model_free": True, "root": str(claim_review),
@@ -79,8 +79,23 @@ assert claim_brief["purpose"] == "claim_review"
 assert hash_file(claim_run / "snapshot" / claim_brief["artifact"]) == claim_brief["artifact_sha256"]
 assert claim_decisions[1]["consultations"] == []
 assert not ledger.rows()
+critic_project = root / "closure-critic"
+runtime.initialize(critic_project, Config(cpus=1, memory_mb=1024, timeout_seconds=1800,
+                                         coach=True, consultant=True, closure_critic=True,
+                                         max_ai_credits=300, ledger=str(ledger.path)),
+                   goal="Determine whether x*x-x is nonnegative for all real x.")
+publish_json(critic_project / "fixture-provider.json", {
+    "model_free": True, "root": str(critic_project), "mode": "closure_critic"})
+critic_result = runtime.run(critic_project)
+assert critic_result["status"] == "completed", critic_result
+assert critic_result["usage"]["totalNanoAiu"] == 100_000_000_000
+assert [s["prompts"] for s in critic_result["usage"]["sessions"]] == [3, 1, 2, 1, 2, 1]
+critic_run = critic_project / ".labgoblin" / "runs" / critic_result["id"]
+assert read_json(critic_run / "snapshot" / "artifacts" / "closure-counterexample.json") == {"x": "1/2", "value": "-1/4"}
+assert [read_json(critic_run / f"review-{i}.json")["decision"] for i in range(3)] == ["accept", "continue", "accept"]
+assert not ledger.rows()
 closing = root / "closing"
-runtime.initialize(closing, Config(cpus=1, memory_mb=1024, timeout_seconds=60,
+runtime.initialize(closing, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
                                   coach=True, max_ai_credits=300, ledger=str(ledger.path)),
                    goal="Qualify useful work after provisional stopping approval.")
 publish_json(closing / "fixture-provider.json", {"model_free": True, "root": str(closing),
@@ -155,6 +170,7 @@ print(json.dumps({"model_free": True, "package": labgoblin.__file__, "project_id
                   "run_id": result["id"], "mean": read_json(metrics)["mean"], "status": result["status"],
                   "consultation_run_id": advised["id"], "consultation_status": advised["status"],
                   "claim_review_run_id": reviewed["id"], "claim_review_status": reviewed["status"],
+                  "closure_critic_run_id": critic_result["id"], "closure_critic_status": critic_result["status"],
                   "closing_run_id": challenged["id"], "closing_status": challenged["status"],
                   "progress_run_id": progressed["id"], "progress_status": progressed["status"],
                   "checkpoint_run_id": checkpoint["id"], "checkpoint_status": checkpoint["status"],

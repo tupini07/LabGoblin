@@ -23,6 +23,7 @@ class Config:
     coach: bool = False
     max_stalled_reviews: int = 10
     consultant: bool = False
+    closure_critic: bool = False
     ledger: str = ""
     max_snapshot_bytes: int = 64 * 1024 * 1024 * 1024
 
@@ -39,6 +40,9 @@ class Config:
         boolean(self.coach, "coach")
         integer(self.max_stalled_reviews, "max_stalled_reviews")
         boolean(self.consultant, "consultant")
+        boolean(self.closure_critic, "closure_critic")
+        if self.closure_critic and not (self.coach and self.consultant):
+            raise ValueError("closure_critic requires both coach and consultant")
         if self.coach and self.max_ai_credits != "unlimited" and self.max_ai_credits < 60:
             raise ValueError("Coaching requires at least 60 credits for a researcher and stopping review")
         if self.consultant and self.max_ai_credits != "unlimited" and self.max_ai_credits < (90 if self.coach else 60):

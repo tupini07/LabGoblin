@@ -214,6 +214,7 @@ def usage_record(envelope, *, complete):
     if not isinstance(sessions, list) or not sessions:
         raise ValueError("Usage must identify its owned provider sessions")
     roles, amount, research_prompts = set(), 0, 0
+    adjudications = []
     progress_reviews = "max_stalled_reviews" in envelope.config
     for session in sessions:
         table(session, "provider session")
@@ -234,10 +235,18 @@ def usage_record(envelope, *, complete):
         prompts = integer(session.get("prompts"), "session prompt count", zero=True)
         if role == "researcher":
             research_prompts = prompts
-        if ((role != "researcher" and prompts > 1)
+        adjudication = (coach and role != "coach-0" and envelope.config.get("closure_critic", False)
+                        and envelope.config.get("consultant", False))
+        if ((role != "researcher" and prompts > (2 if adjudication else 1))
                 or (role == "researcher" and not (progress_reviews and envelope.config["coach"])
                     and prompts > (2 if envelope.config["coach"] else 1))):
             raise ValueError("Usage exceeds the bounded research/review conversation")
+        if adjudication and prompts == 2:
+            reference = read_json(Path(envelope.root) / "sessions" / role / "closure-adjudication.json")
+            proposal = read_json(Path(envelope.root) / f"review-{role.split('-')[1]}-proposal.json")
+            if proposal.get("decision") != "accept" or not reference.get("artifact_sha256"):
+                raise ValueError("Extra coach prompt lacks a retained proposed acceptance and closure critique")
+            adjudications.append((role, reference))
         amount += credits.usage_nano(session["usage"]) if session.get("usage") is not None else 0
         roles.add(role)
     if "researcher" not in roles or ("coach-1" in roles and "coach-0" not in roles) or amount != credits.usage_nano(value):
@@ -245,6 +254,17 @@ def usage_record(envelope, *, complete):
     advisers = {role for role in roles if role.startswith("consult-")}
     if advisers != {f"consult-{index}" for index in range(len(advisers))}:
         raise ValueError("Consultation usage must retain every admitted adviser session")
+    for coach_role, reference in adjudications:
+        adviser_role = reference.get("adviser_role")
+        if adviser_role not in advisers:
+            raise ValueError("Adjudication does not name an owned adviser")
+        directory = Path(envelope.root) / "sessions" / adviser_role
+        request, response = read_json(directory / "request.json"), read_json(directory / "response.json")
+        if (request.get("purpose") != "closure_critique" or request.get("caller") != coach_role
+                or request.get("caller_session_id") != str(uuid.uuid5(uuid.UUID(envelope.id), coach_role))
+                or response.get("status") != "completed" or response.get("purpose") != "closure_critique"
+                or any(response.get(key) != reference.get(key) for key in ("artifact", "artifact_sha256", "adviser_role"))):
+            raise ValueError("Extra coach prompt is not bound to its completed independent closure critique")
     coaches = {role for role in roles if role.startswith("coach-")}
     if coaches != {f"coach-{index}" for index in range(len(coaches))}:
         raise ValueError("Stopping-review usage must retain every admitted coach session")

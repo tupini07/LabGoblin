@@ -86,6 +86,17 @@ def exercise():
             return
         if invoke_tool("labgoblin_read_evidence", {"path": "research-notes.md"}) is None:
             return
+        if CONFIG.get("mode") == "closure_critic":
+            if CONFIG.get("image") and invoke_tool("labgoblin_read_image", {"path": CONFIG["image"]}) is None:
+                return
+            answer = ("The retained exact interior-point counterexample answers the original all-real question; "
+                      "no compelling continuation remains within the checked scope."
+                      if (ROOT / "artifacts" / "closure-counterexample.json").exists() else
+                      "The original all-real goal is unanswered: x=1/2 is a feasible untested control. "
+                      "Compute x*x-x there rather than treating two endpoint zeros as enough evidence.")
+            event("assistant.message", {"messageId": str(uuid.uuid4()), "content": answer})
+            event("session.idle", {})
+            return
         event("assistant.message", {"messageId": str(uuid.uuid4()),
                                    "content": "Counterexample: x=1/2 gives x*x-x=-1/4. The two samples do not prove nonnegativity."
                                               if CONFIG.get("mode") == "claim_review" else
@@ -131,6 +142,22 @@ def exercise():
                             progress_reason="artifacts/claim-counterexample.json contains a new exact refutation, not review prose.")
         if decision == "checkpoint":
             args["checkpoint_reason"] = CONFIG["checkpoint_reason"]
+        if CONFIG.get("mode") == "closure_critic" and COACH_INDEX > 1:
+            args.update(decision="accept", question="", progress="none")
+            if REQUESTS == 2:
+                args["critique_response"] = (
+                    "The critic's interior-point objection matters to the original all-real goal. "
+                    "An exact retained computation, not a narrowed report, is needed."
+                    if COACH_INDEX == 2 else
+                    "Inspected artifacts/closure-counterexample.json: x=1/2 gives -1/4. "
+                    "This refutes the original all-real claim and resolves the critic's objection.")
+                if COACH_INDEX == 2:
+                    args.update(decision="continue", question="Does the all-real claim survive the feasible interior-point control?")
+                else:
+                    if invoke_tool("labgoblin_read_evidence", {"path": "artifacts/closure-counterexample.json"}) is None:
+                        return
+                    args.update(progress="meaningful",
+                                progress_reason="The new exact counterexample refutes the original claim; critic prose alone did not.")
         if invoke_tool("labgoblin_review_decision", args) is None:
             return
         event("assistant.message", {"messageId": str(uuid.uuid4()), "content": "The fixed stopping review is recorded."})
@@ -195,6 +222,20 @@ def exercise():
             (output / "claim-counterexample.json").write_text(control, encoding="utf-8")
             (ROOT / "report.md").write_text("The all-real nonnegativity claim is false: at x=1/2 the value is -1/4.\n",
                                           encoding="utf-8")
+    if CONFIG.get("mode") == "closure_critic":
+        claim = "Claim: two zeros at x=0 and x=1 justify ending investigation of whether x*x-x >= 0 for all real x."
+        if REQUESTS < 3:
+            (ROOT / "research-notes.md").write_text(claim, encoding="utf-8")
+            (ROOT / "report.md").write_text(claim, encoding="utf-8")
+        else:
+            control = subprocess.check_output([
+                selected_python, "-I", "-c",
+                "import json;from fractions import Fraction;x=Fraction(1,2);"
+                "print(json.dumps({'x':str(x),'value':str(x*x-x)}))",
+            ], stdin=subprocess.DEVNULL, text=True, timeout=10)
+            (output / "closure-counterexample.json").write_text(control, encoding="utf-8")
+            for name in ("research-notes.md", "report.md"):
+                (ROOT / name).write_text("The exact x=1/2 counterexample gives -1/4; the all-real claim is false.\n", encoding="utf-8")
     if CONFIG.get("mode", "").startswith("consult") and REQUESTS == 1 and CONFIG.get("caller", "researcher") in ("researcher", "both"):
         if invoke_tool("labgoblin_consult", {"question": "What does this known-answer control establish?",
                                            "evidence_paths": ["research-notes.md"]}) is None:
@@ -266,7 +307,7 @@ while True:
         }
     elif method == "session.send":
         REQUESTS += 1
-        if ROLE == "inspector" or CONFIG.get("mode") in ("closing_challenge", "progress_reviews", "claim_review"):
+        if ROLE == "inspector" or CONFIG.get("mode") in ("closing_challenge", "progress_reviews", "claim_review", "closure_critic"):
             (ROOT / f"fixture-prompt-{SESSION}-{REQUESTS}.txt").write_text(params["prompt"], encoding="utf-8")
         result = {"messageId": str(uuid.uuid4())}
     else:

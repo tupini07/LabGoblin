@@ -37,6 +37,15 @@ The adviser challenges assumptions and looks for counterexamples; objections
 return to the same researcher. This is not a compulsory reviewer at every stop,
 an independent experimental reproduction, or scientific certification.
 
+For an independently framed challenge to **ending the investigation**, enable
+`closure_critic = true` alongside coaching and consultation (or initialize with
+`--coach --consultant --closure-critic`). Before final acceptance, a fresh
+adversarial critic searches for the strongest evidence-backed reason to continue,
+without being told the coach approved stopping. The same coach must explicitly
+adjudicate that objection, then continue the same researcher or accept. The critic
+can inspect bounded PNG/JPEG images but cannot run experiments or veto stopping.
+Failed criticism is not acceptance; hard limits and operator stops still prevail.
+
 An on-demand **read-only inspector** provides local browser chat, cited evidence,
 images and factual execution/spending status. It never attaches to or steers the
 researcher. Browsing is model-free; questions require an explicitly authorized,
@@ -140,7 +149,15 @@ Researcher, coach and advisers all share the same project pool. Consultation
 headroom is reserved before assigning caller limits: 10% of the remaining
 allowance, at least 30 and at most 300 credits (300 for an unlimited project).
 The reserve is shared across consultations, not renewed for each call.
-Each consultation has at most five minutes, within the original run deadline.
+With closure criticism enabled, the host may repartition unused project allowance
+at the settled, idle stopping boundary, after reducing the coach's commitment.
+The critic may use the unspent pool except protected coach/researcher allowance;
+it has no separate credit or evidence-operation cap. After settled criticism,
+unused allowance returns to the coach and ordinary consultation reserve.
+Ordinary consultations have at most five minutes. The critic has at most two
+hours, bounded by the campaign deadline with ten minutes retained for coach
+adjudication. The coach itself has no separate time cap. The critic sees its own
+deadline and refreshed remaining time; individual evidence payloads stay bounded.
 See the operating guide for exact bounds, failure behavior and retained artifacts.
 
 Each execution keeps frozen instructions/configuration/helpers, bounded provider

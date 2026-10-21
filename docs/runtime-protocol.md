@@ -148,6 +148,43 @@ Target selection, reuse after evidence changes and scientific interpretation are
 fallible model judgments, not a host-certified proof or a mandatory per-stop call.
 The inspector remains an explainer; it gains no scientific-review/control role.
 
+With explicit `closure_critic` plus coach/consultant flags, a follow-up coach's
+acceptance is retained as a proposal. A host-only `closure_critique` purpose
+reuses an ordinary owned `consult-N` session, not the model-facing consultation
+purpose enum. It receives the original goal/stopping response and bounded evidence,
+not the coach's approval. The same coach receives one additional adjudication
+prompt and must record `critique_response`; failure cannot apply the proposal.
+There is one critic/adjudication exchange per prospective final stopping case,
+not a recursive deciding hierarchy. Researcher continuation and the stalled
+counter retain their original semantics.
+
+Allocation requires every existing session settled, idle and with known usage.
+An earlier failed adviser does not block later closure once its usage has settled
+and shutdown succeeds. Successful shutdown clears its in-flight marker; this
+does not turn its failed answer into a successful consultation. Incomplete
+settlement or shutdown still blocks further inference.
+The host reduces the finite coach's cumulative ceiling before reassigning unused
+pool capacity to the critic, protecting adjudication and, where possible, future
+research. The critic has no independent credit cap. After known, settled
+criticism, the coach receives unused capacity again; ordinary adviser headroom
+is restored up to its previous unspent amount. Both transfers have unique
+allowance revision records, plus closure allocation/settlement records. No
+exhausted session is renewed, no waiting caller is updated and no old spend
+disappears. Criticism lasts at most 7200 seconds including shutdown, reserves
+600 seconds for adjudication and is bounded by the original execution deadline.
+Critic prompts identify both deadlines; evidence results refresh response time
+remaining. The coach remains bounded by the execution deadline only.
+Insufficient capacity is review-unavailable, never silently skipped approval.
+
+Only enabled follow-up coaches can have two prompts; the initial coach and all
+advisers retain one-prompt bounds. Usage binds the second prompt to a retained
+acceptance proposal and the exact completed owned closure-critique response.
+Legacy frozen records retain the previous bounds and bytes. Critic and enabled
+coach image tools reuse the inspector's PNG/JPEG size/dimension validation but
+not its state access. Critic read/image counts are uncapped, unlike the coach's
+128 reads/eight images. Each image is at most 4 MiB, retained in a bounded
+6-MiB evidence record; ordinary pages keep their 128-KiB retention bound.
+
 The driver records exact session IDs, requested limits, events, final responses,
 per-prompt settled metrics and role-level final usage. Only observed idle plus
 successful metrics collection establishes a settled prompt. Sending another

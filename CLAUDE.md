@@ -72,6 +72,16 @@ and a persisted allowance outside the evaluated research project.
   A coach must await an active consultation before deciding. Review arguments,
   not reviewer agreement; preserve scope/coverage and return objections to the
   same researcher. No compulsory review on every stop or proof-certification claim.
+  Explicit closure_critic mode is the exception for discretionary final acceptance:
+  retain the proposal, independently challenge it, then require same-coach
+  adjudication. The critic has no veto. Failed criticism never applies preliminary
+  approval; only settled idle boundaries may repartition known unused credits.
+  Extra coach prompts require exact owned critique records; old bounds remain.
+  The critic has a two-hour maximum inside the campaign deadline, reserving ten
+  minutes for adjudication, and no independent credit/read/image-count cap.
+  Preserve bounded individual evidence payloads and protected caller allowance.
+  Return unused critic funding only after settlement; ordinary adviser limits
+  stay unchanged. Show the critic its own response deadline and remaining time.
 - Partial usage cannot prove final spending. Unknown usage blocks new admission.
   Operator estimates are explicit, receipt-bound, additive records separate from
   reported usage; later final evidence never rewrites historical receipts.

@@ -152,6 +152,29 @@ tool error, not a fabricated success or another automatic research continuation.
 
 ## What this does not guarantee
 
+An optional **adversarial closure critic** changes the objective of a fresh
+reviewer: find a substantiated case against stopping, rather than collaborate
+on defending the report. Enable `closure_critic` with coaching and consultation.
+It is host-triggered before discretionary final acceptance, not every experiment
+or ordinary continuation. The preliminary coach approval is withheld from it.
+The existing coach explicitly adjudicates the strongest objection in its same
+session, then either continues the researcher or accepts a supported stop.
+No new deciding role, critic veto or experimental branch is introduced.
+
+A useful objection links an original-goal consequence to evidence and a feasible
+discriminating continuation. A speculative objection, an already answered control,
+or a demand to solve every gap in one step is not enough. Conversely, repairing
+an overclaim by narrowing the report does not alone answer an unmet original
+goal. Prior briefs remain available to avoid repeated objections. Critic prose
+does not reset the stalled-review counter. Failed/unfunded criticism leaves an
+explicit incomplete outcome rather than falling back to preliminary approval.
+All role costs stay in the existing pool and deadline. The critic is a skeptical
+research colleague, not a psychological reviewer: it has up to two hours for
+evidence-grounded challenge, no separate credit/read/image-count cap, and a
+visible response deadline. Individual payloads stay bounded. Ten minutes remain
+for adjudication; the coach itself shares the campaign deadline without a
+separate time cap. These are operational ceilings, not targets for longer work.
+
 The coach is a process reviewer, not an independent execution of the benchmark.
 Its `coverage` text is an attributed claim, not a machine-verified scientific
 inventory. Reports and normal working files can be wrong. A robust evaluation

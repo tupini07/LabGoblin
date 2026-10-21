@@ -63,7 +63,7 @@ class FakeSession:
 
     async def update(self, request):
         self.updates.append(request.session_limits.max_ai_credits)
-        return Value({"success": True})
+        return Value({"success": not self.script.get("update_error", False)})
 
     def event(self, kind, **data):
         self.options["on_event"](Event(kind, **data))
@@ -106,27 +106,30 @@ class FakeSession:
         await self.finish()
 
     async def finish(self):
+        script = {**self.script, **self.script.get("turns", [{}] * len(self.prompts))[len(self.prompts) - 1]}
         if self.script.get("error"):
             self.event("session.error", message="ordinary failure", error_type="ordinary")
             self.event("session.error", message="quota failure", error_type="session_limits_exhausted")
-        if "decision" in self.script:
+        if "decision" in script and not script.get("no_decision"):
             tools = self.options["tools"]
             tool = next(tool for tool in tools if tool.name == "labgoblin_review_decision")
             args = {
-                "decision": self.script["decision"], "reason": "A meaningful stopping assessment",
+                "decision": script["decision"], "reason": script.get("reason", "A meaningful stopping assessment"),
                 "question": "Does the result hold on the required second family?",
                 "coverage": "Read the supplied goal and retained answer; geometry not independently recomputed",
             }
             if self.prompts[-1].startswith("Stopping review after researcher follow-up"):
-                args.update(progress=self.script.get("progress", "none"),
-                            progress_reason=self.script.get("progress_reason", "The fixture supplies no changed scientific evidence."))
-            if self.script["decision"] == "needs_operator":
+                args.update(progress=script.get("progress", "none"),
+                            progress_reason=script.get("progress_reason", "The fixture supplies no changed scientific evidence."))
+            if "critique_response" in script:
+                args["critique_response"] = script["critique_response"]
+            if script["decision"] == "needs_operator":
                 args.update(dependency="permission", question="May I access the required unavailable input?")
-            if self.script["decision"] == "checkpoint":
-                args["checkpoint_reason"] = self.script["checkpoint_reason"]
+            if script["decision"] == "checkpoint":
+                args["checkpoint_reason"] = script["checkpoint_reason"]
             result = await tool.handler(SimpleNamespace(tool_name="labgoblin_review_decision", arguments=args))
-            assert result.result_type == "success"
-        self.event("assistant.message", content=self.script.get("answer", "Research answer with retained evidence"))
+            assert result.result_type == script.get("decision_result_type", "success")
+        self.event("assistant.message", content=script.get("answer", "Research answer with retained evidence"))
         if self.script.get("quota"):
             self.event("session.info", info_type="session_limits",
                        message="Session limit reached. Increase or unset the session limit to continue.")

@@ -33,6 +33,8 @@ def parser():
                       help="Consecutive follow-up reviews without meaningful progress before an incomplete checkpoint")
     init.add_argument("--consultant", action=argparse.BooleanOptionalAction, default=False,
                       help="Allow bounded read-only adviser calls and public literature retrieval within the project pool")
+    init.add_argument("--closure-critic", action=argparse.BooleanOptionalAction, default=False,
+                      help="Require an independent challenge and coach adjudication before final acceptance; requires coach and consultant")
     init.add_argument("--ledger", type=Path)
     run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
     run.add_argument("project", nargs="?", default=".")
@@ -94,6 +96,7 @@ def main(arguments=None):
                             max_ai_credits=credit_value(args.credits), timeout_seconds=args.timeout,
                             cpus=args.cpus, memory_mb=args.memory_mb, gpus=tuple(args.gpu),
                             coach=args.coach, max_stalled_reviews=args.max_stalled_reviews, consultant=args.consultant,
+                            closure_critic=args.closure_critic,
                             ledger=str(args.ledger.resolve()) if args.ledger else "")
             result = runtime.initialize(args.project, config,
                                         goal=read_text(args.goal_file) if args.goal_file else None)

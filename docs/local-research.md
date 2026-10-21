@@ -38,7 +38,9 @@ cpus = 2
 memory_mb = 4096
 gpus = []
 coach = false
+max_stalled_reviews = 10
 consultant = false
+closure_critic = false
 ledger = ""
 max_snapshot_bytes = 68719476736
 ```
@@ -279,6 +281,68 @@ Invalid requests and settled adviser failures return explicit tool errors.
 Missing final adviser usage blocks further inference and leaves total usage
 unknown, not zero. A failed consultation or unsuccessful literature lookup is
 not evidence that all scientific avenues have been exhausted.
+
+### Adversarial closure criticism
+
+`closure_critic = true` requires both `coach = true` and `consultant = true`.
+For fresh projects use `init --coach --consultant --closure-critic`. It defaults
+off, including in old frozen format-5 records. Enable it before a new execution;
+resuming preserves cumulative spending and the completed execution's evidence.
+
+The initial neutral challenge and ordinary coach continuations are unchanged.
+When a later coach proposes final acceptance, the host retains that proposal
+and starts a fresh adviser with a different mandate: find the strongest
+substantiated reason to continue toward the original goal, not help defend the
+researcher's stopping case. The critic receives the original goal, scope,
+researcher's response and actual remaining time/resources, not the preliminary
+coach verdict. It can browse notes, artifacts and prior briefs. No compelling
+objection is a legitimate limited result; speculation is not compulsory work.
+
+The same coach then receives the critique and records one adjudicated decision.
+Its required `critique_response` addresses the strongest objection, consequence
+for the original goal, and evidence supporting continuation or dismissal.
+Narrowing a claim does not automatically justify stopping on an unmet goal.
+Useful objections return to the same researcher, who chooses the method.
+Adjudication is not another researcher turn or another progress-counter increment.
+There is no critic veto, repeated critic/coach debate inside this decision, or
+automatic restart. A later researcher stopping proposal may receive a fresh
+challenge; both roles should inspect prior briefs rather than repeat answered
+objections. Semantic freshness and scientific judgment remain fallible.
+
+Critic and enabled coaches also have `labgoblin_read_image(path)`: PNG/JPEG
+files each at most 4 MiB, 16 million pixels and 16384 pixels
+per dimension. Exact bytes and hashes are retained before SDK image delivery.
+SVG/HTML, external paths, credentials and runtime state are rejected. Existing
+ordinary advisers remain text-only. Image viewing is not numerical reproduction.
+Coaches retain their 128-read/eight-image count limits. The critic has no
+read-count or image-count cap; each evidence record remains size-bounded.
+
+Only at a verified settled/idle boundary can the host repartition the existing
+pool. The critic can use the unspent pool except the coach's minimum adjudication
+allowance and, where feasible, protected researcher/future-review headroom.
+It has no separate credit cap, including in an unlimited project. The finite
+coach's cumulative limit is reduced before funding the critic. After settled
+criticism, unused funds return to the coach and the ordinary consultation reserve;
+the latter never exceeds its previously unused amount. No waiting caller's
+commitment is updated or overlapped, and all prior spending remains counted.
+
+The critic gets at most two hours including shutdown, with ten minutes retained
+for subsequent adjudication inside the original campaign deadline. It receives
+its own remaining response time and absolute deadline, distinct from the campaign
+time; evidence tools refresh that countdown. The coach has no separate time cap.
+The two-hour limit is a ceiling, not a target duration. At least 60 seconds must
+remain for starting the critic itself. These are operational safeguards, not
+task-cost predictions or a guarantee the review can finish. Insufficient time
+or funds, failed criticism or missing adjudication produces `review_unavailable`,
+not completion. Unknown spend and overlapping soft overshoot stop inference;
+cancellation, quota and genuine operator dependencies retain their usual outcomes.
+
+Inspect `review-N-proposal.json`, `sessions/consult-N/request.json`,
+`response.json`, retained evidence, the coach's `closure-allocation.json`,
+`closure-settlement.json`, revision-qualified `allowance-*.json` records and
+`closure-adjudication.json`, and final `review-N.json`. These separate a proposed
+acceptance, actual criticism and adjudicated outcome. No source, receipt or
+scientific conclusion from an earlier execution is rewritten.
 
 ## Read-only research inspector
 

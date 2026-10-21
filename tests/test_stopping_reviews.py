@@ -261,7 +261,8 @@ def test_owned_sdk_progress_reset_keeps_one_researcher_and_retained_computation(
 @pytest.mark.parametrize("boundary", ["deadline", "stalled_reviews"])
 def test_owned_sdk_checkpoint_is_incomplete_and_visible_in_status(project, ledger, monkeypatch, boundary):
     root, config, _ = project
-    (root / "labgoblin.toml").write_text(replace(config, coach=True).toml(), encoding="utf-8")
+    (root / "labgoblin.toml").write_text(replace(
+        config, coach=True, timeout_seconds=60 if boundary == "deadline" else 180).toml(), encoding="utf-8")
     fixture_provider(root, monkeypatch)
     atomic_json(root / "fixture-provider.json", {
         "model_free": True, "root": str(root), "checkpoint_reason": boundary,
