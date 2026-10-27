@@ -41,15 +41,30 @@ For an independently framed challenge to **ending the investigation**, enable
 `closure_critic = true` alongside coaching and consultation (or initialize with
 `--coach --consultant --closure-critic`). Before final acceptance, a fresh
 adversarial critic searches for the strongest evidence-backed reason to continue,
-without being told the coach approved stopping. The same coach must explicitly
-adjudicate that objection, then continue the same researcher or accept. The critic
+without being told the coach approved stopping. Its critique goes directly to
+the persistent researcher for one response/investigation, then a **fresh read-only
+adjudicator** using `coach_model` decides whether to continue or accept.
+Required report corrections must be applied before acceptance, not deferred as
+conditions on exit. Withholding product release does not by itself justify ending
+scientific investigation. The critic
 can inspect bounded PNG/JPEG images but cannot run experiments or veto stopping.
 Failed criticism is not acceptance; hard limits and operator stops still prevail.
 
-An on-demand **read-only inspector** provides local browser chat, cited evidence,
-images and factual execution/spending status. It never attaches to or steers the
-researcher. Browsing is model-free; questions require an explicitly authorized,
-separate cumulative inspection allowance.
+Review roles can use different Copilot models without switching the researcher:
+set optional `coach_model`, `closure_critic_model`, `advice_model` and
+`claim_review_model` in TOML, or the corresponding `init --coach-model`,
+`--closure-critic-model`, `--advice-model` and `--claim-review-model` options.
+Each unset override inherits the campaign `model`, never the caller's model.
+All roles retain the shared `reasoning_effort`, credit pool and deadlines;
+model overrides do not enable otherwise disabled roles. Named models are checked
+for availability and compatible effort/image support before research starts.
+Changes require a new execution; there is no automatic model rotation or fallback.
+
+An on-demand **campaign chat** provides cited evidence, images and factual
+execution/spending status. The research inspector can also prepare idea drafts;
+only your explicit Publish action sends captured files to the operator inbox.
+It cannot edit research, attach to the researcher or change execution controls.
+Browsing/publication are model-free; messages use a separate approved allowance.
 
 Python 3.11+, native Windows and native Linux are supported. Copilot CLI must be
 installed and authenticated separately. Native execution is trusted, **not a
@@ -105,7 +120,7 @@ worker rather than starting a duplicate. `--resume` after a settled execution
 starts a new provider conversation, not a promised resurrection of an interrupted
 SDK session.
 
-## Inspect without steering
+## Campaign chat and operator ideas
 
 ```powershell
 labgoblin inspect .\my-research --open
@@ -117,8 +132,24 @@ The first command is view-only, even if chat was authorized previously.
 The second authorizes a **cumulative** inspection soft cap, not another 100
 credits on each restart. No model runs until you submit a question. Each answer
 uses a fresh restricted session, bounded previous chat and freshly read evidence.
-It can explain findings and show captured PNG/JPEG images, but cannot run code,
-retrieve external literature, edit files or restart research.
+It can explain findings, show captured PNG/JPEG images and prepare idea drafts.
+Review their exact text/attachments and click **Publish idea** to send them.
+It cannot run code, retrieve external literature, edit research or restart it.
+The researcher receives short pointers at startup or a stopping boundary, not
+whole documents injected into its prompt. It chooses whether/how to investigate.
+Later edits require new revisions; earlier publications and replies are retained.
+Late ideas do not restart a closed execution or extend its limits.
+
+For an already written document, the model-free operator command uses the same inbox:
+
+```powershell
+labgoblin ideas publish .\my-research --file .\idea.md --title "A useful control" --id control-idea
+labgoblin ideas status .\my-research
+```
+
+Use `--attachment FILE` for explicitly selected supporting files, and `--base
+REVISION` when updating the same `--id`. Editing a source file does not silently
+republish it. Publication captures exact bytes and rejects concurrent changes.
 
 Use the exact loopback URL printed by the command; its fragment authorizes that
 browser tab. History and captured citations live outside the research workspace.
@@ -145,18 +176,23 @@ forecasts or per-role credit settings.
 Consultations are separately opt-in: use `init --consultant` or set
 `consultant = true` before a new execution. This authorizes workspace evidence
 reads and public literature retrieval, not uploads or arbitrary agent spawning.
-Researcher, coach and advisers all share the same project pool. Consultation
-headroom is reserved before assigning caller limits: 10% of the remaining
-allowance, at least 30 and at most 300 credits (300 for an unlimited project).
-The reserve is shared across consultations, not renewed for each call.
+Researcher, coach and advisers all share the same project pool, with no separate
+consultation quota. At an owned consultation tool boundary, the harness first
+reduces the blocked caller's ceiling to its observed spending plus 30 credits
+for its response. The adviser can use the remaining pool except protected review
+funds. Unused allowance returns to the caller after final adviser settlement,
+before releasing the tool result. Unlimited projects have no hidden adviser cap.
 With closure criticism enabled, the host may repartition unused project allowance
 at the settled, idle stopping boundary, after reducing the coach's commitment.
 The critic may use the unspent pool except protected coach/researcher allowance;
 it has no separate credit or evidence-operation cap. After settled criticism,
-unused allowance returns to the coach and ordinary consultation reserve.
-Ordinary consultations have at most five minutes. The critic has at most two
-hours, bounded by the campaign deadline with ten minutes retained for coach
-adjudication. The coach itself has no separate time cap. The critic sees its own
+unused allowance funds the researcher response and fresh adjudicator;
+no session's previous spending is reset.
+Ordinary advice and claim reviews have at most 30 minutes including shutdown.
+The critic has at most two hours, bounded by the campaign deadline with ten
+minutes retained for the researcher response and another ten for adjudication.
+The response can use more available time but must leave the adjudication reserve.
+The coach itself has no separate time cap. The critic sees its own
 deadline and refreshed remaining time; individual evidence payloads stay bounded.
 See the operating guide for exact bounds, failure behavior and retained artifacts.
 

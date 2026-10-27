@@ -38,6 +38,15 @@ than treating the resulting negative report alone as sufficient reason to stop.
 Normal provider context management remains provider behavior and belongs in its
 usage totals; LabGoblin schedules no separate compaction or summarizing agent.
 
+Optional `coach_model`, `closure_critic_model`, `advice_model` and
+`claim_review_model` can provide different perspectives in fresh review sessions.
+Each defaults independently to the campaign model, not the requesting model.
+They do not rotate or replace the persistent researcher; closure adjudication
+uses a fresh session with the configured coach model. All retain the common reasoning
+effort, original permissions, time limits and single spending pool. Model diversity
+alone is not independent scientific validation or demonstrated research improvement.
+See the operating guide for selection checks, attribution and initialization options.
+
 ## A coach at the stopping point
 
 With `coach = true`, a normal final response is a proposed stopping point. A fresh
@@ -150,6 +159,22 @@ See the operating guide for the reserve calculation and exact time/read bounds.
 Unknown final usage stops inference; a settled failed consultation is an explicit
 tool error, not a fabricated success or another automatic research continuation.
 
+## Human ideas without a second research manager
+
+The existing campaign chat can discuss evidence and prepare operator idea drafts.
+Only a human Publish action admits exact captured files. The same researcher gets
+file pointers at startup or a stopping boundary; large documents are read on
+demand, not pasted into context. It may investigate, recognize prior coverage,
+reject or defer suggestions, explaining why in its normal answer and notes.
+The coach and independent critic see the same captured inputs and replies.
+Publication and a retained response are not scientific progress.
+
+A publication arriving during a closing review must be considered before
+discretionary completion. The host serializes final closure with publication;
+post-cutoff ideas wait for a later explicitly authorized execution. This also
+applies without coaching. Suggestions never restart research automatically or
+expand the goal, permissions, deadline, budget or stalled-review allowance.
+
 ## What this does not guarantee
 
 An optional **adversarial closure critic** changes the objective of a fresh
@@ -157,9 +182,14 @@ reviewer: find a substantiated case against stopping, rather than collaborate
 on defending the report. Enable `closure_critic` with coaching and consultation.
 It is host-triggered before discretionary final acceptance, not every experiment
 or ordinary continuation. The preliminary coach approval is withheld from it.
-The existing coach explicitly adjudicates the strongest objection in its same
-session, then either continues the researcher or accepts a supported stop.
-No new deciding role, critic veto or experimental branch is introduced.
+The critique first returns to the persistent researcher for one investigation,
+correction or evidence-based rebuttal. A fresh read-only adjudicator then assesses
+the critique, response and actual artifacts, using the configured coach model
+without the proposing coach's approval in context. This replaces the proposing
+coach's second turn, rather than adding another committee or experimental branch.
+Required report corrections must be applied before acceptance; explicitly
+outstanding corrections force continuation. Product non-release and scientific
+termination are separate decisions. The critic has no veto.
 
 A useful objection links an original-goal consequence to evidence and a feasible
 discriminating continuation. A speculative objection, an already answered control,
@@ -171,8 +201,9 @@ explicit incomplete outcome rather than falling back to preliminary approval.
 All role costs stay in the existing pool and deadline. The critic is a skeptical
 research colleague, not a psychological reviewer: it has up to two hours for
 evidence-grounded challenge, no separate credit/read/image-count cap, and a
-visible response deadline. Individual payloads stay bounded. Ten minutes remain
-for adjudication; the coach itself shares the campaign deadline without a
+visible response deadline. Individual payloads stay bounded. Ten minutes each
+are reserved for researcher response and adjudication; the response can use more
+available time while leaving the judge's reserve. The coach shares the campaign deadline without a
 separate time cap. These are operational ceilings, not targets for longer work.
 
 The coach is a process reviewer, not an independent execution of the benchmark.

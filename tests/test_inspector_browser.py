@@ -114,3 +114,30 @@ def test_browser_recent_history_and_older_pages(page, server, observer, monkeypa
     expect(page.locator("article")).to_have_count(45)
     expect(page.locator("article h3").first).to_have_text("Question 0")
     expect(page.locator("#more-history")).to_be_hidden()
+
+
+def test_browser_chat_idea_requires_review_and_publish(page, server, observer, monkeypatch):
+    from playwright.sync_api import expect
+    from labgoblin.ideas import Inbox
+    observer.approve(100, model="model-free")
+    argv = command(observer, idea={
+        "title": "Try another control", "message": "<script>window.injected=true</script>\nCompare the positive control.",
+        "sources": [{"scope": "workspace", "path": "report.md"}]})
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: {"command": argv})
+    server.chat = True
+    ready(page, server, observer)
+    page.locator("#question").fill("Prepare my control suggestion for publication.")
+    page.locator("#ask").click()
+    review = page.locator(".idea-draft button").filter(has_text="Review idea draft")
+    expect(review).to_be_visible(timeout=30000)
+    assert Inbox(observer.project).status()["pending"] == 0
+    review.click()
+    expect(page.locator(".idea-draft pre")).to_contain_text("<script>")
+    assert page.evaluate("window.injected") is None
+    page.locator(".idea-draft button").filter(has_text="report.md").click()
+    expect(page.locator("#evidence pre")).to_contain_text("failed positive control")
+    assert Inbox(observer.project).status()["pending"] == 0
+    page.locator(".idea-draft").get_by_role("button", name="Publish idea", exact=True).click()
+    expect(page.locator("#ideas")).to_contain_text("1 pending / 1 idea identities")
+    assert Inbox(observer.project).status()["pending"] == 1
+    assert observer.status()["inspection"]["budget"]["used"] == 10

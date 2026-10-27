@@ -10,7 +10,7 @@ button { padding: .5rem .8rem; margin: .4rem .3rem .4rem 0; font: inherit; curso
 button:disabled { cursor: wait; opacity: .6; }
 article { border: 1px solid light-dark(#cad1dc, #465063); border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
 article h3 { margin: 0 0 .5rem; font-size: 1rem; }
-pre, .answer, #status, #project, #source-facts, #error { white-space: pre-wrap; overflow-wrap: anywhere; }
+pre, .answer, .idea-draft, #ideas, #status, #project, #source-facts, #error { white-space: pre-wrap; overflow-wrap: anywhere; }
 pre { font: .85rem/1.55 ui-monospace, monospace; max-height: 65vh; overflow: auto; }
 .answer { margin: .5rem 0; }
 img { display: block; max-width: 100%; height: auto; border: 1px solid #677; }

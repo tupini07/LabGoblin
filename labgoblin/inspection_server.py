@@ -124,6 +124,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.server.inspector.history(offset=offset, limit=limit)
             elif parsed.path == "/api/source":
                 result = self.server.inspector.source(query["run"][0], query["citation"][0])
+            elif parsed.path == "/api/idea-draft":
+                _, result = self.server.inspector.idea_draft(query["run"][0], query["draft"][0])
+            elif parsed.path == "/api/ideas":
+                result = Evidence(self.server.inspector.project, self.server.inspector.project_id).ideas({})
             else:
                 self.send(404, canonical({"error": "Unknown inspection endpoint"}))
                 return
@@ -152,6 +156,13 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/cancel":
                 table(args, "cancel", set())
                 result = self.server.inspector.cancel()
+            elif self.path == "/api/publish-idea":
+                table(args, "idea publication", {"run", "draft", "sha256"})
+                if not self.server.chat:
+                    raise ValueError("This server is view-only; idea publication requires an enabled campaign chat")
+                result = self.server.inspector.publish_idea(args["run"], args["draft"], args["sha256"])
+            elif self.path == "/api/idea-draft-file":
+                result = self.server.inspector.idea_draft_file(args)
             elif self.path in ("/api/read", "/api/listing", "/api/search", "/api/session", "/api/execution"):
                 evidence = Evidence(self.server.inspector.project, self.server.inspector.project_id)
                 result = getattr(evidence, self.path.removeprefix("/api/"))(args)
@@ -168,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
 def serve(inspector, *, port=0, chat=False, open_browser=False):
     server = InspectionServer(inspector, port=port, chat=chat)
     print(json.dumps({"inspector_url": server.url, "chat_enabled": chat,
-                      "history": str(inspector.root), "note": "Read-only; Ctrl+C closes the inspector, not research"}), flush=True)
+                      "history": str(inspector.root), "note": "Evidence is read-only; only human-approved ideas are published. Ctrl+C closes chat, not research"}), flush=True)
     try:
         if open_browser:
             webbrowser.open(server.url)

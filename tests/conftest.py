@@ -32,7 +32,7 @@ def project(tmp_path, ledger):
     return root, config, record
 
 
-def arm(project, ledger, *, coach=False, consultant=False, allowance=300_000_000_000, launcher=None):
+def arm(project, ledger, *, coach=False, consultant=False, allowance=300_000_000_000, launcher=None, ideas=False):
     root, config, record = project
     config = Config.parse({**config.to_dict(), "coach": coach, "consultant": consultant})
     state, run_id = root / ".labgoblin", identifier()
@@ -41,6 +41,10 @@ def arm(project, ledger, *, coach=False, consultant=False, allowance=300_000_000
     frozen = freeze_runtime(state)
     prompt = {"goal": "Answer the original question", "instructions": "Research carefully",
               "goal_prompt": "Answer the original question", "provider_command": ["copilot"]}
+    if ideas:
+        prompt["operator_ideas_version"] = 1
+    if config.closure_critic:
+        prompt["closure_response_version"] = 1
     publish_json(directory / "prompt.json", prompt)
     launcher = launcher or own_handle(record["id"])
     ledger.request(run_id, record["id"], run_id, "research-run", config.resources,

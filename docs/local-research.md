@@ -26,7 +26,7 @@ way to bypass existing reservations.
 
 ## Configuration
 
-The complete small configuration is flat TOML:
+The default configuration is flat TOML:
 
 ```toml
 version = 5
@@ -51,6 +51,55 @@ matched evaluations. The SDK transport and ordinary researcher tools remain the
 same with coaching on or off. Skills, extensions, MCP servers, automatic custom
 instruction discovery, memory, scheduled prompts and unrestricted nested agents are disabled;
 the reviewed project instructions are supplied explicitly.
+
+Four optional model overrides apply to fresh review sessions:
+
+| Setting | Session selected |
+|---|---|
+| `coach_model` | Every stopping coach and fresh closure adjudicator. |
+| `closure_critic_model` | The host-triggered adversarial closure critic. |
+| `advice_model` | A consultation with omitted purpose or `purpose="advice"`. |
+| `claim_review_model` | A consultation with `purpose="claim_review"`. |
+
+For example, after enabling the required roles:
+
+```toml
+model = "gpt-6.1-sol"
+reasoning_effort = "high"
+coach = true
+consultant = true
+closure_critic = true
+coach_model = "claude-opus-5.5"
+closure_critic_model = "gpt-6-astra"
+```
+
+This is a configuration example, not a claim that these models are available to
+every account or that mixing them improves scientific quality. Omitted advice and
+claim-review overrides inherit `gpt-6.1-sol`, even when the requesting coach uses
+Opus. Remove an override to inherit again; empty strings are invalid. The matching
+initialization options are `--coach-model`, `--closure-critic-model`,
+`--advice-model` and `--claim-review-model`. Setting an override does not enable
+its role or create any additional session.
+
+The common `reasoning_effort` must be supported by every enabled named model.
+Inside the owned runtime, the harness checks all enabled named selections against
+Copilot's catalog before the first research prompt, including vision support for
+image-enabled coaches and critics. Each fresh session also verifies its applied
+model/effort and restricted tool allowlist. A mismatch, unavailable selection or
+unsupported capability is an explicit failure, never silent substitution or
+approval of an incomplete review. Availability can still change during a long run.
+Disabled roles' presets are not queried. `auto` remains Copilot-controlled routing,
+not a pinned concrete model; choose explicit IDs for reproducible role assignments.
+The current CLI rejects a reasoning-effort setting with `auto`.
+
+Session identity, `model.json`, usage checkpoints and final session records retain
+the requested and confirmed selection. Raw SDK usage retains any provider-reported
+per-model breakdown; the selection `auto` is not evidence of which concrete model
+handled each response. Attribution does not depend on the bounded event spool.
+Selections are frozen with the execution, and later prompts must preserve the
+same selected model/effort; a fresh adjudicator uses the configured coach model. There is no
+researcher rotation. These settings do not affect the independently configured
+inspector or change limits, permissions, review counts or cumulative accounting.
 
 `max_ai_credits` is cumulative across all executions of this project. Use at least
 30 credits without coaching or at least 60 with coaching. `"unlimited"` explicitly
@@ -199,10 +248,10 @@ failure remain distinct in the retained result/receipt.
 `consultant = true` supplies
 `labgoblin_consult(question, evidence_paths=[], purpose="advice")`
 to the ordinary researcher and, when enabled, the stopping coach. It authorizes
-a fresh, synchronous read-only adviser, not arbitrary delegation. The adviser
-inherits the configured model/effort and stays in the existing owned process
-tree. Choose an explicit model when requesting a particular reasoning effort:
-the current Copilot CLI rejects an effort setting with model `auto`.
+a fresh, synchronous read-only adviser, not arbitrary delegation. Its model is
+selected by purpose from `advice_model` or `claim_review_model`, falling back to
+the campaign `model`, not the caller's override. It retains the common
+`reasoning_effort` and stays in the existing owned process tree.
 
 Ask a concrete question about literature, an assumption or a materially different
 approach. The host supplies the frozen original goal and scope instructions.
@@ -218,22 +267,29 @@ remain explicit. Public queries may contain scientific concepts, never private
 dataset contents or secrets. Native execution and content-disclosure rules are
 trusted policy, not a hostile-agent sandbox or general secret detector.
 
-Calls are one at a time, without a background queue or recursion. Each allows
-at most five minutes including shutdown, 128 evidence reads, 16 KiB text pages
-(16384 characters for web pages), and a 16 KiB final brief. The original execution
+Calls are one at a time, without a background queue or recursion. Each ordinary
+advice or claim-review call allows at most 30 minutes including shutdown,
+128 evidence reads, 16 KiB text pages (16384 characters for web pages), and a
+16 KiB final brief. The original execution
 deadline and cancellation always take precedence. The researcher retains its
 ordinary coding tools; neither the adviser nor coach receives a shell.
+The time limit is a ceiling, not a target duration. Existing executions retain
+their frozen adviser policy; the longer limit requires an updated runtime for
+a new execution.
 
-Before caller allowances are assigned, the harness reserves 10% of the remaining
-project allowance for consultation, with a 30-credit floor and 300-credit ceiling;
-an unlimited project reserves 300 credits. This is part of the same pool, not
-extra spending permission or a new per-role setting. All consultations share
-that reserve. Each gets only its unspent portion, further reduced if observed
-spending is consuming another role's protected allowance. Below the provider's
-30-credit minimum, the tool explicitly declines without starting an adviser.
-Unused reserve remains available for later consultations in this execution;
-it is not added to an active caller's ceiling. Unspent project credits persist
-across explicit resumes. Soft overshoot is retained and can stop the caller.
+There is no separate adviser credit quota. While the caller is blocked on its
+owned consultation tool, the harness reduces its cumulative ceiling to observed
+spending plus the provider's 30-credit minimum for a response. Only after that
+update succeeds can the adviser receive the remaining campaign allowance,
+excluding protected stopping-review funds. Final adviser spending is counted
+before unused funds are returned to the caller and its tool result is released.
+An unlimited campaign imposes no adviser credit cap.
+
+If the shared balance cannot fund both adviser and caller response, the tool
+explicitly declines without starting another session. A failed limit transfer,
+unknown final spending or overshoot into protected campaign headroom blocks
+further inference; unused credits do not excuse uncertain accounting. Unspent
+project credits and all actual spending persist across explicit resumes.
 
 Exact requests, inspected pages, web results, answers and usage are retained
 under the execution's `sessions/consult-N` directory. Successful readable briefs
@@ -298,13 +354,24 @@ researcher's response and actual remaining time/resources, not the preliminary
 coach verdict. It can browse notes, artifacts and prior briefs. No compelling
 objection is a legitimate limited result; speculation is not compulsory work.
 
-The same coach then receives the critique and records one adjudicated decision.
+The proposing coach closes without adjudicating its own proposal. The full
+retained critique goes directly to the persistent researcher for one closing
+response. The researcher chooses an investigation, correction, evidence-based
+rebuttal or genuine limitation, and applies any required report changes.
+A fresh read-only adjudicator then receives the original goal, critique, updated
+response and evidence tools, but not the proposing coach's approval. It uses
+`coach_model`; there is no additional model-selection setting or consultation loop.
+
 Its required `critique_response` addresses the strongest objection, consequence
-for the original goal, and evidence supporting continuation or dismissal.
-Narrowing a claim does not automatically justify stopping on an unmet goal.
-Useful objections return to the same researcher, who chooses the method.
-Adjudication is not another researcher turn or another progress-counter increment.
-There is no critic veto, repeated critic/coach debate inside this decision, or
+for the original goal, and inspected evidence supporting continuation or dismissal.
+It must explicitly list `required_corrections`; `accept` rejects a nonempty list.
+Outstanding required changes need `continue` and a concrete correction request.
+The judge must inspect the actual report, not accept a promise of later edits.
+This is a declared obligation check, not automated understanding of every claim.
+Narrowing a report or deciding against product release does not automatically
+justify stopping on an unmet goal. Progress is assessed once against the previous
+review, including intervening research and the closing response, not critic prose.
+There is no critic veto, repeated critic/judge debate inside this decision, or
 automatic restart. A later researcher stopping proposal may receive a fresh
 challenge; both roles should inspect prior briefs rather than repeat answered
 objections. Semantic freshness and scientific judgment remain fallible.
@@ -317,34 +384,41 @@ ordinary advisers remain text-only. Image viewing is not numerical reproduction.
 Coaches retain their 128-read/eight-image count limits. The critic has no
 read-count or image-count cap; each evidence record remains size-bounded.
 
-Only at a verified settled/idle boundary can the host repartition the existing
-pool. The critic can use the unspent pool except the coach's minimum adjudication
-allowance and, where feasible, protected researcher/future-review headroom.
+Closing-phase allocation requires a verified settled/idle boundary.
+The critic can use the unspent pool except a provider-minimum allowance
+each for the researcher response and fresh adjudicator; these cannot be dropped
+to make an otherwise unaffordable critique start.
 It has no separate credit cap, including in an unlimited project. The finite
 coach's cumulative limit is reduced before funding the critic. After settled
-criticism, unused funds return to the coach and the ordinary consultation reserve;
-the latter never exceeds its previously unused amount. No waiting caller's
-commitment is updated or overlapped, and all prior spending remains counted.
+criticism and proposer shutdown, unused funds go to the researcher response,
+then the fresh adjudicator. Ordinary consultation transfers use the exact blocked
+tool boundary described above, not an arbitrary waiting session. No concurrent
+spending commitments overlap, and all prior spending remains counted.
 
 The critic gets at most two hours including shutdown, with ten minutes retained
-for subsequent adjudication inside the original campaign deadline. It receives
-its own remaining response time and absolute deadline, distinct from the campaign
-time; evidence tools refresh that countdown. The coach has no separate time cap.
+for the researcher response and another ten for fresh adjudication inside the
+original campaign deadline. The researcher can use more remaining time, but its
+closing response must end before the final ten-minute adjudication reserve.
+The critic receives its own remaining response time and absolute deadline,
+distinct from the campaign time; its evidence tools refresh that countdown.
+The coach has no separate time cap.
 The two-hour limit is a ceiling, not a target duration. At least 60 seconds must
 remain for starting the critic itself. These are operational safeguards, not
 task-cost predictions or a guarantee the review can finish. Insufficient time
-or funds, failed criticism or missing adjudication produces `review_unavailable`,
-not completion. Unknown spend and overlapping soft overshoot stop inference;
+or funds, failed criticism, response or adjudication produces an explicit
+incomplete outcome, not completion. Unknown spend and overlapping soft overshoot stop inference;
 cancellation, quota and genuine operator dependencies retain their usual outcomes.
 
 Inspect `review-N-proposal.json`, `sessions/consult-N/request.json`,
 `response.json`, retained evidence, the coach's `closure-allocation.json`,
 `closure-settlement.json`, revision-qualified `allowance-*.json` records and
-`closure-adjudication.json`, and final `review-N.json`. These separate a proposed
-acceptance, actual criticism and adjudicated outcome. No source, receipt or
+`closure/N/{request,submitted,response}.json`, its exact `prompt.txt`,
+`sessions/adjudicator-N/closure-adjudication.json`, and final `review-N.json`.
+These distinguish a proposal, actual criticism, attempted/submitted/settled
+researcher response and a fresh adjudicated outcome. No source, receipt or
 scientific conclusion from an earlier execution is rewritten.
 
-## Read-only research inspector
+## Campaign chat and research inspection
 
 `labgoblin inspect PROJECT --open` starts a small loopback browser interface.
 It shows harness-computed execution state and spending, ordinary text files,
@@ -369,10 +443,11 @@ cumulative ceiling. Omitting `--credits` always starts view-only, even if an old
 approval exists. Submitting a question authorizes that one call; no summary
 agent or model polling runs in the background.
 
-Each question creates one fresh empty-mode SDK session with only curated
-status, execution, file/list/search, image and session-event tools. It has no
-shell, general filesystem, web, editing, research control or session-attachment
-capability. Up to eight recent exchanges (32 KiB combined) provide conversational
+Each question creates one fresh empty-mode SDK session with curated status,
+execution, file/list/search, image, session-event and operator-inbox tools.
+One additional tool can prepare an idea draft outside research; it cannot publish.
+There is no shell, general filesystem, web, research editing/control or
+session-attachment capability. Up to eight recent exchanges (32 KiB combined) provide conversational
 context; omitted history is reported. Each answer refreshes evidence rather than
 treating earlier answers as current fact. Clicking an `[E...]` button opens the
 exact captured source and, for images, an inline preview. Source IDs are local
@@ -386,7 +461,8 @@ Inspection history, approval records, owned session logs and source captures
 are outside research: `%LOCALAPPDATA%\labgoblin\inspections\PROJECT_ID` on
 Windows, or `~/.local/state/labgoblin/inspections/PROJECT_ID` on Linux.
 The printed location is authoritative. They are not injected into researcher
-context or research snapshots. The deterministic inspection owner shares the
+context or research snapshots. Only explicitly published idea files and their
+attribution cross into the research workspace. The deterministic inspection owner shares the
 project's machine ledger but not its research credit pool. Admission requires
 one CPU and 1024 MiB without interrupting research; unavailable capacity is an
 explicit error. Each question has a finite deadline, at least 60 seconds,
@@ -402,7 +478,8 @@ credential names; these exclusions are not a general secret scanner. A question
 may send its selected ordinary evidence to Copilot under the operator's normal
 data-sharing policy. Browsing alone keeps that evidence local.
 
-Evidence limits are explicit: 16-KiB text pages from files up to 8 MiB; images
+Evidence limits are explicit: 16-KiB text pages from ordinary files up to 8 MiB
+(published idea files support streaming reads up to 512 MiB); images
 up to 4 MiB/16 million pixels; 128 reads/eight images per answer. Literal search
 scans at most 64 files/2 MiB per page and retains 32 hits. Narrow a directory
 with more than 10,000 entries. No-match or truncated search is not absence;
@@ -428,6 +505,62 @@ evidence; add `--estimate` only for a deliberately approved audited estimate.
 Unknown bills block new questions even after a cap increase. Partial lower bounds,
 estimates and reported spending remain distinct; original receipts survive.
 Recovery and accounting controls are operator CLI actions, not browser/model tools.
+
+### Sending ideas through the same chat
+
+Ask the inspector to prepare an idea, discuss/revise its proposal, then open
+**Review idea draft**. The preview shows exact text, attachment identities and
+source provenance. Attachment buttons read the captured copies, not whatever the
+original file contains later. **Publish idea** is a separate authenticated human
+action; a model cannot call it. Until then nothing enters research. Each question
+can prepare eight drafts, each with 64 KiB of text and sixteen selected evidence
+files. Attach large documents instead of asking the model to reproduce them.
+The ordinary evidence exclusions also apply to draft attachments.
+
+Publication itself spends no model credits. The CLI provides the same publication
+contract for files you authored or explicitly selected outside the chat's narrower
+evidence scope:
+
+```powershell
+labgoblin ideas publish .\research --id material-lead --title "An alternative mapping control" --file .\ideas_inbox\drafts\material-lead.md --attachment .\supporting-analysis.md
+labgoblin ideas status .\research
+labgoblin ideas publish .\research --id material-lead --base CURRENT_REVISION --title "An alternative mapping control" --file .\ideas_inbox\drafts\material-lead.md
+```
+
+The draft path is your choice; create/edit it normally. `--sha256 HASH` optionally
+requires the reviewed primary-file bytes. Updates must name the current revision;
+stale updates fail rather than overwrite another publication. Repeating the same
+publication is idempotent. The inbox supports 128 idea identities, with 128 files
+and 512 MiB total per revision. Selected files are streamed, hashed and checked
+for concurrent changes. Published copies live under
+`ideas_inbox\published\ID\REVISION`; never edit those copies. Draft changes do not
+republish themselves. Failed captures/index commits are not admitted publications.
+
+New-runtime executions deliver pending revisions to the same researcher at
+startup and stopping boundaries, including runs without a coach. Only a short
+notice and a captured index path enter its prompt. The researcher reads files as
+needed and explains investigation, prior coverage, rejection or deferral in its
+normal answer/notes. The coach and closure critic get the same file/reply pointers.
+There is no compulsory experiment or structured scientific acceptance schema.
+
+**Pending** includes every revision without a retained reply. **Prepared** means a
+notice was captured; **submitted** means its SDK send returned, not proof that the
+model read every file. **Responded** requires the exact researcher prompt to
+settle and return successfully, with a retained reply. It does not certify that
+the idea was investigated or correct. Interrupted/quota-exhausted responses stay
+pending. Delivery indexes and replies remain under `ideas_inbox\deliveries`.
+One execution permits at most 1024 delivery batches; exhaustion is explicit.
+
+Publication and final closure share a short, separate lock. An idea published
+before the closure cutoff must be returned to the researcher before discretionary
+completion; an arrival during critic/adjudication cannot hide behind an earlier
+acceptance. A post-cutoff publication remains pending for a later explicitly
+authorized execution. Hard stops and genuine operator dependencies still take
+precedence. Neither publication nor prose resets spending, time or stalled-review
+counters. Existing frozen executions do not gain this capability retroactively;
+deploy and explicitly resume to use it. Native processes remain trusted, not
+filesystem-sandboxed; captured hashes detect changes rather than physically
+preventing an operator or shell-capable researcher from modifying files.
 
 ## Missing credit usage
 

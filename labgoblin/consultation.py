@@ -17,7 +17,7 @@ from labgoblin.storage import canonical, excluded_name, inside, publish_json
 MAX_QUESTION = 4096
 MAX_BRIEF = 16384
 MAX_READS = 128
-CONSULT_SECONDS = 300
+CONSULT_SECONDS = 30 * 60
 
 
 def failure(error):

@@ -45,6 +45,12 @@ and a persisted allowance outside the evaluated research project.
 - One controller freezes configuration, goal, instructions and helpers per
   execution, after recovery. TOML changes require a new execution. Explicit
   resumes preserve all prior spending and retained evidence.
+- Optional coach, closure-critic, advice and claim-review model overrides inherit
+  the campaign model independently, never the caller's override. Select advisers
+  by explicit purpose, not their `consult-N` operational name. Preserve the same
+  configured coach model in a fresh adjudicator session, common effort and one pool.
+  Fail unavailable or incompatible selections explicitly; retain applied model
+  attribution outside bounded events. No researcher rotation or implicit role enablement.
 - Resource grants and supervisor claims are one-use. Observe/probe outside ledger
   writer transactions. Unknown ownership is not death, unused budget, permission
   to release, or permission to retry. Never impersonate an observer/build.
@@ -62,9 +68,14 @@ and a persisted allowance outside the evaluated research project.
 - Aggregate integer `totalNanoAiu`, not premium multipliers. All roles share one
   cumulative research project pool. Independent inspection has a separately
   authorized cumulative pool; never borrow research allowance for chat.
-  Idle-session limit updates reassign only observed
-  remaining allowance; they never renew an exhausted session or reset usage.
-- Optional consultations reserve headroom before caller limits are assigned.
+  Limit updates reassign only observed remaining allowance at idle boundaries
+  or inside the exact host-owned consultation callback that blocks its caller;
+  they never renew an exhausted session or reset usage.
+- Optional consultations have no independent credit quota. Before adviser
+  admission, reduce the blocked caller's ceiling to its observed usage plus
+  the provider-minimum response headroom, then allocate the remaining campaign
+  pool excluding protected review funds. Return known unused funds before
+  releasing the tool result. Failed transfers abort rather than resume inference.
   Keep adviser spending, exact caller/session identities and evidence in the
   existing run receipt. Unknown usage blocks inference; no overlapping limits,
   recursive advisers, parallel research branches or second canonical plan.
@@ -73,15 +84,25 @@ and a persisted allowance outside the evaluated research project.
   not reviewer agreement; preserve scope/coverage and return objections to the
   same researcher. No compulsory review on every stop or proof-certification claim.
   Explicit closure_critic mode is the exception for discretionary final acceptance:
-  retain the proposal, independently challenge it, then require same-coach
-  adjudication. The critic has no veto. Failed criticism never applies preliminary
-  approval; only settled idle boundaries may repartition known unused credits.
-  Extra coach prompts require exact owned critique records; old bounds remain.
-  The critic has a two-hour maximum inside the campaign deadline, reserving ten
-  minutes for adjudication, and no independent credit/read/image-count cap.
+  retain the proposal, independently challenge it, deliver the critique to the
+  persistent researcher, then require fresh read-only adjudication. The proposing
+  coach never decides its own objection. Required corrections route to research;
+  acceptance cannot contain outstanding required corrections. The critic has no veto.
+  Failed criticism, response or adjudication never applies preliminary
+  approval; closing-phase transfers require settled idle boundaries.
+  Each new coach/adjudicator has one prompt. Extra closing responses require an
+  opted-in frozen capability and exact proposal/critique/submission/settlement
+  evidence; old execution bounds remain. Judge progress once per review, not
+  again for criticism or its response. The critic has a two-hour maximum inside
+  the campaign deadline, reserving ten minutes each for researcher response and
+  adjudication, and no independent credit/read/image-count cap. Research can
+  use more available time but must leave the adjudicator's ten-minute reserve.
   Preserve bounded individual evidence payloads and protected caller allowance.
-  Return unused critic funding only after settlement; ordinary adviser limits
-  stay unchanged. Show the critic its own response deadline and remaining time.
+  Return unused critic funding only after settlement. Ordinary advice and claim
+  reviews have a 30-minute maximum within the campaign deadline, including
+  shutdown; their evidence-count limits remain unchanged. Unlimited campaigns
+  impose no hidden adviser credit quota either.
+  Show the critic its own response deadline and remaining time.
 - Partial usage cannot prove final spending. Unknown usage blocks new admission.
   Operator estimates are explicit, receipt-bound, additive records separate from
   reported usage; later final evidence never rewrites historical receipts.
@@ -90,13 +111,25 @@ and a persisted allowance outside the evaluated research project.
   Do not silently treat truncation, incomplete retention or process success as
   scientific completion.
 - Status and machine reads never initialize, reconcile or mutate research.
-  The on-demand inspector uses fresh empty-mode sessions, only curated evidence
-  tools and genuine `inspection-run` grants. Keep its history outside research,
-  require explicit finite approval, and never add steering or background inference.
+  Campaign chat uses fresh empty-mode inspector sessions, curated evidence tools
+  and genuine `inspection-run` grants. Keep its history/drafts outside research
+  and require a separate finite allowance. Its only writing tool prepares drafts;
+  an explicit human Publish action commits exact captured ideas. No arbitrary
+  editing, execution control, research-session attachment or background inference.
   Citation captures bind terminal receipts; live/truncated coverage stays explicit.
   Do not add automatic image pulls, environment installs, remote execution or
   unrestricted nested provider calls to the research loop. Advisers have only
   curated evidence reads and verified public retrieval; adding a custom tool
   must not change the ordinary researcher's coding permissions.
+- Operator ideas are advisory immutable file revisions, not scientific records or
+  changed authority. Give the same researcher short file pointers, not injected
+  documents, at startup/stopping boundaries, including coach-off executions.
+  Retain prepared/submitted/settled-reply distinctions. Extra researcher prompts
+  require exact owned delivery records and an opted-in frozen prompt capability;
+  old execution bounds remain unchanged. Coach and critic see the same captured
+  files/replies. Serialize publication and final closure with a separate short
+  inbox lock, never the execution-long controller lock. Unseen publications
+  invalidate discretionary closure; post-cutoff submissions wait for a later
+  authorized execution. Ideas never reset stalled reviews, credits or deadlines.
 
 See `docs/runtime-protocol.md` and `docs/local-research.md` for the exact boundaries.

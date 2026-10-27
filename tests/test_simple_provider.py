@@ -12,6 +12,17 @@ from labgoblin.storage import read_json
 from tests.conftest import arm
 
 
+def model_info(model_id="model-free", **changes):
+    from copilot.client import ModelInfo
+    return ModelInfo.from_dict({
+        "id": model_id, "name": model_id,
+        "capabilities": {"supports": {"vision": True, "reasoningEffort": True}},
+        "policy": {"state": "enabled", "terms": ""},
+        "supportedReasoningEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        **changes,
+    })
+
+
 class Value:
     def __init__(self, value):
         self.value = value
@@ -37,6 +48,7 @@ class FakeSession:
         self.tool_results = []
         self.tool_worker = None
         self.rpc = SimpleNamespace(
+            model=SimpleNamespace(get_current=self.current_model),
             permissions=SimpleNamespace(set_mode=self.permissions),
             usage=SimpleNamespace(get_metrics=self.metrics),
             options=SimpleNamespace(update=self.update),
@@ -45,11 +57,15 @@ class FakeSession:
     async def initialize_tools(self):
         return Value({"success": True})
 
+    async def current_model(self):
+        return Value(self.script.get("applied_model", {
+            "modelId": self.options["model"], "reasoningEffort": self.options["reasoning_effort"]}))
+
     async def metadata(self):
         if self.script.get("metadata_unavailable"):
             return Value({"tools": None})
         names = [tool.name for tool in self.options.get("tools", [])]
-        if not self.script.get("missing_web"):
+        if "on_post_tool_use" in self.options["hooks"] and not self.script.get("missing_web"):
             names.append("web_fetch")
         return Value({"tools": [{"name": name} for name in names]})
 
@@ -63,7 +79,8 @@ class FakeSession:
 
     async def update(self, request):
         self.updates.append(request.session_limits.max_ai_credits)
-        return Value({"success": not self.script.get("update_error", False)})
+        return Value({"success": not (self.script.get("update_error", False)
+                                      or self.script.get("update_error_at") == len(self.updates))})
 
     def event(self, kind, **data):
         self.options["on_event"](Event(kind, **data))
@@ -71,7 +88,7 @@ class FakeSession:
     async def send(self, prompt):
         self.prompts.append(prompt)
         self.event("assistant.turn_start")
-        self.used += self.script.get("cost", 10) * credits.NANO
+        self.used += self.script.get("cost_nano", self.script.get("cost", 10) * credits.NANO)
         if self.script.get("wait"):
             if self.script.get("cancel"):
                 Path(self.script["cancel"]).write_text("operator stop\n", encoding="utf-8")
@@ -123,6 +140,9 @@ class FakeSession:
                             progress_reason=script.get("progress_reason", "The fixture supplies no changed scientific evidence."))
             if "critique_response" in script:
                 args["critique_response"] = script["critique_response"]
+                args["required_corrections"] = script.get("required_corrections", [])
+            elif "required_corrections" in script:
+                args["required_corrections"] = script["required_corrections"]
             if script["decision"] == "needs_operator":
                 args.update(dependency="permission", question="May I access the required unavailable input?")
             if script["decision"] == "checkpoint":
@@ -163,6 +183,11 @@ class FakeClient:
         self.session = FakeSession(options, self.script)
         return self.session
 
+    async def list_models(self):
+        if self.script.get("catalog_error"):
+            raise RuntimeError("Model catalog unavailable")
+        return self.script.get("models", [model_info()])
+
     async def stop(self):
         self.stopped = True
 
@@ -178,6 +203,45 @@ def exercise(envelope, scripts, *, seconds=120):
         return value
     result = asyncio.run(provider.drive(envelope, time.monotonic() + seconds, client_factory=factory))
     return result, clients, read_json(Path(envelope.root) / "result.json")
+
+
+@pytest.mark.parametrize("coach", [False, True])
+def test_client_disables_sync_without_removed_remote_flag(project, ledger, monkeypatch, coach):
+    import copilot
+    monkeypatch.setattr(copilot, "CopilotClient", lambda **options: options)
+    envelope = arm(project, ledger)
+    options = provider.client_for(envelope, coach=coach)
+    command = read_json(Path(envelope.root) / "prompt.json")["provider_command"]
+    assert options["connection"].path == command[0]
+    assert options["connection"].args == (
+        *command[1:], "--no-auto-update", "--sync-session=off", "--no-remote-export",
+        "--no-ask-user", "--disable-builtin-mcps")
+    assert options["enable_remote_sessions"] is False
+    assert options["mode"] == ("empty" if coach else "copilot-cli")
+
+
+@pytest.mark.parametrize("role,purpose", [
+    ("researcher", None), ("coach-0", None), ("consult-0", "advice"),
+    ("consult-1", "claim_review"), ("consult-2", "closure_critique"),
+    ("adjudicator-1", "coach"),
+])
+def test_every_role_explicitly_disables_remote_session(project, ledger, role, purpose):
+    from copilot.client import RemoteSessionMode
+    envelope = arm(project, ledger)
+    client = FakeClient({})
+    session = provider.Session(envelope, role, envelope.id, 30 * credits.NANO,
+                               client, time.monotonic() + 60, purpose=purpose)
+
+    async def check():
+        try:
+            await session.start()
+            assert client.session.options["remote_session"] is RemoteSessionMode.OFF
+            assert not client.session.prompts
+        finally:
+            await session.close()
+
+    asyncio.run(check())
+    assert client.stopped
 
 
 def test_plain_research_is_one_normal_session_without_handoffs(project, ledger):

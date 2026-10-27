@@ -9,13 +9,6 @@ from labgoblin.protocol import BudgetExhausted, UncertainExecution, integer, num
 NANO = 1_000_000_000
 MIN_SESSION = 30 * NANO
 COACH_RESERVE = MIN_SESSION
-MAX_CONSULT_RESERVE = 300 * NANO
-
-
-def consultation_reserve(allowance, *, enabled=False):
-    if not enabled:
-        return 0
-    return MAX_CONSULT_RESERVE if allowance is None else min(MAX_CONSULT_RESERVE, max(MIN_SESSION, allowance // 10))
 
 
 def parse_limit(value, name="max_ai_credits"):
@@ -94,7 +87,7 @@ def available(summary, *, coach=False, consultant=False):
     if summary["active"]:
         raise UncertainExecution("A previous owned execution is unsettled; reconcile it before another admission")
     allowance = summary["remaining_nano"]
-    required = MIN_SESSION + (COACH_RESERVE if coach else 0) + consultation_reserve(allowance, enabled=consultant)
+    required = MIN_SESSION + (COACH_RESERVE if coach else 0) + (MIN_SESSION if consultant else 0)
     if allowance is not None and allowance < required:
         raise BudgetExhausted("Remaining allowance cannot fund a researcher and the configured reviews/consultations")
     return allowance

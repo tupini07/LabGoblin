@@ -89,8 +89,12 @@ def atomic_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+class LockBusy(ValueError):
+    pass
+
+
 @contextmanager
-def run_lock(path):
+def run_lock(path, *, owner="controller or accounting editor"):
     """One controller or accounting editor; status readers never take ownership."""
     path = Path(path)
     stream = path.open("r+b")
@@ -100,13 +104,13 @@ def run_lock(path):
             try:
                 msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as error:
-                raise ValueError("Another controller or accounting editor owns this project") from error
+                raise LockBusy(f"Another {owner} owns this project") from error
         else:
             import fcntl
             try:
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
-                raise ValueError("Another controller or accounting editor owns this project") from error
+                raise LockBusy(f"Another {owner} owns this project") from error
         yield
     finally:
         stream.close()

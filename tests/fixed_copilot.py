@@ -28,6 +28,8 @@ TOOL_RESULT = None
 TOOLS = []
 ROLE = "researcher"
 COACH_INDEX = 0
+MODEL = None
+EFFORT = None
 
 
 def emit(value):
@@ -75,6 +77,9 @@ def exercise():
         if CONFIG.get("image"):
             if invoke_tool("labgoblin_inspect_read", {"scope": "latest", "path": CONFIG["image"], "image": True}) is None:
                 return
+        if CONFIG.get("idea"):
+            if invoke_tool("labgoblin_prepare_idea", CONFIG["idea"]) is None:
+                return
         event("assistant.message", {"messageId": str(uuid.uuid4()),
                                    "content": CONFIG.get("answer", "The retained report is evidence [E2], not independent scientific validation.")})
         event("session.idle", {})
@@ -104,7 +109,7 @@ def exercise():
                                               "Source: research-notes.md. No external literature was retrieved."})
         event("session.idle", {})
         return
-    if ROLE == "coach":
+    if ROLE in ("coach", "adjudicator"):
         if CONFIG.get("mode") == "progress_reviews":
             if invoke_tool("labgoblin_read_evidence", {"path": f"artifacts/review-control-{COACH_INDEX}.json"}) is None:
                 return
@@ -144,20 +149,19 @@ def exercise():
             args["checkpoint_reason"] = CONFIG["checkpoint_reason"]
         if CONFIG.get("mode") == "closure_critic" and COACH_INDEX > 1:
             args.update(decision="accept", question="", progress="none")
-            if REQUESTS == 2:
+            if ROLE == "adjudicator":
                 args["critique_response"] = (
-                    "The critic's interior-point objection matters to the original all-real goal. "
-                    "An exact retained computation, not a narrowed report, is needed."
-                    if COACH_INDEX == 2 else
                     "Inspected artifacts/closure-counterexample.json: x=1/2 gives -1/4. "
                     "This refutes the original all-real claim and resolves the critic's objection.")
-                if COACH_INDEX == 2:
-                    args.update(decision="continue", question="Does the all-real claim survive the feasible interior-point control?")
-                else:
-                    if invoke_tool("labgoblin_read_evidence", {"path": "artifacts/closure-counterexample.json"}) is None:
-                        return
-                    args.update(progress="meaningful",
-                                progress_reason="The new exact counterexample refutes the original claim; critic prose alone did not.")
+                if invoke_tool("labgoblin_read_evidence", {"path": "artifacts/closure-counterexample.json"}) is None:
+                    return
+                corrected_report = invoke_tool("labgoblin_read_evidence", {"path": "report.md"})
+                if corrected_report is None:
+                    return
+                if "all-real claim is false" not in json.dumps(corrected_report):
+                    raise ValueError("The required report correction was not published before adjudication")
+                args.update(progress="meaningful", required_corrections=[],
+                            progress_reason="The new exact counterexample refutes the original claim; critic prose alone did not.")
         if invoke_tool("labgoblin_review_decision", args) is None:
             return
         event("assistant.message", {"messageId": str(uuid.uuid4()), "content": "The fixed stopping review is recorded."})
@@ -208,6 +212,22 @@ def exercise():
     (ROOT / "report.md").write_text("Fixed protocol qualification: means are 4, 4 and 5. No model call occurred.\n",
                                   encoding="utf-8")
     (ROOT / "research-notes.md").write_text("Retain the deterministic fixture results.\n", encoding="utf-8")
+    if CONFIG.get("mode") == "operator_ideas":
+        prompt = (ROOT / f"fixture-prompt-{SESSION}-{REQUESTS}.txt").read_text(encoding="utf-8")
+        relative = prompt.split("captured delivery index:\n", 1)[1].splitlines()[0]
+        delivery = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+        item = delivery["items"][0]
+        document = json.loads((ROOT / item["file"]).read_text(encoding="utf-8"))
+        offset = document["offset"]
+        if type(offset) is not int:
+            raise ValueError("The model-free idea fixture requires an integer offset")
+        control = subprocess.check_output([
+            selected_python, "-I", "-c",
+            "import json;values=[2,4,6];"
+            f"print(json.dumps({{'baseline':sum(values)/3,'shifted':sum(v+{offset} for v in values)/3}}))",
+        ], stdin=subprocess.DEVNULL, text=True, timeout=10)
+        (output / "idea-control.json").write_text(control, encoding="utf-8")
+        (output / "idea-source.json").write_text(json.dumps(item), encoding="utf-8")
     if CONFIG.get("mode") == "claim_review":
         claim = "Claim: x*x-x is nonnegative for every real x because it is zero at x=0 and x=1."
         if REQUESTS == 1:
@@ -264,26 +284,41 @@ while True:
     request = json.loads(sys.stdin.buffer.read(size))
     method, params = request["method"], request.get("params", {})
     with (ROOT / "fixture-rpc.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"method": method, "session_id": params.get("sessionId")}) + "\n")
+        stream.write(json.dumps({"method": method, "session_id": params.get("sessionId"),
+                                 "session_limits": params.get("sessionLimits")}) + "\n")
     if method == "connect":
         result = {"ok": True, "protocolVersion": get_sdk_protocol_version(), "version": "model-free-fixture"}
+    elif method == "models.list":
+        result = {"models": [
+            {"id": name, "name": name, "policy": {"state": "enabled", "terms": ""},
+             "capabilities": {"supports": {"vision": True, "reasoningEffort": True}},
+             "supportedReasoningEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]}
+            for name in CONFIG.get("models", ["model-free"])]}
     elif method == "session.create":
         SESSION = params["sessionId"]
+        MODEL, EFFORT = params["model"], params["reasoningEffort"]
         TOOLS = params.get("tools", [])
         names = {tool["name"] for tool in TOOLS}
         ROLE = ("inspector" if "labgoblin_inspect_read" in names else "coach" if "labgoblin_review_decision" in names
                 else "adviser" if "labgoblin_read_evidence" in names else "researcher")
-        if ROLE == "coach":
+        if "FRESH closure adjudicator" in params.get("systemMessage", {}).get("content", ""):
+            ROLE = "adjudicator"
+        if ROLE in ("coach", "adjudicator"):
             counter = ROOT / "fixture-coach-count"
-            COACH_INDEX = int(counter.read_text()) + 1 if counter.exists() else 1
-            counter.write_text(str(COACH_INDEX), encoding="utf-8")
+            COACH_INDEX = int(counter.read_text()) if counter.exists() else 0
+            if ROLE == "coach":
+                COACH_INDEX += 1
+                counter.write_text(str(COACH_INDEX), encoding="utf-8")
         (ROOT / f"fixture-session-{SESSION}.json").write_text(json.dumps(params), encoding="utf-8")
         result = {"sessionId": SESSION, "workspacePath": str(ROOT)}
+    elif method == "session.model.getCurrent":
+        result = {"modelId": MODEL, "reasoningEffort": EFFORT}
     elif method == "session.tools.initializeAndValidate":
         result = {}
     elif method == "session.tools.getCurrentMetadata":
         result = {"tools": [{"name": tool["name"], "description": tool.get("description", "")} for tool in TOOLS] +
-                           ([] if ROLE == "inspector" else [{"name": "web_fetch", "description": "Model-free fixture; no actual HTTP request"}])}
+                           ([{"name": "web_fetch", "description": "Model-free fixture; no actual HTTP request"}]
+                            if ROLE == "adviser" else [])}
     elif method == "session.tools.handlePendingToolCall":
         TOOL_RESULT = params.get("result", {"resultType": "failure", "error": params.get("error")})
         TOOL_DONE.set()
@@ -303,11 +338,11 @@ while True:
             "lastCallInputTokens": 0, "lastCallOutputTokens": 0, "modelMetrics": {},
             "sessionStartTime": "2026-10-14T00:00:00Z", "totalApiDurationMs": 0,
             "totalPremiumRequestCost": 0, "totalUserRequests": REQUESTS,
-            "totalNanoAiu": REQUESTS * CONFIG.get("cost", 10_000_000_000),
+            "totalNanoAiu": REQUESTS * CONFIG.get("role_costs", {}).get(ROLE, CONFIG.get("cost", 10_000_000_000)),
         }
     elif method == "session.send":
         REQUESTS += 1
-        if ROLE == "inspector" or CONFIG.get("mode") in ("closing_challenge", "progress_reviews", "claim_review", "closure_critic"):
+        if ROLE == "inspector" or CONFIG.get("mode") in ("closing_challenge", "progress_reviews", "claim_review", "closure_critic", "operator_ideas"):
             (ROOT / f"fixture-prompt-{SESSION}-{REQUESTS}.txt").write_text(params["prompt"], encoding="utf-8")
         result = {"messageId": str(uuid.uuid4())}
     else:

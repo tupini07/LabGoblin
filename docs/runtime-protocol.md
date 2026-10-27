@@ -12,7 +12,8 @@ generic exchange shape remain 3. These are separately checked, not migrated.
 | `runtime.py` | Explicit initialization, one controller, frozen launch, recovery and retained evidence. |
 | `provider.py`, `guidance.py` | One ordinary SDK researcher, bounded read-only stopping review and short instructions. |
 | `consultation.py` | Shared bounded evidence readers and retained public-literature retrieval for optional advisers. |
-| `inspector.py`, `inspection_evidence.py`, `inspection_server.py` | Independently owned read-only questions, qualified evidence and loopback browser access. |
+| `inspector.py`, `inspection_evidence.py`, `inspection_server.py`, `inspection_ideas.py` | Independently owned campaign chat, qualified evidence, external idea drafts and authenticated human publication. |
+| `ideas.py` | Immutable operator file revisions, exact delivery/reply records and the final-closure cutoff; not scientific state. |
 | `scheduler.py`, `db.py` | Shared machine admission, one-time claims and qualified terminal receipts. |
 | `payload.py`, `processes.py` | Native ownership, affinity, memory checks, finite deadlines and bounded streams. |
 | `credits.py`, `storage.py` | Cumulative reported/estimated spending and immutable retained files. |
@@ -78,6 +79,35 @@ tools plus a small stopping decision. Custom instructions are supplied explicitl
 extensions, discovered skills, MCP servers, schedules and unrestricted nested
 model agents are not part of this execution.
 
+Owned CLI processes disable history sync/export with `--sync-session=off` and
+`--no-remote-export`. Every SDK session explicitly uses remote mode `off`;
+client-level remote-session support also remains disabled. Do not use the removed
+`--no-remote` CLI flag or change shared user settings to enforce these boundaries.
+
+Optional `coach_model`, `closure_critic_model`, `advice_model` and
+`claim_review_model` belong to the frozen configuration. Omission inherits the
+campaign model independently for each purpose; it never inherits a caller's
+override or enables a role. Researcher and independent inspector selection remain
+their respective configured model. All purposes use the shared reasoning effort.
+The first research client's startup validates every enabled named selection
+against the SDK catalog before any prompt, without another client or allowance.
+Each fresh session checks its own selection again. Missing/disabled models,
+unsupported effort and missing vision for image-enabled coach/critic sessions
+fail explicitly. The SDK exposes no separate model-level tool-calling capability
+flag; restricted session tool initialization and exact metadata validate the
+registered allowlist instead of claiming a scientific tool-use qualification.
+
+The authoritative `session.model.getCurrent` snapshot must match the requested
+named model and effort before a prompt, including later researcher continuations
+and fresh closure adjudication using the coach model. No fallback or session model-switch API is used.
+`auto` retains provider-controlled routing and is not a fixed concrete backend;
+its capability/effort acceptance remains the provider's responsibility.
+Immutable session identity and `model.json` retain requested/applied selection,
+also carried in usage checkpoints and final receipts alongside raw SDK per-model
+usage. Mismatches are retained separately; an event spool filling cannot erase
+model attribution. Adviser responses and readable briefs identify their model.
+New optional fields do not rewrite old snapshots, helpers, records or receipts.
+
 The initial coach's `accept` is provisional. When limits permit, it uses the
 first researcher continuation for a neutral closing challenge; a `continue`
 instead supplies the coach's concrete question. Subsequent reviews assess updated
@@ -110,16 +140,24 @@ tool to researcher and coach. It does not change their existing tool/role policy
 Each fresh `consult-N` adviser has only curated evidence reads and a verified
 `web_fetch` allowlist, never the coach's decision tool or ordinary coding tools.
 It runs within the same supervised tree, resource envelope and absolute deadline,
-with a five-minute per-consultation bound. There is no additional machine grant,
-detached worker, recursive delegation or scientific task scheduler.
+with a 30-minute per-consultation bound for both advice and claim review,
+including shutdown grace. There is no additional machine grant, detached worker,
+recursive delegation or scientific task scheduler.
 
-Before caller admission, reserve 10% of the available pool, floored at 30 and
-capped at 300 credits (300 for unlimited), for all consultations together.
-Every normal caller ceiling excludes the unused reserve. Adviser admission
-also checks observed spend plus the caller's remaining commitment and protected
-review/continuation allowance. It never adjusts a waiting caller's ceiling.
-Known soft overshoot that overlaps protected allowance stops the caller; unknown
-adviser spending blocks inference and cannot yield a complete aggregate bill.
+Consultations have no independent credit pool or per-call quota. The exact
+host-owned tool callback blocks its caller until allowance transfer and adviser
+settlement finish. All other sessions must already be settled with known usage.
+For finite campaigns, first reduce the caller's cumulative ceiling to observed
+usage plus the provider-minimum response allowance. Only after acknowledgment
+may adviser admission use the remaining campaign pool, excluding that caller
+commitment and protected review/continuation funds. On settled adviser shutdown,
+refresh caller usage and restore its share of the remaining campaign pool before
+returning the tool result. Each transfer retains its exact tool-call identity
+and unique allowance revision. Unlimited campaigns impose no hidden quota.
+Arbitrary waiting sessions cannot receive limit updates, and an exhausted
+session is never renewed. Failed transfers and soft overshoot into protected
+campaign headroom stop the caller; unknown adviser spending blocks inference
+and cannot yield a complete aggregate bill.
 These fatal conditions cancel the SDK tool callback without returning a result
 that could permit another model response, then abort the caller through owned
 shutdown. Settled, nonfatal consultation failures remain ordinary tool errors.
@@ -139,7 +177,7 @@ are creation-only ordinary artifacts, not a second editable research plan.
 The optional request `purpose` is `advice` by default or `claim_review`; the latter
 requires at least one evidence path and selects a falsification-oriented charter.
 It still uses an ordinary owned `consult-N` session with identical permissions,
-reserve, deadline and settlement. Requests and responses retain the purpose;
+shared allowance, deadline and settlement. Requests and responses retain the purpose;
 successful responses and brief indexes also retain the readable artifact digest.
 Coaches receive prior brief pointers and their decisions retain the consultations
 completed by that coach. An active consultation prevents recording a stopping
@@ -152,11 +190,17 @@ With explicit `closure_critic` plus coach/consultant flags, a follow-up coach's
 acceptance is retained as a proposal. A host-only `closure_critique` purpose
 reuses an ordinary owned `consult-N` session, not the model-facing consultation
 purpose enum. It receives the original goal/stopping response and bounded evidence,
-not the coach's approval. The same coach receives one additional adjudication
-prompt and must record `critique_response`; failure cannot apply the proposal.
-There is one critic/adjudication exchange per prospective final stopping case,
-not a recursive deciding hierarchy. Researcher continuation and the stalled
-counter retain their original semantics.
+not the coach's approval. After the proposer shuts down, the persistent researcher
+receives the full critique for one response/investigation. A fresh
+`adjudicator-N` session uses purpose `coach` and its configured model, with only
+read/list/image/decision tools. It receives the original goal, critique, response
+and prior review context, not the proposed approval. It must record
+`critique_response` and explicit `required_corrections`; acceptance rejects any
+outstanding correction. Required edits use ordinary researcher continuation,
+not conditional acceptance or a separate report writer. Semantic judgments remain
+fallible. There is one critic/response/fresh-judge exchange per prospective final
+stopping case, not a recursive deciding hierarchy. Progress is counted once
+against the prior review, including the intervening researcher work.
 
 Allocation requires every existing session settled, idle and with known usage.
 An earlier failed adviser does not block later closure once its usage has settled
@@ -164,23 +208,34 @@ and shutdown succeeds. Successful shutdown clears its in-flight marker; this
 does not turn its failed answer into a successful consultation. Incomplete
 settlement or shutdown still blocks further inference.
 The host reduces the finite coach's cumulative ceiling before reassigning unused
-pool capacity to the critic, protecting adjudication and, where possible, future
-research. The critic has no independent credit cap. After known, settled
-criticism, the coach receives unused capacity again; ordinary adviser headroom
-is restored up to its previous unspent amount. Both transfers have unique
-allowance revision records, plus closure allocation/settlement records. No
-exhausted session is renewed, no waiting caller is updated and no old spend
-disappears. Criticism lasts at most 7200 seconds including shutdown, reserves
-600 seconds for adjudication and is bounded by the original execution deadline.
+pool capacity to the critic, mandatorily protecting a provider-minimum allowance
+each for the closing response and fresh judge. The critic has no independent
+credit cap. After known, settled criticism the proposer closes, unused capacity
+funds the researcher response. The judge uses actual remaining funds after response
+settlement, protecting future continuation/review headroom when affordable.
+Transfers have unique allowance revision and closure allocation/settlement records. No
+exhausted session is renewed and no old spend disappears. Waiting-caller transfers
+are restricted to the exact owned consultation callback described above.
+Criticism lasts at most 7200 seconds including shutdown, reserves
+600 seconds each for response and adjudication, and is bounded by the original
+execution deadline. The response can use more available time but its own deadline
+is 600 seconds before the execution deadline, retaining the usual shutdown grace.
 Critic prompts identify both deadlines; evidence results refresh response time
 remaining. The coach remains bounded by the execution deadline only.
 Insufficient capacity is review-unavailable, never silently skipped approval.
 
-Only enabled follow-up coaches can have two prompts; the initial coach and all
-advisers retain one-prompt bounds. Usage binds the second prompt to a retained
-acceptance proposal and the exact completed owned closure-critique response.
-Legacy frozen records retain the previous bounds and bytes. Critic and enabled
-coach image tools reuse the inspector's PNG/JPEG size/dimension validation but
+New frozen prompts advertise `closure_response_version = 1`. Every coach,
+adjudicator and adviser has at most one prompt. An extra researcher closing prompt
+requires a retained proposal and exact completed owned critique in
+`closure/N/request.json`. Attempted delivery is not a settled response:
+`submitted.json` binds the exact prompt, and `response.json` binds the researcher
+answer and settled prompt metrics. The fresh judge's own reference must bind
+those exact records. One prompt cannot claim both a closing and an operator-idea
+extra allowance. Ideas can still accompany that response and remain subject to
+the final inbox cutoff. Missing or failed responses never authorize adjudication.
+Legacy frozen records retain their earlier same-coach prompt bounds and bytes;
+an unknown capability version is rejected, not interpreted as legacy.
+Critic and enabled coach image tools reuse the inspector's PNG/JPEG size/dimension validation but
 not its state access. Critic read/image counts are uncapped, unlike the coach's
 128 reads/eight images. Each image is at most 4 MiB, retained in a bounded
 6-MiB evidence record; ordinary pages keep their 128-KiB retention bound.
@@ -253,21 +308,58 @@ inspection. Unknown spending blocks another question; operator accounting uses
 the same receipt-bound append-only mechanism, in the inspection state directory.
 New questions recover inspection-owned dead work only, never research work.
 
-The six custom tools expose status, frozen execution/review details, bounded
+The evidence tools expose status, frozen execution/review details, bounded
 ordinary files/images, directory listings, literal search and exact-run selected
-public events. Closed tool metadata is verified before prompting. No external
-retrieval, arbitrary commands/files, session attachment or research mutation is
-available. Session roles and IDs must match the research envelope; completed
+public events, plus published idea metadata. One narrow tool prepares captured
+idea drafts in the owned inspection directory, never inside research. Closed tool
+metadata is verified before prompting. No external retrieval, arbitrary
+commands/files, session attachment or research editing is available.
+Session roles and IDs must match the research envelope; completed
 snapshot files must match their receipt-bound manifest. Every retrieved answer
 source is captured with exact read arguments, time and coverage; terminal
 inspection receipts bind those captures by hash. Live or interrupted captures
 without a terminal provider manifest are explicitly not receipt-verified.
+Successfully settled inspection receipts also bind draft manifests. Preview and
+publication verify the exact draft and captured bytes; a separate authenticated
+human HTTP action publishes the reviewed hash. The model has no publication tool,
+and a view-only server cannot publish. Ordinary monitoring leaves the entire
+research file inventory unchanged.
 
 The HTTP server binds only loopback, authenticates API access with a random token
 and checks Host/Origin. Browser content uses text nodes and bounded PNG/JPEG data,
 not executable research HTML. Status polling during an answer does not invoke a
 model. Browser closure is not research cancellation; explicit inspector shutdown
 requests only its own question's cancellation and retains unresolved reservations.
+
+## Operator idea publication and delivery
+
+The inbox is a bounded file index, not a campaign/scientific database. Explicit
+publication streams selected sources into an owned staging directory, validates
+their identities, publishes an immutable revision, then atomically updates the
+project-qualified head index. Failed capture/index updates never admit a revision.
+Historical revisions and replies are retained. Updates use exact base revisions;
+identical repeated submissions are idempotent. Mutable drafts are never polled.
+The short inbox writer lock is separate from the execution-long controller lock.
+File copies/hashes occur outside it; publication and final closure are serialized.
+
+New frozen prompts explicitly opt into `operator_ideas_version = 1`. Delivery
+captures exact revision references in both an owned runtime record and a readable
+workspace index. Prompts contain only pointers, not document bodies. Prepare,
+successful SDK submission and successful settled response have distinct records.
+Cancellation, deadline, quota or settlement errors never become response receipts.
+A new revision arriving during a response stays pending; acknowledging the old
+revision cannot acknowledge its replacement. Coach/critic context names captured
+files and replies without seeding the critic with preliminary approval.
+
+Additional same-researcher prompts require owned, envelope-bound delivery records;
+usage validation subtracts only these authorized prompts before checking the
+original researcher/coach alternation. Original frozen prompts keep their old
+bounds. No adviser/coach sessions are fabricated to balance counts. New ideas
+do not renew session limits, consume protected review funds, reset stalled counters
+or change authority. Both coached and coach-off final completion check the latest
+inbox under its writer lock. A successful cutoff binds the execution and publication
+sequence; arrivals afterwards wait for a later authorized run. The cutoff is an
+operational delivery boundary, not a claim of scientific completion or final billing.
 
 Native agents are trusted and share the operator's filesystem identity. These
 service checks do not claim isolation from malicious native code or a replacement

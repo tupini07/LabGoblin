@@ -23,6 +23,9 @@ def parser():
     init.add_argument("--goal-file", type=Path)
     init.add_argument("--model", default="auto")
     init.add_argument("--reasoning-effort", default="medium")
+    for role in ("coach", "closure-critic", "advice", "claim-review"):
+        init.add_argument(f"--{role}-model",
+                          help=f"Model for {role}; defaults to --model and does not enable the role")
     init.add_argument("--credits", default="1000")
     init.add_argument("--timeout", type=float, default=5400)
     init.add_argument("--cpus", type=int, default=2)
@@ -34,7 +37,7 @@ def parser():
     init.add_argument("--consultant", action=argparse.BooleanOptionalAction, default=False,
                       help="Allow bounded read-only adviser calls and public literature retrieval within the project pool")
     init.add_argument("--closure-critic", action=argparse.BooleanOptionalAction, default=False,
-                      help="Require an independent challenge and coach adjudication before final acceptance; requires coach and consultant")
+                      help="Require independent criticism, researcher response and fresh adjudication before final acceptance; requires coach and consultant")
     init.add_argument("--ledger", type=Path)
     run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
     run.add_argument("project", nargs="?", default=".")
@@ -55,7 +58,7 @@ def parser():
     record.add_argument("--confirm", required=True, help="Exact project ID")
     record.add_argument("--estimate", action="store_true")
     record.add_argument("--inspection", action="store_true", help="Record only separate inspection spending")
-    inspect = commands.add_parser("inspect", help="Open a read-only local research inspector; no model calls until a question")
+    inspect = commands.add_parser("inspect", help="Open campaign chat and evidence browsing; ideas need human publication")
     inspect.add_argument("project", nargs="?", default=".")
     inspect.add_argument("--port", type=int, default=0, help="Loopback port; zero chooses an available port")
     inspect.add_argument("--open", action="store_true", help="Open the printed token-qualified URL in your browser")
@@ -63,6 +66,19 @@ def parser():
     inspect.add_argument("--model", help="Explicit inspection model, required when enabling paid questions")
     inspect.add_argument("--reasoning-effort", default="medium")
     inspect.add_argument("--timeout", type=float, default=300, help="Per-question deadline including shutdown")
+    ideas = commands.add_parser("ideas", help="Publish immutable operator suggestions or read inbox status; no model call")
+    ideas_commands = ideas.add_subparsers(dest="ideas_command", required=True)
+    idea_status = ideas_commands.add_parser("status")
+    idea_status.add_argument("project", nargs="?", default=".")
+    publish = ideas_commands.add_parser("publish", help="Explicitly publish exact draft files; later edits need a new revision")
+    publish.add_argument("project", nargs="?", default=".")
+    publish.add_argument("--file", type=Path, required=True)
+    publish.add_argument("--title", required=True)
+    publish.add_argument("--id", help="Stable idea ID; generated if omitted")
+    publish.add_argument("--base", help="Exact current revision required for an update")
+    publish.add_argument("--sha256", help="Require these exact primary-file bytes")
+    publish.add_argument("--attachment", action="append", type=Path, default=[])
+    publish.add_argument("--attribution", default="Explicit operator CLI publication")
     machine = commands.add_parser("machine", help="Explicit shared native resource capacity")
     machine_commands = machine.add_subparsers(dest="machine_command", required=True)
     show = machine_commands.add_parser("status")
@@ -97,6 +113,8 @@ def main(arguments=None):
                             cpus=args.cpus, memory_mb=args.memory_mb, gpus=tuple(args.gpu),
                             coach=args.coach, max_stalled_reviews=args.max_stalled_reviews, consultant=args.consultant,
                             closure_critic=args.closure_critic,
+                            coach_model=args.coach_model, closure_critic_model=args.closure_critic_model,
+                            advice_model=args.advice_model, claim_review_model=args.claim_review_model,
                             ledger=str(args.ledger.resolve()) if args.ledger else "")
             result = runtime.initialize(args.project, config,
                                         goal=read_text(args.goal_file) if args.goal_file else None)
@@ -133,6 +151,14 @@ def main(arguments=None):
                                   reasoning_effort=args.reasoning_effort, timeout=args.timeout)
             serve(inspector, port=args.port, chat=args.credits is not None, open_browser=args.open)
             return 0
+        elif args.command == "ideas":
+            from labgoblin.ideas import Inbox
+            inbox = Inbox(args.project)
+            if args.ideas_command == "publish":
+                result = inbox.publish([args.file, *args.attachment], idea_id=args.id, heading=args.title,
+                                       base=args.base, attribution=args.attribution, expected_sha256=args.sha256)
+            else:
+                result = {**inbox.status(), "entries": inbox.entries()}
         else:
             if args.machine_command == "configure":
                 ledger = (ResourceLedger(args.ledger) if args.ledger.exists()

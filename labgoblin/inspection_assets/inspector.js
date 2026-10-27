@@ -8,6 +8,7 @@ let nextPage = null;
 let polling = null;
 let busy = false;
 let latestRun = null;
+let chatEnabled = false;
 
 async function api(path, args) {
   const response = await fetch(path, {
@@ -114,10 +115,67 @@ async function messages(reset = true) {
         $("evidence-heading").scrollIntoView({ block: "nearest" });
       });
     }
+    for (const draft of item.idea_drafts || []) {
+      const holder = element("div", undefined, article);
+      holder.className = "idea-draft";
+      const review = element("button", `Review idea draft: ${draft.title}`, holder);
+      review.onclick = () => run(async () => {
+        const captured = await api(`/api/idea-draft?run=${encodeURIComponent(item.id)}&draft=${encodeURIComponent(draft.id)}`);
+        holder.replaceChildren();
+        element("h4", captured.title, holder);
+        element("p", `Not published. Idea ${captured.idea_id}; base ${captured.base_revision || "new"}. SHA256 ${captured.sha256}`, holder);
+        element("pre", captured.message, holder);
+        for (const [index, source] of captured.files.entries()) {
+          const file = element("button", `${source.path} (${source.bytes} bytes)`, holder);
+          file.onclick = () => run(() => draftFile(item.id, draft.id, index, /\.(png|jpe?g)$/i.test(source.path)));
+        }
+        element("p", "Publish these exact captured files as your suggestion? This does not restart research, renew limits or guarantee investigation.", holder);
+        const publish = element("button", "Publish idea", holder);
+        publish.disabled = !chatEnabled;
+        publish.onclick = () => run(async () => {
+          publish.disabled = true;
+          try {
+            const result = await api("/api/publish-idea", { run: item.id, draft: draft.id, sha256: captured.sha256 });
+            publish.textContent = result.unchanged ? "Already published" : "Published";
+            element("p", `Published revision ${result.revision}. Pending delivery unless an owned reply is already recorded.`, holder);
+            await ideas();
+            await refresh();
+          } catch (error) {
+            publish.disabled = !chatEnabled;
+            throw error;
+          }
+        });
+      });
+    }
   }
   $("messages").prepend(fragment);
   historyOffset = value.offset;
   $("more-history").hidden = historyOffset === 0;
+}
+async function draftFile(runId, draftId, index, image, offset = 0) {
+  const source = await api("/api/idea-draft-file", { run: runId, draft: draftId, index, image, offset });
+  display(source);
+  nextPage = source.next_offset === null || source.next_offset === undefined
+    ? null : () => draftFile(runId, draftId, index, image, source.next_offset);
+  $("next").hidden = nextPage === null;
+  $("evidence-heading").scrollIntoView({ block: "nearest" });
+}
+async function ideas() {
+  const value = await api("/api/ideas");
+  $("ideas").replaceChildren();
+  element("p", `${value.pending} pending / ${value.items} idea identities.`, $("ideas"));
+  for (const item of value.entries) {
+    const entry = element("div", undefined, $("ideas"));
+    element("p", `${item.title}: ${item.status} (revision ${item.revision})`, entry);
+    const read = element("button", "Read published file", entry);
+    read.onclick = () => run(() => browse("read", false, 0, { scope: "workspace", path: item.file, offset: 0 }));
+    const manifest = element("button", "Files and provenance", entry);
+    manifest.onclick = () => run(() => browse("read", false, 0, { scope: "workspace", path: item.manifest, offset: 0 }));
+    if (item.response) {
+      const reply = element("button", "Read retained researcher reply", entry);
+      reply.onclick = () => run(() => browse("read", false, 0, { scope: "workspace", path: item.response.path, offset: 0 }));
+    }
+  }
 }
 async function refresh() {
   const value = await api("/api/status");
@@ -129,6 +187,7 @@ async function refresh() {
   $("project").textContent = research.root;
   const budget = research.budget;
   const observer = value.inspection.budget;
+  chatEnabled = value.chat_enabled;
   $("status").textContent =
     `Observed ${new Date(research.observed_at * 1000).toLocaleString()}\n` +
     `Research: ${research.state}${latest ? `; recorded owner ${latest.owner}; ${latest.phase}` : ""}\n` +
@@ -137,7 +196,7 @@ async function refresh() {
     (observer ? `Separate inspection usage: ${observer.used.toFixed(3)} / ${observer.configured}; reserved ${(observer.reserved_nano / 1e9).toFixed(3)}; estimates ${observer.estimated.toFixed(3)}; unknown bills ${observer.uncovered_unknown.length}` :
       "Inspection allowance: not authorized");
   $("chat-policy").textContent = value.chat_enabled
-    ? "Submitting a question spends from the separate inspection allowance. Evidence browsing and refresh do not call a model."
+    ? "Messages use the separate inspection allowance. Idea drafts need your Publish action. Browsing, publication and refresh do not call a model."
     : "View-only. Start with an explicit --credits allowance to enable questions; browsing remains model-free.";
   $("ask").disabled = !value.chat_enabled || value.busy;
   $("question").disabled = !value.chat_enabled || value.busy;
@@ -149,12 +208,12 @@ async function refresh() {
     }
   }
   if (value.error) showError(value.error);
-  if (busy && !value.busy) await messages();
+  if (busy && !value.busy) { await messages(); await ideas(); }
   busy = value.busy;
   if (busy && polling === null) polling = setInterval(() => run(refresh), 1500);
   if (!busy && polling !== null) { clearInterval(polling); polling = null; }
 }
-$("refresh").onclick = () => run(async () => { await refresh(); await messages(); });
+$("refresh").onclick = () => run(async () => { await refresh(); await messages(); await ideas(); });
 $("read").onclick = () => run(() => browse("read"));
 $("image").onclick = () => run(() => browse("read", true));
 $("list").onclick = () => run(() => browse("listing"));
@@ -181,4 +240,5 @@ run(async () => {
   if (!token) throw new Error("Open the exact local URL printed by labgoblin inspect. Its fragment authorizes this browser.");
   await refresh();
   await messages();
+  await ideas();
 });

@@ -3,31 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LabGoblin Inspector</title>
+  <title>LabGoblin Campaign Chat</title>
   <link rel="stylesheet" href="/inspector.css">
   <script src="/inspector.js" defer></script>
 </head>
 <body>
   <header>
-    <h1>Research inspector <span>Read-only</span></h1>
+    <h1>Research inspector <span>Campaign chat and operator ideas</span></h1>
     <p id="project"></p>
     <div id="status" aria-live="polite">Loading observed facts...</div>
     <button id="refresh">Refresh facts</button>
-    <p class="muted">Execution completion is not scientific validation. Inspection never steers or restarts research.</p>
+    <p class="muted">Evidence browsing never changes research. Only ideas you explicitly publish enter the inbox. Chat cannot restart research or change its permissions or budget.</p>
   </header>
   <p id="error" role="alert"></p>
   <main>
     <section aria-labelledby="chat-heading">
-      <h2 id="chat-heading">Ask about the research</h2>
+      <h2 id="chat-heading">Discuss the campaign</h2>
       <p id="chat-policy"></p>
       <div id="messages" aria-live="polite"></div>
       <button id="more-history" hidden>Load more retained conversation</button>
       <form id="question-form">
         <label for="question">Question</label>
-        <textarea id="question" rows="3" maxlength="4096" placeholder="Why did it stop? What changed? Show the decisive comparison."></textarea>
-        <button id="ask" type="submit">Ask inspector</button>
+        <textarea id="question" rows="3" maxlength="4096" placeholder="What changed? Show the comparison. Prepare an idea for the researcher to consider."></textarea>
+        <button id="ask" type="submit">Send message</button>
         <button id="cancel" type="button" hidden>Cancel this answer</button>
       </form>
+      <h2>Published ideas</h2>
+      <p class="muted">Ideas are suggestions, not commands. The researcher receives file pointers at startup or a stopping boundary. A retained reply is not proof that an idea was investigated. Late publications remain pending for a later authorized execution.</p>
+      <div id="ideas"></div>
     </section>
     <section aria-labelledby="evidence-heading">
       <h2 id="evidence-heading">Evidence</h2>

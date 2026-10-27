@@ -159,6 +159,35 @@ def test_real_sdk_consultation_interruption_is_accounted_and_owned(project, ledg
             runtime.run(root, resume=True)
 
 
+def test_real_sdk_shared_allowance_transfer_is_ordered_and_has_no_300_credit_quota(project, ledger, monkeypatch):
+    root, config, _ = project
+    (root / "labgoblin.toml").write_text(replace(config, consultant=True, max_ai_credits=1000).toml(),
+                                      encoding="utf-8")
+    fixture_provider(root, monkeypatch, "consult")
+    fixture = {**read_json(root / "fixture-provider.json"), "caller": "researcher",
+               "role_costs": {"adviser": 500_000_000_000}}
+    (root / "fixture-provider.json").write_text(json.dumps(fixture), encoding="utf-8")
+    result = runtime.run(root)
+    assert result["status"] == "completed", result
+    assert result["usage"]["totalNanoAiu"] == 510_000_000_000
+    researcher, adviser = result["usage"]["sessions"]
+    assert researcher["allowance_nano"] == 500_000_000_000
+    assert adviser["allowance_nano"] == 960_000_000_000
+    calls = [json.loads(line) for line in (root / "fixture-rpc.jsonl").read_text().splitlines()]
+    transfers = [(index, call["session_limits"]["maxAiCredits"]) for index, call in enumerate(calls)
+                 if call["method"] == "session.options.update" and call["session_id"] == researcher["session_id"]
+                 and call["session_limits"] is not None]
+    assert [limit for _, limit in transfers] == [40, 500]
+    adviser_send = next(index for index, call in enumerate(calls)
+                        if call["method"] == "session.send" and call["session_id"] == adviser["session_id"])
+    caller_release = next(index for index, call in enumerate(calls)
+                          if call["method"] == "session.tools.handlePendingToolCall"
+                          and call["session_id"] == researcher["session_id"])
+    assert transfers[0][0] < adviser_send < transfers[1][0] < caller_release
+    assert runtime.status(root)["budget"]["remaining"] == 490
+    assert not ledger.rows()
+
+
 def test_real_sdk_claim_review_returns_counterexample_to_same_researcher(project, ledger, monkeypatch):
     root, config, record = project
     (root / "labgoblin.toml").write_text(

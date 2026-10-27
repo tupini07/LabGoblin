@@ -10,7 +10,7 @@ import sys
 import time
 import uuid
 
-from labgoblin import credits, guidance, payload, provider
+from labgoblin import closing, credits, guidance, payload, provider
 from labgoblin.config import Config
 from labgoblin.processes import background_options, bound_diagnostics, own_handle, process_state
 from labgoblin.protocol import (
@@ -137,6 +137,7 @@ def adjustments(state, rows):
 
 
 def status(project):
+    from labgoblin.ideas import Inbox
     root, state, record = project_record(project)
     ledger = bound_ledger(state)
     rows = ledger.runs(record["id"]) if ledger else []
@@ -161,6 +162,7 @@ def status(project):
                                            if receipt else None),
                      "directory": envelope.root, "config": envelope.config})
     return {"project_id": record["id"], "root": str(root), "budget": budget, "runs": runs,
+            "ideas": Inbox(root).status(),
             "state": runs[-1]["status"] if runs else "initialized",
             "candidate_config": candidate.to_dict() if candidate else None, "candidate_error": candidate_error,
             "note": "Process completion and coach acceptance are not independent scientific validation. "
@@ -216,6 +218,7 @@ def usage_record(envelope, *, complete):
     roles, amount, research_prompts = set(), 0, 0
     adjudications = []
     progress_reviews = "max_stalled_reviews" in envelope.config
+    fresh_closure = closing.enabled(read_json(Path(envelope.root) / "prompt.json"))
     for session in sessions:
         table(session, "provider session")
         role = session.get("role")
@@ -224,7 +227,9 @@ def usage_record(envelope, *, complete):
                  and isinstance(role, str) and re.fullmatch(r"coach-(0|[1-9][0-9]{0,5})", role))
         consultant = (envelope.config.get("consultant", False)
                       and isinstance(role, str) and re.fullmatch(r"consult-(0|[1-9][0-9]{0,5})", role))
-        if (role not in allowed and not consultant and not coach) or role in roles:
+        judge = (fresh_closure and envelope.config.get("closure_critic", False)
+                 and isinstance(role, str) and re.fullmatch(r"adjudicator-([1-9][0-9]{0,5})", role))
+        if (role not in allowed and not consultant and not coach and not judge) or role in roles:
             raise ValueError("Usage contains an unauthorized or duplicated provider role")
         expected = str(uuid.UUID(envelope.id) if role == "researcher" else uuid.uuid5(uuid.UUID(envelope.id), role))
         if session.get("session_id") != expected:
@@ -234,12 +239,13 @@ def usage_record(envelope, *, complete):
             raise ValueError("Final usage cannot contain an unsettled session")
         prompts = integer(session.get("prompts"), "session prompt count", zero=True)
         if role == "researcher":
-            research_prompts = prompts
-        adjudication = (coach and role != "coach-0" and envelope.config.get("closure_critic", False)
+            from labgoblin.ideas import extra_prompts
+            research_prompts = prompts - extra_prompts(envelope, prompts)
+        adjudication = (not fresh_closure and coach and role != "coach-0" and envelope.config.get("closure_critic", False)
                         and envelope.config.get("consultant", False))
         if ((role != "researcher" and prompts > (2 if adjudication else 1))
                 or (role == "researcher" and not (progress_reviews and envelope.config["coach"])
-                    and prompts > (2 if envelope.config["coach"] else 1))):
+                    and research_prompts > (2 if envelope.config["coach"] else 1))):
             raise ValueError("Usage exceeds the bounded research/review conversation")
         if adjudication and prompts == 2:
             reference = read_json(Path(envelope.root) / "sessions" / role / "closure-adjudication.json")
@@ -251,6 +257,12 @@ def usage_record(envelope, *, complete):
         roles.add(role)
     if "researcher" not in roles or ("coach-1" in roles and "coach-0" not in roles) or amount != credits.usage_nano(value):
         raise ValueError("Aggregate usage does not match its exact owned sessions")
+    closure_prompts = closing.response_prompts(envelope, {item["role"]: item for item in sessions})
+    for number in closure_prompts:
+        idea_path = Path(envelope.root) / "ideas" / f"prompt-{number}.json"
+        if idea_path.exists() and read_json(idea_path).get("extra_prompt"):
+            raise ValueError("One researcher prompt cannot claim two extra-prompt allowances")
+    research_prompts -= len(closure_prompts)
     advisers = {role for role in roles if role.startswith("consult-")}
     if advisers != {f"consult-{index}" for index in range(len(advisers))}:
         raise ValueError("Consultation usage must retain every admitted adviser session")
@@ -427,11 +439,14 @@ def run(project, *, resume=False):
         directory = state / "runs" / run_id
         directory.mkdir()
         frozen = freeze_runtime(state)
-        prompt = {"goal": goal, "instructions": instructions,
+        from labgoblin.ideas import VERSION as IDEAS_VERSION
+        prompt = {"goal": goal, "instructions": instructions, "operator_ideas_version": IDEAS_VERSION,
                   "provider_command": capabilities["command"],
                   "goal_prompt": goal + "\n\nUse this existing interpreter for local work: " + sys.executable +
                   "\nContinue from retained research-notes.md and artifacts if present. "
                   "Do not rerun completed work merely because this is a new controller execution."}
+        if config.closure_critic:
+            prompt["closure_response_version"] = closing.VERSION
         publish_json(directory / "prompt.json", prompt)
         owner = {"kind": "research-run", "handle": launcher}
         ledger.request(run_id, record["id"], run_id, "research-run", config.resources, owner, native=True)

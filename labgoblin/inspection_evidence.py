@@ -19,7 +19,7 @@ from labgoblin.storage import canonical, digest, excluded_name, publish_json, re
 PAGE_BYTES = 16384
 FILE_BYTES = 8 * 1024 * 1024
 IMAGE_BYTES = 4 * 1024 * 1024
-ROLE = re.compile(r"researcher|coach-(0|[1-9][0-9]{0,5})|consult-(0|[1-9][0-9]{0,5})")
+ROLE = re.compile(r"researcher|coach-(0|[1-9][0-9]{0,5})|consult-(0|[1-9][0-9]{0,5})|adjudicator-([1-9][0-9]{0,5})")
 
 
 def safe_path(root, relative):
@@ -53,6 +53,27 @@ def bounded_bytes(path, limit):
     if len(body) != before.st_size:
         raise ValueError("Evidence changed or exceeded its read bound")
     return body
+
+
+def text_page(path, offset, limit, maximum):
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+        raise ValueError(f"Evidence must be a regular file of at most {maximum} bytes")
+    hashed, size, page = hashlib.sha256(), 0, bytearray()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            if size + len(block) > maximum:
+                raise ValueError("Evidence exceeded its read bound")
+            start, end = max(0, offset - size), min(len(block), offset + limit - size)
+            if start < end:
+                page.extend(block[start:end])
+            hashed.update(block)
+            size += len(block)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns, before.st_ino) != (
+            after.st_size, after.st_mtime_ns, after.st_ino) or size != before.st_size:
+        raise ValueError("Evidence changed during this read; refresh it")
+    return bytes(page), hashed.hexdigest(), size
 
 
 def record(path, limit=1024 * 1024):
@@ -104,6 +125,13 @@ class Evidence:
                 "omitted_runs": max(0, len(value["runs"]) - 100),
                 "coverage": "Read-only operational facts, not scientific progress or independent validation"}
 
+    def ideas(self, args):
+        from labgoblin.ideas import Inbox
+        table(args, "idea listing", set())
+        inbox = Inbox(self.root)
+        return {**inbox.status(), "entries": inbox.entries(), "observed_at": time.time(), "live": True,
+                "coverage": "Operator publications and retained replies, not verified research findings"}
+
     def run(self, run_id):
         if not isinstance(run_id, str) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
             raise ValueError("An exact research execution ID is required")
@@ -153,25 +181,31 @@ class Evidence:
         image = args.get("image", False)
         if type(image) is not bool:
             raise ValueError("image must be boolean")
-        body = bounded_bytes(path, IMAGE_BYTES if image else FILE_BYTES)
-        sha = hashlib.sha256(body).hexdigest()
+        if image:
+            body = bounded_bytes(path, IMAGE_BYTES)
+            sha, size = hashlib.sha256(body).hexdigest(), len(body)
+        else:
+            from labgoblin.ideas import MAX_BYTES
+            offset = integer(args.get("offset", 0), "byte offset", zero=True)
+            limit = integer(args.get("limit", PAGE_BYTES), "page bytes")
+            if limit > PAGE_BYTES:
+                raise ValueError("Invalid evidence page; read at most 16 KiB")
+            published = tuple(part.casefold() for part in path.relative_to(root).parts[:2]) == ("ideas_inbox", "published")
+            page, sha, size = text_page(path, offset, limit, MAX_BYTES if published else FILE_BYTES)
         if "sha256" in args and args["sha256"] != sha:
             raise ValueError("Evidence changed between pages; start a fresh read")
+        if not image and offset > size:
+            raise ValueError("Invalid evidence page offset")
         if inventory is not None:
             item = inventory.get(relative)
-            if item is None or item["sha256"] != sha or item["bytes"] != len(body):
+            if item is None or item["sha256"] != sha or item["bytes"] != size:
                 raise ValueError("Evidence bytes differ from their captured snapshot")
-        result = {**context, "path": relative, "sha256": sha, "bytes": len(body), "observed_at": time.time()}
+        result = {**context, "path": relative, "sha256": sha, "bytes": size, "observed_at": time.time()}
         if image:
             return {**result, "mime": image_type(body), "image": base64.b64encode(body).decode("ascii")}
-        offset = integer(args.get("offset", 0), "byte offset", zero=True)
-        limit = integer(args.get("limit", PAGE_BYTES), "page bytes")
-        if limit > PAGE_BYTES or offset > len(body):
-            raise ValueError("Invalid evidence page; read at most 16 KiB")
-        page = body[offset:offset + limit]
         return {**result, "offset": offset, "text": page.decode("utf-8", errors="replace"),
-                "next_offset": offset + limit if offset + limit < len(body) else None,
-                "truncated": offset != 0 or offset + limit < len(body)}
+                "next_offset": offset + limit if offset + limit < size else None,
+                "truncated": offset != 0 or offset + limit < size}
 
     def listing(self, args):
         table(args, "listing request", {"scope", "path", "offset"})
@@ -382,6 +416,7 @@ class EvidenceTools:
                   "sha256": {"type": "string", "description": "Previous page hash; reject changed evidence"}}
         definitions = {
             "status": ([], [], "Read current execution state and research spending; not scientific progress."),
+            "ideas": ([], [], "Read operator idea revisions, pending state and reply pointers; never publish."),
             "read": (["scope", "path", "offset", "limit", "image", "sha256"], ["path"], "Read cited text pages or inspect a PNG/JPEG image. No execution."),
             "listing": (["scope", "path", "offset"], [], "List bounded evidence entries with paging."),
             "search": (["scope", "path", "query", "offset"], ["query"], "Search a bounded set of text files; returns explicit coverage."),

@@ -24,12 +24,22 @@ class Config:
     max_stalled_reviews: int = 10
     consultant: bool = False
     closure_critic: bool = False
+    coach_model: str | None = None
+    closure_critic_model: str | None = None
+    advice_model: str | None = None
+    claim_review_model: str | None = None
     ledger: str = ""
     max_snapshot_bytes: int = 64 * 1024 * 1024 * 1024
 
     def __post_init__(self):
         require_version(self.version, CONFIG_VERSION, "configuration")
         text(self.model, "model")
+        for field in ("coach_model", "closure_critic_model", "advice_model", "claim_review_model"):
+            value = getattr(self, field)
+            if value is not None:
+                text(value, field)
+                if value != value.strip():
+                    raise ValueError(f"{field} must be a nonempty model ID without surrounding whitespace")
         if self.reasoning_effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
             raise ValueError("Unsupported reasoning_effort")
         credits.parse_limit(self.max_ai_credits)
@@ -63,7 +73,16 @@ class Config:
         return Path(self.ledger).resolve() if self.ledger else machine_ledger_path()
 
     def to_dict(self):
-        return {**asdict(self), "gpus": list(self.gpus)}
+        return {key: value for key, value in {**asdict(self), "gpus": list(self.gpus)}.items()
+                if value is not None}
+
+    def model_for(self, purpose):
+        overrides = {"researcher": None, "inspector": None, "coach": self.coach_model,
+                     "closure_critique": self.closure_critic_model, "advice": self.advice_model,
+                     "claim_review": self.claim_review_model}
+        if purpose not in overrides:
+            raise ValueError(f"Unknown model purpose: {purpose}")
+        return overrides[purpose] or self.model
 
     @classmethod
     def parse(cls, value):

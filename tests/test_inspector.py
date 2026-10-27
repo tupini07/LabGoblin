@@ -183,7 +183,8 @@ def test_owned_sdk_chat_is_read_only_separately_billed_and_remembers_context(obs
     assert options["enableSkills"] is False and options["requestExtensions"] is False
     assert {name.removeprefix("custom:") for name in options["availableTools"]} == {
         "labgoblin_inspect_status", "labgoblin_inspect_read", "labgoblin_inspect_listing",
-        "labgoblin_inspect_search", "labgoblin_inspect_session", "labgoblin_inspect_execution"}
+        "labgoblin_inspect_search", "labgoblin_inspect_session", "labgoblin_inspect_execution",
+        "labgoblin_inspect_ideas", "labgoblin_prepare_idea"}
     assert not options.get("mcpServers")
     (observer.project / "report.md").write_text("A new control succeeded; global impossibility remains unproved.")
     second = observer.ask("What about the new control?", command=argv)
@@ -279,30 +280,38 @@ def test_soft_overshoot_is_retained_and_blocks_more_questions(observer, ledger):
     assert len(ledger.runs(observer.id, inspection=True)) == 1
 
 
-def test_session_events_are_qualified_bounded_and_show_retention_limits(observer, project, ledger):
+@pytest.mark.parametrize("role", ["researcher", "adjudicator-1"])
+def test_session_events_are_qualified_bounded_and_show_retention_limits(observer, project, ledger, role):
     envelope = captured(project, ledger)
-    directory = Path(envelope.root) / "sessions" / "researcher"
+    directory = Path(envelope.root) / "sessions" / role
     import uuid
-    publish_json(directory / "identity.json", {"run_id": envelope.id, "envelope_digest": envelope.digest,
-                                              "session_id": str(uuid.UUID(envelope.id)), "role": "researcher"})
+    session_id = str(uuid.UUID(envelope.id) if role == "researcher" else uuid.uuid5(uuid.UUID(envelope.id), role))
+    identity = {"run_id": envelope.id, "envelope_digest": envelope.digest, "session_id": session_id, "role": role}
+    publish_json(directory / "identity.json", identity)
     event = {"type": "assistant.message", "timestamp": "now", "data": {"content": "x" * 9000}}
     (directory / "events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
     evidence = Evidence(observer.project, observer.project_id)
-    result = evidence.session({"run": envelope.id})
+    request = {"run": envelope.id, **({"role": role} if role != "researcher" else {})}
+    result = evidence.session(request)
     assert len(result["events"][0]["data"]) == 8192 and result["events"][0]["truncated"]
     assert result["retention_truncated"] is None
     assert result["next_offset"] is None
     with pytest.raises(ValueError, match="inside an event"):
-        evidence.session({"run": envelope.id, "offset": 1})
+        evidence.session({**request, "offset": 1})
     with pytest.raises(ValueError, match="role"):
         evidence.session({"run": envelope.id, "role": "..\\other"})
+    with pytest.raises(ValueError, match="role"):
+        evidence.session({"run": envelope.id, "role": "adjudicator-0"})
     rows = [json.dumps({**event, "data": {"content": "x" * 800000}}).encode() + b"\n"] * 4
     (directory / "events.jsonl").write_bytes(b"".join(rows))
-    page = evidence.session({"run": envelope.id})
+    page = evidence.session(request)
     assert page["scanned_bytes"] <= 2 * 1024 * 1024
     assert len(page["events"]) == 2 and page["next_offset"] == sum(map(len, rows[:2]))
-    tail = evidence.session({"run": envelope.id, "offset": page["next_offset"]})
+    tail = evidence.session({**request, "offset": page["next_offset"]})
     assert len(tail["events"]) == 2 and tail["next_offset"] is None
+    (directory / "identity.json").write_text(json.dumps({**identity, "session_id": str(uuid.uuid4())}))
+    with pytest.raises(ValueError, match="not bound"):
+        evidence.session(request)
 
 
 def test_restricted_driver_verifies_tools_and_denies_unregistered_actions(observer, project, ledger):
