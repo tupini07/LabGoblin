@@ -149,6 +149,7 @@ class Inspector:
                              "status": receipt["status"] if receipt else "running",
                              "reason": receipt["reason"] if receipt else "", "created": row["created"],
                              "history_omitted": prompt["history_omitted"], "sources": sources,
+                             "handoff_run": (prompt.get("handoff") or {}).get("research_run"),
                              "idea_drafts": result.get("idea_drafts", []) if answer is not None else []})
         return {"messages": messages, "total": len(rows), "offset": offset,
                 "next_offset": offset + limit if offset + limit < len(rows) else None}
@@ -271,7 +272,7 @@ class Inspector:
                 requested.append(envelope.id)
         return {"inspection_cancellation_requested": requested}
 
-    def ask(self, question, *, command=None):
+    def ask(self, question, *, command=None, handoff=None, invocation_id=None):
         text(question, "question")
         if len(question.encode("utf-8")) > 4096:
             raise ValueError("Question exceeds 4096 UTF-8 bytes")
@@ -279,12 +280,14 @@ class Inspector:
             config, ledger = self.profile(), self.ledger()
             if config is None or ledger is None:
                 raise ValueError("Chat is disabled; explicitly authorize a separate allowance with inspect --credits")
+            if handoff is not None and hash_file(self.state / "profile.json") != handoff["approval_sha256"]:
+                raise ValueError("Inspection approval changed since automatic reporting was authorized")
             self.recover(ledger)
             rows = ledger.runs(self.id, inspection=True)
             audited = runtime.adjustments(self.state, rows)
             allowance = credits.available(credits.summarize(rows, config.credit_limit, adjustments=audited))
-            current = Evidence(self.project, self.project_id).status()
-            history = self.history(offset=max(0, len(rows) - 8), limit=8)["messages"]
+            current = Evidence(self.project, self.project_id, terminal=handoff).status()
+            history = [] if handoff else self.history(offset=max(0, len(rows) - 8), limit=8)["messages"]
             context, size = [], 0
             for item in reversed(history):
                 pair = {"question": item["question"], "answer": item["answer"], "status": item["status"],
@@ -293,13 +296,16 @@ class Inspector:
                 if size > 32768:
                     break
                 context.insert(0, pair)
-            run_id, launcher = identifier(), own_handle(self.id)
+            run_id, launcher = invocation_id or identifier(), own_handle(self.id)
             directory = self.state / "runs" / run_id
             directory.mkdir()
             prompt = {"question": question, "target": str(self.project), "project_id": self.project_id,
-                      "idea_drafts_version": 1,
                       "history": context, "history_omitted": len(rows) - len(context),
                       "status": current, "provider_command": command or provider.capabilities()["command"]}
+            if handoff is not None:
+                prompt["handoff"] = handoff
+            else:
+                prompt["idea_drafts_version"] = 1
             publish_json(directory / "prompt.json", prompt)
             frozen = runtime.freeze_runtime(self.state)
             ledger.request(run_id, self.id, run_id, "inspection-run", config.resources,
@@ -359,10 +365,11 @@ def usage_record(envelope, *, complete):
 async def drive(envelope, deadline, *, client_factory=provider.client_for):
     from labgoblin.inspection_ideas import Drafts
     prompt = read_json(Path(envelope.root) / "prompt.json")
-    evidence = Evidence(prompt["target"], prompt["project_id"])
+    handoff = prompt.get("handoff")
+    evidence = Evidence(prompt["target"], prompt["project_id"], terminal=handoff)
     root = Path(envelope.root)
     tools = EvidenceTools(evidence, root / "evidence")
-    drafts = Drafts(evidence, root, envelope.id) if prompt.get("idea_drafts_version") == 1 else None
+    drafts = Drafts(evidence, root, envelope.id) if not handoff and prompt.get("idea_drafts_version") == 1 else None
     session = provider.Session(envelope, "inspector", str(uuid.UUID(envelope.id)), envelope.allowance_nano,
                                client_factory(envelope, coach=True), deadline)
     status, reason, answer = "completed", "", None
@@ -374,14 +381,17 @@ async def drive(envelope, deadline, *, client_factory=provider.client_for):
                 "totalNanoAiu": credits.usage_nano(session.usage), "sessions": [session.record()]})
 
     try:
+        from labgoblin.handoffs import INSTRUCTIONS as HANDOFF_INSTRUCTIONS
         await session.start(tools=tools.tools() + (drafts.tools() if drafts else []),
-                            system=INSTRUCTIONS, verify_tools=True)
+                            system=HANDOFF_INSTRUCTIONS if handoff else INSTRUCTIONS, verify_tools=True)
         initial = tools.capture("status", {})
-        answer = await session.ask(
+        question = ("Exact terminal execution evidence [E1]:\n" + json.dumps(initial) +
+                    "\n" + prompt["question"] if handoff else
             "Current operational evidence [E1]:\n" + json.dumps(initial) +
             "\nPrior chat (not current evidence):\"history_omitted\"=" + str(prompt["history_omitted"]) +
             "\n" + json.dumps(prompt["history"], ensure_ascii=False) +
-            "\nHuman question:\n" + prompt["question"], checkpoint)
+            "\nHuman question:\n" + prompt["question"])
+        answer = await session.ask(question, checkpoint)
         if not answer.strip() or len(answer.encode("utf-8")) > 65536:
             raise ValueError("Inspector answer is empty or exceeds 64 KiB")
         for citation in re.findall(r"\[(E[0-9]+)\]", answer):

@@ -408,13 +408,15 @@ def append_usage(state, rows, limit, run_id, amount, reason, *, confirmation, es
     return value
 
 
-def run(project, *, resume=False):
+def run(project, *, resume=False, handoff=False):
     root, state, record = project_record(project)
     with run_lock(root / ".labgoblin.lock"):
         ledger = bound_ledger(state)
         rows = ledger.runs(record["id"]) if ledger else []
         active = [row for row in rows if row["phase"] != "quiescent"]
         if active:
+            if handoff:
+                raise ValueError("Select --handoff when admitting a new execution, not while attaching to existing work")
             if len(active) != 1:
                 raise UncertainExecution("Multiple unsettled executions require operator investigation")
             return wait_for(ledger, LaunchEnvelope.parse(json.loads(active[0]["envelope"])))
@@ -432,6 +434,8 @@ def run(project, *, resume=False):
         if not goal.strip() or goal == PLACEHOLDER:
             raise ValueError("Write a real research question in research_goal.md before running")
         capabilities = provider.capabilities()
+        from labgoblin.handoffs import prepare as prepare_handoff
+        report_approval = prepare_handoff(root) if handoff else None
         instructions = read_text(root / ".github" / "copilot-instructions.md")
         if instructions != guidance.RESEARCH:
             instructions = guidance.RESEARCH + "\n\nProject-specific research guidance:\n" + instructions
@@ -447,6 +451,8 @@ def run(project, *, resume=False):
                   "Do not rerun completed work merely because this is a new controller execution."}
         if config.closure_critic:
             prompt["closure_response_version"] = closing.VERSION
+        if report_approval is not None:
+            prompt["handoff"] = report_approval
         publish_json(directory / "prompt.json", prompt)
         owner = {"kind": "research-run", "handle": launcher}
         ledger.request(run_id, record["id"], run_id, "research-run", config.resources, owner, native=True)
@@ -555,4 +561,9 @@ def worker_main(path, *, inspection=False):
                             returncode=outcome["returncode"], reason=reason, usage=usage, metadata=metadata)
     publish_json(root / "receipt.json", asdict(receipt))
     ledger.finish_consumer(receipt)
+    if not inspection:
+        from labgoblin.handoffs import automatic
+        result = automatic(envelope)
+        if result is not None and result["status"] != "completed":
+            print(f"Independent handoff {result['status']}: {result['reason']}", file=sys.stderr, flush=True)
     return 0 if status == "completed" else 1

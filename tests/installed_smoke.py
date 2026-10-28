@@ -9,7 +9,7 @@ import threading
 from urllib.request import Request, urlopen
 
 import labgoblin
-from labgoblin import ideas, inspector, payload, runtime
+from labgoblin import handoffs, ideas, inspector, payload, runtime
 from labgoblin.inspection_evidence import Evidence
 from labgoblin.inspection_server import InspectionServer
 from labgoblin.config import Config
@@ -172,6 +172,14 @@ assert observer.status()["inspection"]["budget"]["remaining"] == 90
 assert runtime.status(project)["budget"]["remaining"] == 290
 assert before == {str(path): hash_file(path) for path in project.rglob("*")
                   if path.is_file() and path.name != ".labgoblin.lock"}
+handoff = handoffs.create(observer, result["id"], command=[sys.executable, str(provider)])
+assert handoff["status"] == "completed", handoff
+assert Path(handoff["report"]).is_file()
+assert read_json(observer.state / "runs" / handoff["inspection_id"] / "prompt.json")["history"] == []
+assert observer.source(handoff["inspection_id"], "E2")["result"]["scope"] == result["id"]
+assert observer.status()["inspection"]["budget"]["remaining"] == 80
+assert before == {str(path): hash_file(path) for path in project.rglob("*")
+                  if path.is_file() and path.name != ".labgoblin.lock"}
 evidence = Evidence(closing, runtime.project_record(closing)[2]["id"])
 assert len(evidence.execution({"run": challenged["id"]})["reviews"]) == 2
 assert evidence.session({"run": challenged["id"]})["events"]
@@ -206,7 +214,7 @@ assert read_json(project / "artifacts" / "idea-control.json") == {"baseline": 4,
 assert read_json(project / "artifacts" / "idea-source.json")["revision"] == published["revision"]
 assert ideas.Inbox(project).status()["pending"] == 0
 assert runtime.status(project)["budget"]["remaining"] == 280
-assert observer.status()["inspection"]["budget"]["remaining"] == 80
+assert observer.status()["inspection"]["budget"]["remaining"] == 70
 assert not ledger.rows()
 print(json.dumps({"model_free": True, "package": labgoblin.__file__, "project_id": record["id"],
                   "run_id": result["id"], "mean": read_json(metrics)["mean"], "status": result["status"],

@@ -399,8 +399,8 @@ The critic gets at most two hours including shutdown, with ten minutes retained
 for the researcher response and another ten for fresh adjudication inside the
 original campaign deadline. The researcher can use more remaining time, but its
 closing response must end before the final ten-minute adjudication reserve.
-The critic receives its own remaining response time and absolute deadline,
-distinct from the campaign time; its evidence tools refresh that countdown.
+The host retains these timing facts in its request records but does not insert
+routine countdowns in critic prompts or evidence responses.
 The coach has no separate time cap.
 The two-hour limit is a ceiling, not a target duration. At least 60 seconds must
 remain for starting the critic itself. These are operational safeguards, not
@@ -440,8 +440,56 @@ because it does not support the selected reasoning effort. These options do not
 edit research TOML or change the researcher's model. Repeating `--credits 100`
 preserves prior inspection spending; increasing it is an explicit top-up of the
 cumulative ceiling. Omitting `--credits` always starts view-only, even if an old
-approval exists. Submitting a question authorizes that one call; no summary
-agent or model polling runs in the background.
+approval exists. Submitting a question authorizes that one call. Background
+reporting requires the separate `run --handoff` opt-in described below; opening
+the inspector never starts summaries or model polling.
+
+### Indexed logs and dated terminal handoffs
+
+New sessions retain original SDK events in 8-MiB segments, up to 1 GiB per role
+including their navigation indexes. Events over 1 MiB are explicitly omitted;
+later ordinary events can still be retained. Total-cap exhaustion leaves an
+explicit missing tail, not an apparently complete history. Sequence, prompt,
+timestamp and tool-call metadata locate original bytes. The browser supports
+prompt/type/tool filters and full-event paging; older unindexed logs retain their
+byte-based reader and cannot gain missing historical events retroactively.
+Navigation fields are capped at 128 characters and marked when shortened;
+longer identifiers require unfiltered inspection of original event bytes.
+
+After authorizing inspection with `inspect --credits ... --model ...`, close the
+browser if it is not needed, then select automatic reporting for each execution:
+
+```powershell
+labgoblin run .\research --handoff
+labgoblin run .\research --resume --handoff
+labgoblin handoffs .\research
+labgoblin handoff .\research --run EXACT_TERMINAL_RUN_ID
+```
+
+`--handoff` freezes the existing inspection approval and requests one report
+after the research worker has captured and settled its terminal receipt.
+The fresh reporter shares the separate cumulative inspection pool with chat;
+it has no new allowance, prior chat, researcher attachment or idea-drafting tool.
+Only that exact run's frozen goal, captured session/review evidence and immutable
+snapshot are accessible. Later mutable files cannot silently enter the report.
+The existing inspection model, finite deadline and evidence bounds apply.
+
+The research command can return before reporting finishes. Refresh the inspector
+or use `handoffs` for the chronological index. Reports contain separately labeled
+host facts and model interpretation, captured citations and a dated local HTML file.
+They live under the external inspection directory's `.labgoblin\handoffs`, not
+in the research workspace. Each restart adds another execution entry; old reports
+and original research receipts never change. Reading history does not call a model.
+
+Insufficient inspection funds/capacity, changed approval, missing evidence,
+unknown spending and report failures remain explicit. They never turn research
+success into failure or restart research. There is no automatic retry; repeated
+requests for an attempted run return its retained result. If a crash prevented
+any attempt, the explicit `handoff --run` command can request the missing report.
+Reconciliation/status reads never start reports. Historical or interrupted logs
+may be incomplete, and a reporter's interpretation is not scientific validation.
+
+### Chat evidence and permissions
 
 Each question creates one fresh empty-mode SDK session with curated status,
 execution, file/list/search, image, session-event and operator-inbox tools.

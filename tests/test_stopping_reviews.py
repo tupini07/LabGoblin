@@ -28,7 +28,7 @@ def test_progress_resets_only_the_stalled_count_and_preserves_one_challenge(proj
     assert len(researcher.prompts) == 5
     assert sum(guidance.CLOSING_CHALLENGE in prompt for prompt in researcher.prompts) == 1
     assert researcher.updates == [260, 250, 240, 230]
-    assert all("Host execution facts" in client.session.prompts[0] for client in clients[1:])
+    assert all("Host review context" in client.session.prompts[0] for client in clients[1:])
     assert '"previous_review":' in clients[3].session.prompts[0]
     assert '"progress": "meaningful"' in clients[4].session.prompts[0]
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 100 * credits.NANO

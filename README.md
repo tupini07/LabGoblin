@@ -192,8 +192,8 @@ Ordinary advice and claim reviews have at most 30 minutes including shutdown.
 The critic has at most two hours, bounded by the campaign deadline with ten
 minutes retained for the researcher response and another ten for adjudication.
 The response can use more available time but must leave the adjudication reserve.
-The coach itself has no separate time cap. The critic sees its own
-deadline and refreshed remaining time; individual evidence payloads stay bounded.
+The coach itself has no separate time cap. These limits are host-enforced;
+routine model prompts do not repeat countdowns or balances. Individual evidence payloads stay bounded.
 See the operating guide for exact bounds, failure behavior and retained artifacts.
 
 Each execution keeps frozen instructions/configuration/helpers, bounded provider
@@ -203,6 +203,19 @@ multi-gigabyte artifacts, within explicit byte/file-count limits. Excluded input
 environments, common credential paths (including `.env*`), state, caches, links
 and special files are listed. These exclusions are not a general secret scanner.
 Working files remain editable; this is not a database of every scientific interpretation.
+
+Original SDK events are split into bounded segments with a host-built sequence,
+prompt and tool-call index. The inspector can filter excerpts and page full
+retained events without asking the researcher to narrate progress.
+
+After separately approving inspection credits, `labgoblin run PROJECT --handoff`
+opts that execution into an automatic dated end report. A fresh read-only session
+reads the exact terminal snapshot, logs and reviews, outside researcher context.
+Reports use the **separate inspection pool**, not research credits. Read the growing
+history with `labgoblin handoffs PROJECT` or the inspector; no model runs on reads.
+`labgoblin handoff PROJECT --run RUN_ID` explicitly requests a report for an older
+terminal run. Reports and failures are retained outside research, never overwrite
+researcher notes, and cannot authorize a restart.
 
 **A completed process or an accepting coach is not independent validation.**
 Read the report, inspect decisive artifacts and check any domain-specific
@@ -222,7 +235,8 @@ replace a live ledger, or clear somebody else's reservations.
 
 Claude, managed WSL/Docker backends, assisted setup, delegated research scopes,
 the old dashboard/observer orchestration, structured publications, supervisor memos and dedicated
-report/compaction/final-analysis jobs are retired from this runtime. There is no
+research report/compaction/final-analysis jobs are retired from this runtime. Independent
+opt-in terminal handoffs belong to inspection instead. There is no
 second legacy orchestrator hidden behind a simple-mode flag. No automatic image
 pulls, environment installations, remote execution, uploads or unrestricted
 nested model sessions are part of the new loop. Only the explicitly enabled,

@@ -41,7 +41,7 @@ function display(source) {
   $("source-facts").textContent =
     `${source.scope || source.run || "Captured evidence"} | ${source.live ? "Mutable/live read" : "Captured read"}\n` +
     `Observed ${new Date(source.observed_at * 1000).toLocaleString()}\n` +
-    `${source.coverage || ""}${source.truncated ? "\nBounded / incomplete coverage." : ""}` +
+    `${source.coverage || ""}${source.truncated || source.retention_truncated || source.incomplete_tail ? "\nBounded / incomplete coverage." : ""}` +
     (source.sha256 ? `\nSHA256 ${source.sha256}` : "");
   if (source.image) picture(source, $("evidence"));
   else if (source.entries) {
@@ -63,6 +63,16 @@ function display(source) {
         await browse("read", false, 0, { scope: source.scope, path: hit.path, offset: hit.offset });
       });
     }
+  } else if (source.events && source.text === undefined) {
+    element("pre", JSON.stringify({ ...source, events: undefined }, null, 2), $("evidence"));
+    for (const event of source.events) {
+      element("pre", JSON.stringify(event, null, 2), $("evidence"));
+      if (event.sequence !== undefined && !event.omitted) {
+        const full = element("button", `Read full event ${event.sequence}`, $("evidence"));
+        full.onclick = () => run(() => browse("session", false, 0,
+          { run: source.run, role: source.role, event: event.sequence, offset: 0 }));
+      }
+    }
   } else element("pre", source.text === undefined ? JSON.stringify(source, null, 2) : source.text, $("evidence"));
 }
 async function browse(action, image = false, offset = 0, savedArgs = null) {
@@ -72,7 +82,12 @@ async function browse(action, image = false, offset = 0, savedArgs = null) {
     if (action === "search") args.query = $("search").value;
     if (action === "execution" || action === "session") {
       args = { run: ["latest", "workspace"].includes($("scope").value) ? latestRun : $("scope").value, offset };
-      if (action === "session") args.role = $("role").value;
+      if (action === "session") {
+        args.role = $("role").value;
+        if ($("event-prompt").value) args.prompt = Number($("event-prompt").value);
+        if ($("event-kind").value) args.kind = $("event-kind").value;
+        if ($("event-tool").value) args.tool_call_id = $("event-tool").value;
+      }
     }
   }
   const source = await api(`/api/${action}`, args);
@@ -177,6 +192,24 @@ async function ideas() {
     }
   }
 }
+async function handoffs(offset = 0) {
+  const value = await api(`/api/handoffs?offset=${offset}`);
+  $("handoffs").replaceChildren();
+  for (const item of value.handoffs) {
+    const article = element("article", undefined, $("handoffs"));
+    element("h3", `${new Date(item.created * 1000).toLocaleString()} - ${item.research_run.slice(0, 8)} - ${item.status}`, article);
+    if (item.facts) {
+      const facts = element("details", undefined, article);
+      element("summary", "Recorded host facts", facts);
+      element("pre", JSON.stringify(item.facts, null, 2), facts);
+    }
+    const answer = element("div", item.answer || item.reason, article);
+    answer.className = "answer";
+    if (item.report) element("p", `Immutable local HTML: ${item.report}`, article);
+  }
+  $("more-handoffs").hidden = value.next_offset === null;
+  $("more-handoffs").onclick = () => run(() => handoffs(value.next_offset));
+}
 async function refresh() {
   const value = await api("/api/status");
   const research = value.research;
@@ -213,7 +246,7 @@ async function refresh() {
   if (busy && polling === null) polling = setInterval(() => run(refresh), 1500);
   if (!busy && polling !== null) { clearInterval(polling); polling = null; }
 }
-$("refresh").onclick = () => run(async () => { await refresh(); await messages(); await ideas(); });
+$("refresh").onclick = () => run(async () => { await refresh(); await messages(); await ideas(); await handoffs(); });
 $("read").onclick = () => run(() => browse("read"));
 $("image").onclick = () => run(() => browse("read", true));
 $("list").onclick = () => run(() => browse("listing"));
@@ -241,4 +274,5 @@ run(async () => {
   await refresh();
   await messages();
   await ideas();
+  await handoffs();
 });

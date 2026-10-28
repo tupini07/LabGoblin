@@ -200,11 +200,15 @@ does not reset the stalled-review counter. Failed/unfunded criticism leaves an
 explicit incomplete outcome rather than falling back to preliminary approval.
 All role costs stay in the existing pool and deadline. The critic is a skeptical
 research colleague, not a psychological reviewer: it has up to two hours for
-evidence-grounded challenge, no separate credit/read/image-count cap, and a
-visible response deadline. Individual payloads stay bounded. Ten minutes each
+evidence-grounded challenge and no separate credit/read/image-count cap.
+Individual payloads stay bounded. Ten minutes each
 are reserved for researcher response and adjudication; the response can use more
 available time while leaving the judge's reserve. The coach shares the campaign deadline without a
 separate time cap. These are operational ceilings, not targets for longer work.
+The host enforces them without routine model-facing countdowns, balance reminders
+or task-cost estimates. Only actionable admission refusals, cancellation or an
+available deadline checkpoint expose a resource boundary. Operator-authored goal
+text is preserved rather than rewritten to remove historical resource references.
 
 The coach is a process reviewer, not an independent execution of the benchmark.
 Its `coverage` text is an attributed claim, not a machine-verified scientific

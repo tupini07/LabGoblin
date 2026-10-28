@@ -42,6 +42,14 @@ def parser():
     run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
     run.add_argument("project", nargs="?", default=".")
     run.add_argument("--resume", action="store_true", help="Explicitly continue from files, preserving all prior spending")
+    run.add_argument("--handoff", action="store_true",
+                     help="Authorize one automatic terminal report from the separately approved inspection pool")
+    handoff = commands.add_parser("handoff", help="Create one independent report for an exact terminal run, using inspection credits")
+    handoff.add_argument("project", nargs="?", default=".")
+    handoff.add_argument("--run", required=True)
+    handoffs = commands.add_parser("handoffs", help="Read dated handoff history without a model call")
+    handoffs.add_argument("project", nargs="?", default=".")
+    handoffs.add_argument("--offset", type=int, default=0)
     for name, help_text in (("status", "Read state and accounting without mutation"),
                             ("stop", "Request bounded cancellation of this project's owned tree"),
                             ("reconcile", "Recover only proven-dead owned executions; never starts research")):
@@ -119,7 +127,13 @@ def main(arguments=None):
             result = runtime.initialize(args.project, config,
                                         goal=read_text(args.goal_file) if args.goal_file else None)
         elif args.command == "run":
-            result = runtime.run(args.project, resume=args.resume)
+            result = runtime.run(args.project, resume=args.resume, handoff=args.handoff)
+        elif args.command in ("handoff", "handoffs"):
+            from labgoblin.inspector import Inspector
+            from labgoblin import handoffs
+            inspector = Inspector(args.project)
+            result = (handoffs.create(inspector, args.run) if args.command == "handoff"
+                      else handoffs.history(inspector, offset=args.offset))
         elif args.command == "status":
             result = runtime.status(args.project)
         elif args.command == "stop":
@@ -169,6 +183,8 @@ def main(arguments=None):
             result = {"id": ledger.id, "path": str(ledger.path), "capacity": ledger.capacity(), "grants": ledger.rows()}
         print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
         if args.command == "run" and result["status"] != "completed":
+            return 1
+        if args.command == "handoff" and result["status"] != "completed":
             return 1
         return 0
     except KeyboardInterrupt:

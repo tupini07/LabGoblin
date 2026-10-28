@@ -122,6 +122,9 @@ class Handler(BaseHTTPRequestHandler):
                 if limit > 40:
                     raise ValueError("History pages are limited to 40 questions")
                 result = self.server.inspector.history(offset=offset, limit=limit)
+            elif parsed.path == "/api/handoffs":
+                from labgoblin.handoffs import history
+                result = history(self.server.inspector, offset=int(query.get("offset", ["0"])[0]))
             elif parsed.path == "/api/source":
                 result = self.server.inspector.source(query["run"][0], query["citation"][0])
             elif parsed.path == "/api/idea-draft":

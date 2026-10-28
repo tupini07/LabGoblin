@@ -220,8 +220,10 @@ Criticism lasts at most 7200 seconds including shutdown, reserves
 600 seconds each for response and adjudication, and is bounded by the original
 execution deadline. The response can use more available time but its own deadline
 is 600 seconds before the execution deadline, retaining the usual shutdown grace.
-Critic prompts identify both deadlines; evidence results refresh response time
-remaining. The coach remains bounded by the execution deadline only.
+Timing remains in retained host request records, not routine model prompts or
+evidence countdowns. A coach/adjudicator receives a boundary notice only when a
+deadline checkpoint is actually eligible. The coach remains bounded by the
+execution deadline only.
 Insufficient capacity is review-unavailable, never silently skipped approval.
 
 New frozen prompts advertise `closure_response_version = 1`. Every coach,
@@ -279,8 +281,20 @@ proven-unarmed requests before admitting its requested execution.
 
 ## Retention and read-only operations
 
-Control JSON is bounded and finite. Provider events have explicit per-event and
-per-role retention bounds. Final workspace capture streams regular files and
+Control JSON is bounded and finite. New provider sessions advertise
+`event_log_version = 1`: original canonical SDK JSONL in 8-MiB segments, a host
+sequence/prompt/type/time/tool-call byte index, and a periodically checkpointed
+manifest. Final owned usage binds the closed manifest; sealed indexes and
+retrieved events are digest-checked. Each event is at most 1 MiB; raw data plus
+indexes are at most 1 GiB per role. Oversized records have omission entries;
+total exhaustion records the unindexed sequence tail. Navigation metadata may
+be shortened, never the retained original event. Live manifests can lag their
+active index, and incomplete tails/unverified coverage stay explicit. Retention
+errors cannot prevent idle/quota event handling. Exact submitted host prompts
+are also retained as `prompt-N.txt`, without extra model calls.
+Legacy sessions keep their original byte-paged reader. Indexed excerpts return
+at most 30 events; full selected events use UTF-8-aligned 16-KiB byte pages.
+Final workspace capture streams regular files and
 hashes the retained bytes, rejecting concurrent changes, byte/count exhaustion
 and insufficient free space. Excluded inputs/environments/caches/state/links and
 special files are listed, not passed off as retained sources.
@@ -330,6 +344,31 @@ and checks Host/Origin. Browser content uses text nodes and bounded PNG/JPEG dat
 not executable research HTML. Status polling during an answer does not invoke a
 model. Browser closure is not research cancellation; explicit inspector shutdown
 requests only its own question's cancellation and retains unresolved reservations.
+
+### Independent terminal handoffs
+
+`run --handoff` freezes the explicit inspection profile digest/directory in the
+new research prompt. After snapshot capture and ledger settlement, the worker
+requests one separately owned inspection of that exact terminal receipt.
+The researcher is already retired; reporting neither appends researcher prompts
+nor changes the research receipt. Inspection admission uses its existing finite
+cumulative pool, model, deadline and genuine machine grant. A changed approval
+fails instead of silently adopting a larger allowance.
+
+The reporter has no prior chat or draft tool. Its evidence scope rejects mutable
+workspace reads, other executions and the current operator inbox. All sources
+remain bounded and captured through the shared inspector reader. Missing snapshots
+or incomplete events are evidence gaps, not permission to read current files.
+The output is interpretation, not a scientific assessment or accepted handoff.
+
+An exclusive external request records source receipt/envelope, report date and
+one inspection ID before admission. Repeated requests cannot duplicate inference.
+Final inspection receipts retain narrative/citations/usage; dated HTML and a
+read-only chronological index expose the report outside the research workspace.
+Admission/reporting failure leaves a visible failure or incomplete request and
+the original research evidence intact. No automatic retry or reporting on status/
+reconcile. `handoff --run` is an explicit request for a previously unattempted
+terminal report. A normal research result can be available before reporting ends.
 
 ## Operator idea publication and delivery
 

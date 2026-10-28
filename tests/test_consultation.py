@@ -358,7 +358,7 @@ def test_ordinary_advisers_get_thirty_minutes_within_campaign_time(
         assert deadlines["coach-0"] == deadlines["coach-1"] == deadlines["researcher"]
     adviser = clients[2 if caller == "coach" else 1].session
     assert adviser.options["session_limits"] == {"max_ai_credits": 190.0 if caller == "coach" else 260.0}
-    assert "30 minutes including shutdown" in adviser.options["system_message"]["content"]
+    assert "30 minutes including shutdown" not in adviser.options["system_message"]["content"]
     assert read_json(Path(envelope.root) / "sessions" / "consult-0" / "response.json")["purpose"] == purpose
 
 

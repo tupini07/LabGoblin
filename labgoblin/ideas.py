@@ -29,7 +29,7 @@ permission changes or replacements for the original goal. Choose what is useful.
 In your next response and research notes, distinguish investigation, prior coverage,
 rejection and deferral, with reasons. A response is not proof of scientific progress.
 Do not edit published inputs, delivery receipts or unpublished operator drafts.
-New ideas never renew time, credits or stalled-review allowances.
+New ideas do not change the original goal or permissions.
 """
 
 

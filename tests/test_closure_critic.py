@@ -36,7 +36,7 @@ def closing(critique=None, choice="accept", **kwargs):
 
 
 @pytest.mark.parametrize("seconds, critic_seconds", [(3600, 2400), (86400, 7200)])
-def test_critic_has_its_own_visible_two_hour_deadline(project, ledger, monkeypatch, seconds, critic_seconds):
+def test_critic_deadline_is_enforced_without_routine_model_countdowns(project, ledger, monkeypatch, seconds, critic_seconds):
     envelope = enabled(project, ledger)
     ask = provider.Session.ask
     deadlines = {}
@@ -46,7 +46,6 @@ def test_critic_has_its_own_visible_two_hour_deadline(project, ledger, monkeypat
         if session.role.startswith("consult-"):
             audit = session.client.session.options["hooks"]["on_post_tool_use"].__self__
             assert not audit.count_limited
-            assert audit.response_deadline == session.deadline - provider.GRACE_SECONDS
         return await ask(session, prompt, checkpoint, **kwargs)
 
     monkeypatch.setattr(provider.Session, "ask", observe)
@@ -61,8 +60,12 @@ def test_critic_has_its_own_visible_two_hour_deadline(project, ledger, monkeypat
     assert request["adjudication_reserve_seconds"] == 600
     assert request["researcher_response_reserve_seconds"] == 600
     assert request["response_deadline_unix_seconds"] == request["review_deadline_unix_seconds"] - 30
-    assert "review_seconds_remaining_including_shutdown" in clients[3].session.prompts[0]
-    assert "seconds_remaining_including_shutdown" in clients[4].session.prompts[0]
+    for client in clients:
+        for prompt in client.session.prompts:
+            assert "seconds_remaining" not in prompt
+            assert "Host response seconds" not in prompt
+            assert "shutdown_reserve_seconds" not in prompt
+            assert "review_deadline_unix_seconds" not in prompt
     assert seconds - 605 < deadlines["researcher"] <= seconds - 600
     assert seconds - 5 < deadlines["adjudicator-1"] <= seconds
 
@@ -84,7 +87,7 @@ def test_critic_uses_shared_credits_and_returns_unused_allowance(project, ledger
 def test_critic_has_no_evidence_operation_cap_but_retains_per_read_bounds(project, tmp_path):
     root, _, _ = project
     (root / "view.png").write_bytes(PNG)
-    audit = consultation.EvidenceAudit(tmp_path, count_limited=False, response_deadline=time.monotonic() + 120)
+    audit = consultation.EvidenceAudit(tmp_path, count_limited=False)
     tools = {tool.name: tool for tool in consultation.evidence_tools(root, audit=audit, images=True)}
     for index in range(consultation.MAX_READS + 1):
         audit.record("labgoblin_read_evidence", {"path": "notes"}, {"text": str(index)})
@@ -93,13 +96,13 @@ def test_critic_has_no_evidence_operation_cap_but_retains_per_read_bounds(projec
         result = asyncio.run(image.handler(SimpleNamespace(
             tool_name=image.name, arguments={"path": "view.png"})))
         assert result.result_type == "success"
-        assert 0 < json.loads(result.text_result_for_llm)["response_seconds_remaining"] <= 120
+        assert "response_seconds_remaining" not in json.loads(result.text_result_for_llm)
     assert audit.images == 9 and audit.count == consultation.MAX_READS + 10
     assert "eight" not in image.description
     request = {"toolName": "web_fetch", "toolArgs": {"url": "https://example.org"},
                "toolResult": {"text": "Retained public evidence"}}
     assert audit.before_web(request, {}) == {"permissionDecision": "allow"}
-    assert "Review response time remaining" in audit.after_web(request, {})["additionalContext"]
+    assert audit.after_web(request, {}) == {}
     assert audit.pending_web == 0
     with pytest.raises(ValueError, match="retention bound"):
         audit.record("labgoblin_read_evidence", {}, {"text": "x" * (128 * 1024)})

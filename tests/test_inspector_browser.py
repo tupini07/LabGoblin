@@ -141,3 +141,39 @@ def test_browser_chat_idea_requires_review_and_publish(page, server, observer, m
     expect(page.locator("#ideas")).to_contain_text("1 pending / 1 idea identities")
     assert Inbox(observer.project).status()["pending"] == 1
     assert observer.status()["inspection"]["budget"]["used"] == 10
+
+
+def test_browser_indexes_late_events_and_lists_dated_handoffs(page, server, observer, project, ledger):
+    import uuid
+    from pathlib import Path
+    from labgoblin import handoffs
+    from labgoblin.session_log import EventLog
+    from labgoblin.storage import publish_json
+    from tests.test_inspector import captured
+    from playwright.sync_api import expect
+    envelope = captured(project, ledger)
+    directory = Path(envelope.root) / "sessions" / "researcher"
+    publish_json(directory / "identity.json", {
+        "run_id": envelope.id, "envelope_digest": envelope.digest, "session_id": str(uuid.UUID(envelope.id)),
+        "role": "researcher", "event_log_version": 1})
+    log = EventLog(directory, event_bytes=40000, total_bytes=100000)
+    log.append({"type": "assistant.message", "data": {"content": "Early result"}}, prompt=1)
+    log.append({"type": "tool.execution_complete", "data": {
+        "toolCallId": "late-call", "content": "<script>window.injected=true</script>" + "x" * 17000 + "Late result"}}, prompt=2)
+    log.close()
+    observer.approve(100, model="model-free", timeout=60)
+    report = handoffs.create(observer, envelope.id, command=command(observer))
+    assert report["status"] == "completed", report
+    ready(page, server, observer)
+    expect(page.locator("#handoffs")).to_contain_text(envelope.id[:8])
+    page.locator("#event-prompt").fill("2")
+    page.locator("#event-tool").fill("late-call")
+    page.locator("#session").click()
+    expect(page.locator("#evidence")).not_to_contain_text("Early result")
+    page.get_by_role("button", name="Read full event 1", exact=True).click()
+    expect(page.locator("#evidence pre")).to_have_count(1)
+    expect(page.locator("#evidence pre")).to_contain_text("<script>")
+    assert page.evaluate("window.injected") is None
+    page.locator("#next").click()
+    expect(page.locator("#evidence pre")).to_contain_text("Late result")
+    assert observer.status()["inspection"]["budget"]["used"] == 10

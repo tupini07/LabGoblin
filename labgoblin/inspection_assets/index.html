@@ -31,6 +31,10 @@
       <h2>Published ideas</h2>
       <p class="muted">Ideas are suggestions, not commands. The researcher receives file pointers at startup or a stopping boundary. A retained reply is not proof that an idea was investigated. Late publications remain pending for a later authorized execution.</p>
       <div id="ideas"></div>
+      <h2>Execution handoffs</h2>
+      <p class="muted">Dated independent interpretations, not researcher messages or scientific acceptance. Missing or failed reports remain visible. Refresh to see a newly settled report.</p>
+      <div id="handoffs"></div>
+      <button id="more-handoffs" hidden>Next handoff page</button>
     </section>
     <section aria-labelledby="evidence-heading">
       <h2 id="evidence-heading">Evidence</h2>
@@ -39,6 +43,12 @@
       <button id="execution">Execution and stopping details</button>
       <label for="role">Session role (researcher, coach-0, consult-0, ...)</label>
       <input id="role" value="researcher">
+      <label for="event-prompt">Prompt number (indexed logs only; optional)</label>
+      <input id="event-prompt" type="number" min="1">
+      <label for="event-kind">Event type (optional)</label>
+      <input id="event-kind" placeholder="tool.execution_complete">
+      <label for="event-tool">Tool call ID (optional)</label>
+      <input id="event-tool">
       <button id="session">Read session excerpts</button>
       <label for="path">Relative path</label>
       <input id="path" value="report.md">

@@ -41,6 +41,26 @@ class Event:
         return self.raw
 
 
+def test_retention_failure_does_not_hide_idle_or_credit_exhaustion(project, ledger, monkeypatch):
+    envelope = arm(project, ledger)
+    session = provider.Session(envelope, "researcher", "fixture", envelope.allowance_nano,
+                               FakeClient({}), time.monotonic() + 90)
+    session.observed_turn = True
+    try:
+        def fail(*args, **kwargs):
+            raise OSError("Injected storage failure")
+        monkeypatch.setattr(session.events, "append", fail)
+        with pytest.raises(OSError, match="storage"):
+            session.event(Event("session.idle"))
+        assert session.idle.is_set() and "retention failed" in session.failure
+        with pytest.raises(OSError, match="storage"):
+            session.event(Event("session.error", message="Quota reached", error_type="session_limits_exhausted"))
+        assert session.limit_reached
+        assert "retention failed" in session.failure and not session.failure_is_limit
+    finally:
+        session.events.close()
+
+
 class FakeSession:
     def __init__(self, options, script):
         self.options, self.script = options, script

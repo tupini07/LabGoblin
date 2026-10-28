@@ -74,6 +74,12 @@ def exercise():
             return
         if invoke_tool("labgoblin_inspect_read", {"scope": "latest", "path": "report.md"}) is None:
             return
+        if CONFIG.get("inspect_session"):
+            result = invoke_tool("labgoblin_inspect_session", CONFIG["inspect_session"])
+            if result is None:
+                return
+            if CONFIG.get("required_event_text") not in json.dumps(result):
+                raise ValueError("Reporter did not retrieve the expected late session evidence")
         if CONFIG.get("image"):
             if invoke_tool("labgoblin_inspect_read", {"scope": "latest", "path": CONFIG["image"], "image": True}) is None:
                 return

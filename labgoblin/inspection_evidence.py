@@ -76,6 +76,26 @@ def text_page(path, offset, limit, maximum):
     return bytes(page), hashed.hexdigest(), size
 
 
+def bounded_session_page(value):
+    # Bound serialized replies, not raw events: the CLI spills large replies
+    # into files that the read-only inspector is deliberately unable to open.
+    while len(json.dumps(value).encode("utf-8")) > PAGE_BYTES:
+        if "text" in value and len(value["text"]) > 1:
+            value["text"] = value["text"][:len(value["text"]) // 2]
+            value["next_offset"] = value["offset"] + len(value["text"].encode("utf-8"))
+        elif len(value["events"]) > 1:
+            removed = value["events"].pop()
+            key = "sequence" if value.get("offset_unit") == "event_sequence" else "offset"
+            value["next_offset"] = removed[key]
+        elif value["events"] and value["events"][0].get("data"):
+            entry = value["events"][0]
+            entry["data"] = entry["data"][:len(entry["data"]) // 2]
+            entry["truncated"] = True
+        else:
+            raise ValueError("Session event metadata exceeds its response bound")
+    return value
+
+
 def record(path, limit=1024 * 1024):
     return json.loads(bounded_bytes(path, limit))
 
@@ -111,13 +131,16 @@ def image_type(body):
 
 
 class Evidence:
-    def __init__(self, project, project_id):
+    def __init__(self, project, project_id, *, terminal=None):
         self.root, self.state, record = runtime.project_record(project)
         if record["id"] != project_id:
             raise ValueError("Inspection target identity changed")
         self.project_id = project_id
+        self.terminal = terminal
 
     def status(self):
+        if self.terminal is not None:
+            return self.execution({"run": self.terminal["research_run"]})
         value = runtime.status(self.root)
         if value["project_id"] != self.project_id:
             raise ValueError("Inspection target identity changed")
@@ -126,6 +149,8 @@ class Evidence:
                 "coverage": "Read-only operational facts, not scientific progress or independent validation"}
 
     def ideas(self, args):
+        if self.terminal is not None:
+            raise ValueError("A terminal handoff cannot read the mutable operator inbox")
         from labgoblin.ideas import Inbox
         table(args, "idea listing", set())
         inbox = Inbox(self.root)
@@ -133,6 +158,8 @@ class Evidence:
                 "coverage": "Operator publications and retained replies, not verified research findings"}
 
     def run(self, run_id):
+        if self.terminal is not None and run_id != self.terminal["research_run"]:
+            raise ValueError("This handoff can inspect only its exact terminal execution")
         if not isinstance(run_id, str) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
             raise ValueError("An exact research execution ID is required")
         ledger = runtime.bound_ledger(self.state)
@@ -146,9 +173,17 @@ class Evidence:
             raise ValueError("Execution is not qualified for this exact project")
         if record(directory / "envelope.json") != json.loads(row["envelope"]):
             raise ValueError("Execution envelope differs from its ledger identity")
+        if self.terminal is not None and (
+                row["phase"] != "quiescent" or not row["receipt"]
+                or digest(json.loads(row["receipt"])) != self.terminal["receipt_sha256"]):
+            raise ValueError("Handoff terminal receipt identity changed")
         return row, envelope, directory
 
     def scope(self, selected):
+        if self.terminal is not None:
+            if selected not in ("latest", self.terminal["research_run"]):
+                raise ValueError("A handoff cannot read mutable workspace files or another execution")
+            selected = self.terminal["research_run"]
         if selected == "latest":
             status = self.status()
             latest = status["runs"][-1] if status["runs"] else None
@@ -309,7 +344,7 @@ class Evidence:
                 "coverage": "Frozen goal and owned execution/review records; coach judgments are not scientific certification"}
 
     def session(self, args):
-        table(args, "session request", {"run", "role", "offset"})
+        table(args, "session request", {"run", "role", "offset", "prompt", "kind", "tool_call_id", "event"})
         row, envelope, directory = self.run(args.get("run"))
         role = text(args.get("role", "researcher"), "session role")
         if not ROLE.fullmatch(role):
@@ -322,6 +357,22 @@ class Evidence:
         if (identity.get("run_id") != envelope.id or identity.get("envelope_digest") != envelope.digest
                 or identity.get("session_id") != expected or identity.get("role") != role):
             raise ValueError("Session is not bound to this owned research execution")
+        receipt = json.loads(row["receipt"]) if row["receipt"] else {}
+        usage = next((item for item in (receipt.get("usage") or {}).get("sessions", [])
+                      if item.get("role") == role and item.get("session_id") == expected), None)
+        terminal_log = usage.get("event_log") if usage else None
+        if terminal_log is not None and identity.get("event_log_version") != terminal_log.get("version"):
+            raise ValueError("Session event-log capability differs from its final owned usage")
+        if "event_log_version" in identity:
+            from labgoblin.session_log import VERSION, page
+            if type(identity["event_log_version"]) is not int or identity["event_log_version"] != VERSION:
+                raise ValueError("Unsupported session event-log version")
+            return bounded_session_page({**page(session, args, terminal_log=terminal_log),
+                    "run": envelope.id, "role": role, "live": row["phase"] != "quiescent",
+                    "observed_at": time.time(),
+                    "coverage": "Indexed original SDK events. Use event=sequence to page a full retained event; omitted records remain explicit. Not a scientific progress assessment."})
+        if any(key in args for key in ("prompt", "kind", "tool_call_id", "event")):
+            raise ValueError("This legacy event spool has no sequence index; use its byte-page next_offset")
         offset = integer(args.get("offset", 0), "event byte offset", zero=True)
         path = session / "events.jsonl"
         if path.resolve(strict=True) != path:
@@ -355,15 +406,12 @@ class Evidence:
                     entries.append({"offset": start, "type": kind, "timestamp": event.get("timestamp"),
                                     "data": encoded[:8192], "truncated": len(encoded) > 8192})
             end = stream.tell()
-        receipt = json.loads(row["receipt"]) if row["receipt"] else {}
-        usage = next((item for item in (receipt.get("usage") or {}).get("sessions", [])
-                      if item.get("role") == role and item.get("session_id") == expected), None)
-        return {"run": envelope.id, "role": role, "events": entries, "offset": offset,
+        return bounded_session_page({"run": envelope.id, "role": role, "events": entries, "offset": offset,
                 "next_offset": end if end < size else None, "observed_bytes": size,
                 "scanned_bytes": read_bytes, "incomplete_tail": incomplete_tail,
                 "retention_truncated": usage.get("events_truncated") if usage else None,
                 "live": row["phase"] != "quiescent", "observed_at": time.time(),
-                "coverage": "Selected retained public messages/tool events, not private reasoning or a complete action audit"}
+                "coverage": "Selected retained public messages/tool events, not private reasoning or a complete action audit"})
 
 
 class EvidenceTools:
@@ -413,6 +461,10 @@ class EvidenceTools:
                   "limit": {"type": "integer", "minimum": 1, "maximum": PAGE_BYTES},
                   "image": {"type": "boolean"}, "query": {"type": "string"},
                   "run": {"type": "string"}, "role": {"type": "string"},
+                  "prompt": {"type": "integer", "minimum": 1},
+                  "event": {"type": "integer", "minimum": 0, "description": "Page one full indexed event; offset then means a byte position within that event"},
+                  "kind": {"type": "string", "description": "Exact SDK event type, for example tool.execution_complete"},
+                  "tool_call_id": {"type": "string"},
                   "sha256": {"type": "string", "description": "Previous page hash; reject changed evidence"}}
         definitions = {
             "status": ([], [], "Read current execution state and research spending; not scientific progress."),
@@ -420,9 +472,12 @@ class EvidenceTools:
             "read": (["scope", "path", "offset", "limit", "image", "sha256"], ["path"], "Read cited text pages or inspect a PNG/JPEG image. No execution."),
             "listing": (["scope", "path", "offset"], [], "List bounded evidence entries with paging."),
             "search": (["scope", "path", "query", "offset"], ["query"], "Search a bounded set of text files; returns explicit coverage."),
-            "session": (["run", "role", "offset"], ["run"], "Read bounded, exact-run public session events; never attach to a session."),
+            "session": (["run", "role", "offset", "prompt", "kind", "tool_call_id", "event"], ["run"],
+                        "Read indexed original session events, optionally filtered by prompt/type/tool call; page a full event by sequence. Legacy logs use byte offsets. Never attach to a session."),
             "execution": (["run", "offset"], ["run"], "Read the frozen original goal, stopping reviews, exact session roles and final usage."),
         }
+        if self.evidence.terminal is not None:
+            definitions.pop("ideas")
         return [Tool(f"labgoblin_inspect_{name}", description, handle, {
             "type": "object", "properties": {key: fields[key] for key in keys},
             "required": required, "additionalProperties": False}, skip_permission=True, defer="never")

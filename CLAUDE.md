@@ -40,7 +40,8 @@ and a persisted allowance outside the evaluated research project.
   permission/input/scope question, not an operational limit or scientific uncertainty.
   `checkpointed` is unfinished work, not scientific exhaustion. Cancellation,
   deadlines, spending and genuine operator dependencies retain precedence.
-  No separate reflection, compaction, report or final-analysis calls.
+  No separate research reflection, compaction or final-analysis calls. Explicit
+  terminal handoffs are separate read-only inspection calls, never researcher prompts.
   Normal completion is not independent scientific validation.
 - One controller freezes configuration, goal, instructions and helpers per
   execution, after recovery. TOML changes require a new execution. Explicit
@@ -102,7 +103,8 @@ and a persisted allowance outside the evaluated research project.
   reviews have a 30-minute maximum within the campaign deadline, including
   shutdown; their evidence-count limits remain unchanged. Unlimited campaigns
   impose no hidden adviser credit quota either.
-  Show the critic its own response deadline and remaining time.
+  Keep routine countdowns, balances and effort forecasts out of model-facing
+  guidance. The host enforces limits and exposes actionable refusals/checkpoints.
 - Partial usage cannot prove final spending. Unknown usage blocks new admission.
   Operator estimates are explicit, receipt-bound, additive records separate from
   reported usage; later final evidence never rewrites historical receipts.
@@ -117,6 +119,13 @@ and a persisted allowance outside the evaluated research project.
   an explicit human Publish action commits exact captured ideas. No arbitrary
   editing, execution control, research-session attachment or background inference.
   Citation captures bind terminal receipts; live/truncated coverage stays explicit.
+  `run --handoff` explicitly authorizes one independent terminal report using
+  the separately approved inspection pool. Pin the exact terminal execution,
+  exclude prior chat and mutable workspace access, and provide no idea-draft tool.
+  Retain dated immutable reports outside research. Failure never changes the
+  original receipt, resumes research or automatically retries inference.
+  Original SDK events use bounded segments and a host-built index, not model-
+  authored progress summaries. Retain explicit omissions and legacy read support.
   Do not add automatic image pulls, environment installs, remote execution or
   unrestricted nested provider calls to the research loop. Advisers have only
   curated evidence reads and verified public retrieval; adding a custom tool

@@ -81,8 +81,6 @@ def evidence_tools(project, *, audit=None, images=False):
             value = read_evidence(project, invocation.arguments,
                                   listing=invocation.tool_name == "labgoblin_list_evidence", image=image)
             if audit is not None:
-                if audit.response_deadline is not None:
-                    value["response_seconds_remaining"] = max(0, audit.response_deadline - time.monotonic())
                 audit.record(invocation.tool_name, invocation.arguments, value)
             if image:
                 pixels = value.pop("image")
@@ -140,10 +138,9 @@ def web_arguments(args):
 
 
 class EvidenceAudit:
-    def __init__(self, directory, *, count_limited=True, response_deadline=None):
+    def __init__(self, directory, *, count_limited=True):
         self.directory = directory
         self.count_limited = count_limited
-        self.response_deadline = response_deadline
         self.count = 0
         self.images = 0
         self.pending_web = 0
@@ -188,10 +185,6 @@ class EvidenceAudit:
                     raise ValueError("Public fetch result has no admitted evidence-read slot")
                 self.pending_web -= 1
                 self.record("web_fetch", request["toolArgs"], request.get("toolResult", {"error": request.get("error")}))
-                if self.response_deadline is not None:
-                    return {"additionalContext":
-                            f"Review response time remaining: {max(0, self.response_deadline - time.monotonic()):.0f} seconds. "
-                            "Return the best supported brief before this deadline, stating unchecked evidence."}
             except (OSError, ValueError) as error:
                 self.error = f"Consultation evidence retention failed: {error}"
                 return {"additionalContext": f"Evidence retention failed; stop this consultation: {error}"}

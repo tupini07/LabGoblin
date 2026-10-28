@@ -46,10 +46,10 @@ def identities(root):
             if path.is_file() and path.name != ".labgoblin.lock"}
 
 
-def captured(project, ledger, *, provider=None):
+def captured(project, ledger, *, provider=None, allowance=300_000_000_000):
     root, config, record = project
     runtime.bound_ledger(root / ".labgoblin", config=config, bind=True)
-    envelope = arm(project, ledger)
+    envelope = arm(project, ledger, allowance=allowance)
     handle = own_handle(envelope.id)
     assert ledger.claim_consumer(envelope, handle)
     directory = Path(envelope.root)
@@ -304,14 +304,90 @@ def test_session_events_are_qualified_bounded_and_show_retention_limits(observer
         evidence.session({"run": envelope.id, "role": "adjudicator-0"})
     rows = [json.dumps({**event, "data": {"content": "x" * 800000}}).encode() + b"\n"] * 4
     (directory / "events.jsonl").write_bytes(b"".join(rows))
-    page = evidence.session(request)
-    assert page["scanned_bytes"] <= 2 * 1024 * 1024
-    assert len(page["events"]) == 2 and page["next_offset"] == sum(map(len, rows[:2]))
-    tail = evidence.session({**request, "offset": page["next_offset"]})
-    assert len(tail["events"]) == 2 and tail["next_offset"] is None
+    offsets, offset = [], 0
+    for _ in rows:
+        page = evidence.session({**request, "offset": offset})
+        assert page["scanned_bytes"] <= 2 * 1024 * 1024
+        offsets.extend(item["offset"] for item in page["events"])
+        if page["next_offset"] is None:
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert offsets == [sum(map(len, rows[:number])) for number in range(len(rows))]
+    assert page["next_offset"] is None
     (directory / "identity.json").write_text(json.dumps({**identity, "session_id": str(uuid.uuid4())}))
     with pytest.raises(ValueError, match="not bound"):
         evidence.session(request)
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_session_tool_pages_stay_below_cli_spill_limit(observer, project, ledger, tmp_path, indexed):
+    import hashlib
+    from types import SimpleNamespace
+    import uuid
+
+    from labgoblin.session_log import EventLog, VERSION
+
+    envelope = captured(project, ledger)
+    directory = Path(envelope.root) / "sessions" / "researcher"
+    identity = {"run_id": envelope.id, "envelope_digest": envelope.digest,
+                "session_id": str(uuid.UUID(envelope.id)), "role": "researcher"}
+    if indexed:
+        identity["event_log_version"] = VERSION
+    publish_json(directory / "identity.json", identity)
+    originals = [
+        {"type": "assistant.message", "timestamp": "now",
+         "data": {"content": f"{number}:" + '\\\"\u0394\U0001f600' * 3000}}
+        for number in range(4)]
+    if indexed:
+        log = EventLog(directory, event_bytes=1024 * 1024, total_bytes=4 * 1024 * 1024)
+        for value in originals:
+            log.append(value, prompt=1)
+        log.close()
+        positions = list(range(len(originals)))
+    else:
+        rows = [json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\n" for value in originals]
+        (directory / "events.jsonl").write_bytes(b"".join(rows))
+        positions = [sum(map(len, rows[:number])) for number in range(len(rows))]
+    evidence = Evidence(observer.project, observer.project_id)
+    captured_tools = EvidenceTools(evidence, tmp_path / "session-captures")
+    tool = next(value for value in captured_tools.tools() if value.name == "labgoblin_inspect_session")
+
+    def request(**args):
+        response = asyncio.run(tool.handler(SimpleNamespace(
+            tool_name=tool.name, arguments={"run": envelope.id, **args})))
+        assert response.result_type != "failure", response.error
+        assert len(response.text_result_for_llm.encode("utf-8")) < 20480
+        value = json.loads(response.text_result_for_llm)
+        assert read_json(captured_tools.directory / f"{value['citation']}.json")["result"] == value
+        return value
+
+    offset, found = 0, []
+    for _ in range(20):
+        page = request(offset=offset)
+        found.extend(item["sequence" if indexed else "offset"] for item in page["events"])
+        if page["next_offset"] is None:
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    else:
+        pytest.fail("Session summary pagination did not finish")
+    assert found == positions
+    if indexed:
+        fragments, offset = [], 0
+        for _ in range(64):
+            page = request(event=1, offset=offset)
+            fragments.append(page["text"])
+            if page["next_offset"] is None:
+                break
+            assert page["next_offset"] > offset
+            offset = page["next_offset"]
+        else:
+            pytest.fail("Full-event pagination did not finish")
+        body = "".join(fragments).encode("utf-8")
+        assert len(body) == page["bytes"]
+        assert hashlib.sha256(body).hexdigest() == page["sha256"]
+        assert json.loads(body) == originals[1]
 
 
 def test_restricted_driver_verifies_tools_and_denies_unregistered_actions(observer, project, ledger):
