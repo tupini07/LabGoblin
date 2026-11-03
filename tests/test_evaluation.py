@@ -2,11 +2,14 @@ import asyncio
 from dataclasses import asdict, replace
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import sys
 import threading
 import time
 from types import SimpleNamespace
+import venv
 import zipfile
 
 import pytest
@@ -93,6 +96,34 @@ def test_external_edits_do_not_change_admitted_kit(project, ledger, kit):
     atomic_json(frozen, {"slope": 999, "intercept": 0})
     with pytest.raises(ValueError, match="capture bytes changed"):
         develop(evaluator, "tampered-baseline")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux venv interpreter symlinks")
+def test_legacy_evaluation_preserves_symlinked_venv_and_rejects_changed_python(
+        tmp_path, project, ledger, kit, monkeypatch):
+    directory = tmp_path / "evaluation-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(directory)
+    python = directory / "bin" / "python"
+    assert python.is_symlink()
+    monkeypatch.setattr(evaluation, "sys", SimpleNamespace(executable=str(python), version=sys.version))
+    script = kit / "evaluator" / "check.py"
+    script.write_text(script.read_text(encoding="utf-8").replace(
+        'f"x={x}; expected={expected}; predicted={predicted}"',
+        'json.dumps({"python": sys.executable, "prefix": sys.prefix})'), encoding="utf-8")
+    envelope, evaluator = admitted(project, ledger, kit)
+    selected = develop(evaluator)
+    assert selected["status"] == "completed", selected
+    for row in selected["comparisons"]:
+        for side in ("baseline", "candidate"):
+            assert json.loads(row[side]["diagnostic"]) == {"python": str(python), "prefix": str(directory)}
+    exposures = Path(envelope.project) / ".labgoblin" / "evaluation-exposures.json"
+    before = exposures.read_bytes()
+    python.unlink()
+    python.write_bytes(b"changed interpreter")
+    with pytest.raises(ValueError, match="interpreter changed after admission"):
+        confirm(evaluator, selected)
+    assert exposures.read_bytes() == before
+    assert len(evaluation.manifest(envelope.root)) == 1
 
 
 def test_research_environment_changes_fail_before_exposing_cases(tmp_path, project, ledger, kit):

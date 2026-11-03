@@ -224,9 +224,12 @@ def test_heartbeat_recovers_after_windows_reader_releases_file(spec, monkeypatch
 ])
 def test_heartbeat_recovery_does_not_hide_other_publication_failures(spec, monkeypatch, target, kind):
     original = payload.atomic_json
+    handles = []
     spec["argv"] = [sys.executable, "-c", "import time;time.sleep(60)"]
 
     def denied(path, value):
+        if Path(path).name == "process-handle.json":
+            handles.append(value)
         if Path(path).name == target:
             if kind == "disk":
                 raise OSError(errno.ENOSPC, "publication denied")
@@ -240,4 +243,7 @@ def test_heartbeat_recovery_does_not_hide_other_publication_failures(spec, monke
     outcome = run_process(spec)
     assert outcome["status"] == "failed"
     assert "publication denied" in outcome["reason"]
-    assert tree_state(spec["root"], spec["token"]) == "dead"
+    assert len(handles) == 1
+    assert_dead(handles[0])
+    expected = "unknown" if os.name != "nt" and target == "process-handle.json" else "dead"
+    assert tree_state(spec["root"], spec["token"]) == expected

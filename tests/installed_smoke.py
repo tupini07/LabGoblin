@@ -53,7 +53,8 @@ assert not (snapshot / ".venv").exists()
 assert runtime.status(project)["budget"]["remaining"] == 290
 assert not ledger.rows()
 evaluation_kit = root / "evaluation-kit"
-shutil.copytree(example.parent / "evaluation", evaluation_kit)
+shutil.copytree(example.parent / "evaluation", evaluation_kit,
+                ignore=shutil.ignore_patterns("__pycache__"))
 evaluation_project = root / "evaluation"
 runtime.initialize(evaluation_project, Config(
     cpus=1, memory_mb=1024, timeout_seconds=180, coach=True, max_ai_credits=300,

@@ -5,8 +5,10 @@ two development cases and fail the two confirmation cases. The correct affine
 candidate passes both. This demonstrates the protocol, not scientific discovery
 or evidence that the harness improves research quality.
 
-Keep the kit outside the research project. Review its evaluator and dependency
-requirements. New projects use their separate research `.venv` for both evaluator
+Keep the kit outside the research project. When copying an installed kit, omit
+pip-generated `__pycache__` directories; captures require self-contained source
+without excluded caches. Review its evaluator and dependency requirements.
+New projects use their separate research `.venv` for both evaluator
 sides; the researcher may install scientific dependencies there unless explicitly
 restricted. LabGoblin itself downloads no packages. Initialization alone does not
 run research:

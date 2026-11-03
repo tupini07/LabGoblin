@@ -114,9 +114,12 @@ Both sides use the same frozen evaluator, cases, metrics and granted resources.
 With recorded research-environment authorization, both sides run using that
 scientific Python, including its `sys.executable` children. The host SDK,
 controller and evaluation control logic remain in the protected harness runtime.
-Legacy executions retain their original interpreter selection. Interpreter and
-venv-configuration drift is rejected before case exposure; scientific dependency
-versions can change and must be retained with the research, not called frozen.
+Legacy executions retain their original interpreter selection. Python venv
+launcher symlinks keep their admitted paths and checked executable bytes; the
+no-alias rule for captured artifacts does not apply to these launchers.
+Interpreter and venv-configuration drift is rejected before case exposure;
+scientific dependency versions can change and must be retained with the research,
+not called frozen.
 Windows evaluator processes inherit the outer Job and receive their own nested
 Job before resume. Linux children get separate groups inside the research
 session, so both inner and outer cleanup retain ownership. Each pair's finite

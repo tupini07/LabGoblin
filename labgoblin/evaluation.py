@@ -388,8 +388,8 @@ class Evaluator:
             if environment is not None:
                 from labgoblin.research_environment import check as check_environment, variables
                 check_environment(self.project, environment)
-            interpreter = (Path(config["interpreter"]) if environment is not None
-                           else regular(Path(config["interpreter"])))
+            # Resolving a venv's Python symlink would discard its environment.
+            interpreter = Path(config["interpreter"])
             if hash_file(interpreter) != config["interpreter_sha256"]:
                 raise ValueError("The evaluation interpreter changed after admission")
             selected = None
