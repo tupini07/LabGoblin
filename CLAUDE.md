@@ -24,13 +24,20 @@ and a persisted allowance outside the evaluated research project.
 
 ## Core invariants
 
+- Prepare campaigns with the operator's high-level goal, relevant context and
+  actual boundaries. Autonomous pursuit of that goal is the priority. Do not
+  impose prototype/pilot phases, narrower deliverables or a prescribed scientific
+  program unless the operator requests them; methods and sequencing are researcher-owned.
 - One persistent ordinary researcher owns scientific choices and working files.
   A coach can inspect evidence and ask a concrete stopping question; it cannot
   prescribe a workflow or edit research. Only an explicitly enabled host-owned
   consultation tool may start a read-only adviser, never arbitrary agents.
-- Stopping guidance targets the original goal or supported exhaustion of credible
-  feasible avenues, not merely a defensible negative report. Keep alternatives
-  in ordinary notes; no method quotas or scientific-completion state machine.
+- Research guidance is continuation-first: investigate, examine evidence, choose
+  and perform the next useful investigation. Reports and answered objections are
+  checkpoints, not endpoints. Keep closing-protocol details with reviewers, not
+  the main research charter. Stop for supported original-goal resolution/exhaustion,
+  genuine blockers or host boundaries; no method quotas, compulsory spending,
+  indefinite execution or scientific-completion state machine.
 - Stopping reviews may continue in the same researcher session. Ten consecutive
   follow-up reviews without evidence-grounded meaningful progress checkpoint by
   default; progress resets only that counter. Clear repetition can checkpoint
@@ -46,6 +53,12 @@ and a persisted allowance outside the evaluated research project.
 - One controller freezes configuration, goal, instructions and helpers per
   execution, after recovery. TOML changes require a new execution. Explicit
   resumes preserve all prior spending and retained evidence.
+- New initialization records broad local-research authorization and a separate
+  project `.venv`, without package downloads. Scientific techniques are examples,
+  not a whitelist; explicit operator restrictions prevail. Missing authorization
+  preserves legacy permissions, never a silent upgrade. Freeze exact authority
+  and scientific interpreter at admission; use it for both paired-evaluation
+  sides while leaving host control code in the harness environment.
 - Optional coach, closure-critic, advice and claim-review model overrides inherit
   the campaign model independently, never the caller's override. Select advisers
   by explicit purpose, not their `consult-N` operational name. Preserve the same
@@ -109,9 +122,20 @@ and a persisted allowance outside the evaluated research project.
   Operator estimates are explicit, receipt-bound, additive records separate from
   reported usage; later final evidence never rewrites historical receipts.
 - Keep normal research files editable and captured execution snapshots immutable.
+  Init prepares/reuses Git without staging/commits or global identity changes.
+  Checkpoint cadence and artifact organization belong to the researcher.
+  Full-workspace archives are opt-in and their failures never replace the research
+  outcome or settled usage. Preserve exact selected evaluation/report captures;
+  missing historical archives are explicit gaps, never mutable-file fallbacks.
   Stream large artifacts, enforce bounds, and explicitly list excluded sources.
   Do not silently treat truncation, incomplete retention or process success as
   scientific completion.
+- Optional evaluation kits are operator-supplied and frozen at admission, never
+  selected or edited by the researcher. Confirm exact captured candidates once
+  per fresh case batch; record exposure before execution, including failures.
+  Regression replay is not fresh evidence. Only the researcher can execute checks;
+  reviewers read qualified results. Keep nested processes in the owned research
+  tree and existing deadline/grant. No automatic promotion or self-improvement.
 - Status and machine reads never initialize, reconcile or mutate research.
   Campaign chat uses fresh empty-mode inspector sessions, curated evidence tools
   and genuine `inspection-run` grants. Keep its history/drafts outside research
@@ -126,10 +150,13 @@ and a persisted allowance outside the evaluated research project.
   original receipt, resumes research or automatically retries inference.
   Original SDK events use bounded segments and a host-built index, not model-
   authored progress summaries. Retain explicit omissions and legacy read support.
-  Do not add automatic image pulls, environment installs, remote execution or
+  Do not add automatic image pulls, shared/system installs, remote execution or
   unrestricted nested provider calls to the research loop. Advisers have only
   curated evidence reads and verified public retrieval; adding a custom tool
   must not change the ordinary researcher's coding permissions.
+  An explicitly recorded research environment permits researcher-managed
+  scientific packages and public model downloads, not changes to the harness,
+  shared software, model-service permissions or admitted resources.
 - Operator ideas are advisory immutable file revisions, not scientific records or
   changed authority. Give the same researcher short file pointers, not injected
   documents, at startup/stopping boundaries, including coach-off executions.

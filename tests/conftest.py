@@ -27,8 +27,9 @@ def ledger(tmp_path):
 def project(tmp_path, ledger):
     root = tmp_path / "project"
     config = Config(cpus=1, memory_mb=1024, ledger=str(ledger.path), max_ai_credits=300,
-                    timeout_seconds=60, coach=False)
-    record = initialize(root, config, goal="Determine whether adding one increases the mean by one.")
+                    timeout_seconds=60, coach=False, archive_workspace=True)
+    record = initialize(root, config, goal="Determine whether adding one increases the mean by one.",
+                        research_venv=False, git=False)
     return root, config, record
 
 
@@ -45,6 +46,15 @@ def arm(project, ledger, *, coach=False, consultant=False, allowance=300_000_000
         prompt["operator_ideas_version"] = 1
     if config.closure_critic:
         prompt["closure_response_version"] = 1
+    environment = None
+    if "research_environment" in record:
+        from labgoblin.research_environment import inspect
+        environment = inspect(root, record["research_environment"])
+        prompt["research_environment"] = environment
+    if config.evaluation_spec is not None:
+        from labgoblin.evaluation import prepare
+        prompt["evaluation"] = prepare(root, directory, config.evaluation_spec, config.max_snapshot_bytes,
+                                       research_environment=environment)
     publish_json(directory / "prompt.json", prompt)
     launcher = launcher or own_handle(record["id"])
     ledger.request(run_id, record["id"], run_id, "research-run", config.resources,

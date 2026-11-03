@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 import json
+import io
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -225,6 +226,84 @@ def exercise(envelope, scripts, *, seconds=120):
     return result, clients, read_json(Path(envelope.root) / "result.json")
 
 
+def test_shutdown_retains_original_stop_and_each_failed_stage_after_log_cutoff(project, ledger, monkeypatch):
+    root, config, record = project
+    envelope = arm((root, replace(config, max_event_log_bytes=1), record), ledger)
+    async def abort_failure(self):
+        raise TimeoutError("Deliberate abort timeout")
+    async def disconnect_failure(self):
+        raise RuntimeError("Deliberate disconnect failure")
+    monkeypatch.setattr(FakeSession, "abort", abort_failure)
+    monkeypatch.setattr(FakeSession, "disconnect", disconnect_failure)
+    code, clients, result = exercise(envelope, [{"wait": True, "cancel": str(Path(envelope.root) / "cancel")}])
+    assert code == 1 and result["status"] == "failed"
+    assert result["primary_outcome"]["status"] == "cancelled"
+    assert "Operator cancellation" in result["reason"]
+    assert "abort: TimeoutError" in result["reason"] and "disconnect: RuntimeError" in result["reason"]
+    directory = Path(envelope.root)
+    assert read_json(directory / "stop.json")["status"] == "cancelled"
+    shutdown = read_json(directory / "sessions" / "researcher" / "shutdown.json")
+    assert [item["stage"] for item in shutdown["errors"]] == ["abort", "disconnect"]
+    assert "Traceback" in shutdown["errors"][0]["traceback"]
+    assert not shutdown["usage_complete"] and not (directory / "usage.json").exists()
+    assert read_json(directory / "sessions" / "researcher" / "events-manifest.json")["omitted"]
+    assert clients[0].stopped
+
+
+def test_shutdown_identifies_idle_wait_timeout_without_promoting_partial_usage(project, ledger, monkeypatch):
+    envelope = arm(project, ledger)
+    async def no_idle(self):
+        self.aborted = True
+    bounded = provider.Session.bounded
+    async def short_idle_wait(self, awaitable, seconds=10):
+        return await bounded(self, awaitable, 0.001 if self.aborting and seconds == 10 else seconds)
+    monkeypatch.setattr(FakeSession, "abort", no_idle)
+    monkeypatch.setattr(provider.Session, "bounded", short_idle_wait)
+    code, clients, result = exercise(envelope, [{"wait": True, "cancel": str(Path(envelope.root) / "cancel")}])
+    assert code == 1 and "wait for idle after abort: TimeoutError" in result["reason"]
+    assert "timed out after" in result["reason"]
+    assert not (Path(envelope.root) / "usage.json").exists() and clients[0].stopped
+
+
+def test_console_encoding_does_not_interrupt_original_unicode_retention(project, ledger, monkeypatch):
+    envelope = arm(project, ledger)
+    session = provider.Session(envelope, "researcher", envelope.id, envelope.allowance_nano,
+                               FakeClient({}), time.monotonic() + 60)
+    raw = io.BytesIO()
+    output = io.TextIOWrapper(raw, encoding="cp1252")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(provider.sys, "stdout", output)
+            session.event(Event("assistant.message", content="A \u2192 B \u2265 C"))
+        assert b"\\u2192" in raw.getvalue() and b"\\u2265" in raw.getvalue()
+        assert session.answer == "A \u2192 B \u2265 C"
+        assert json.loads((session.directory / "events.jsonl").read_bytes())["data"]["content"] == session.answer
+    finally:
+        session.events.close()
+        output.close()
+
+
+@pytest.mark.parametrize("filename,stage", [
+    ("stop.json", "Publish primary outcome"),
+    ("shutdown.json", "publish shutdown record"),
+    ("usage.json", "Publish aggregate usage"),
+])
+def test_finalization_publication_failure_still_retires_clients_and_keeps_primary_outcome(
+        project, ledger, monkeypatch, filename, stage):
+    envelope = arm(project, ledger)
+    original = provider.publish_json
+    def fail(path, value):
+        if Path(path).name == filename and (filename != "usage.json" or Path(path).parent == Path(envelope.root)):
+            raise OSError("Deliberate diagnostic publication failure")
+        original(path, value)
+    monkeypatch.setattr(provider, "publish_json", fail)
+    code, clients, result = exercise(envelope, [{}])
+    assert code == 1 and result["status"] == "failed"
+    assert stage in result["reason"] and "Deliberate diagnostic publication failure" in result["reason"]
+    assert result["primary_outcome"]["status"] == "completed"
+    assert clients[0].stopped
+
+
 @pytest.mark.parametrize("coach", [False, True])
 def test_client_disables_sync_without_removed_remote_flag(project, ledger, monkeypatch, coach):
     import copilot
@@ -299,7 +378,8 @@ def test_coach_pushback_continues_same_researcher_and_uses_one_pool(project, led
     assert clients[2].session.options["system_message"]["content"] == guidance.COACH
     follow_up = clients[0].session.prompts[1]
     assert "Does the result hold on the required second family?" in follow_up
-    assert "Continue useful experiments toward the original goal" in follow_up
+    assert "use its result to choose the next investigation" in follow_up
+    assert "Keep going while consequential feasible work remains toward the original goal." in follow_up
     assert "Keep the original goal and operational boundaries unchanged." in follow_up
     assert guidance.CLOSING_CHALLENGE not in follow_up
     assert {tool.name for tool in clients[1].session.options["tools"]} == {

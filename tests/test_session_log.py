@@ -115,3 +115,52 @@ def test_long_metadata_keeps_original_bytes_and_rejects_unsearchable_filter(tmp_
     assert json.loads(session_log.page(tmp_path, {"event": 0})["text"]) == original
     with pytest.raises(ValueError, match="128 characters"):
         session_log.page(tmp_path, {"tool_call_id": original["data"]["toolCallId"]})
+
+
+def test_large_segment_inventory_remains_bounded_and_readable(tmp_path, monkeypatch):
+    log = session_log.EventLog(tmp_path, event_bytes=1000, total_bytes=8 * 1024 ** 3, segment_bytes=1)
+    # Keep this a small on-disk fixture; only the final manifest needs publication.
+    with monkeypatch.context() as patch:
+        patch.setattr(log, "checkpoint", lambda: None)
+        for index in range(3500):
+            log.append(event(index), prompt=1)
+    log.close()
+    assert (tmp_path / "events-manifest.json").stat().st_size > 1024 * 1024
+    first = session_log.page(tmp_path, {"offset": 3460}, terminal_log=log.checkpoint())
+    second = session_log.page(tmp_path, {"offset": first["next_offset"]}, terminal_log=log.checkpoint())
+    assert [row["sequence"] for row in first["events"] + second["events"]] == list(range(3460, 3500))
+    assert first["scanned_bytes"] <= session_log.PAGE_SCAN_BYTES
+    assert second["next_offset"] is None and not second["retention_truncated"]
+
+
+def test_low_disk_stops_bulk_retention_but_counts_tail_and_seals_manifest(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    monkeypatch.setattr(session_log.shutil, "disk_usage",
+                        lambda _: SimpleNamespace(free=session_log.DISK_HEADROOM + 800 - log.total_bytes))
+    log = session_log.EventLog(tmp_path, event_bytes=1000, total_bytes=8 * 1024 ** 3)
+    for index in range(8):
+        log.append(event(index), prompt=1)
+    log.close()
+    assert capsys.readouterr().err.count("disk_headroom") == 1
+    result = session_log.page(tmp_path, {}, terminal_log=log.checkpoint())
+    manifest = read_json(tmp_path / "events-manifest.json")
+    assert 0 < manifest["retained"] < 8
+    assert result["observed_events"] == 8 and result["manifest_closed"]
+    assert result["omitted"] == {"disk_headroom": 8 - manifest["retained"]}
+    assert result["unindexed_range"] == [manifest["retained"], 8]
+
+
+def test_disk_headroom_is_rechecked_after_idle_even_with_cached_allowance(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    clock = [10.0]
+    disk = SimpleNamespace(free=session_log.DISK_HEADROOM + 10000)
+    monkeypatch.setattr(session_log.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_log.shutil, "disk_usage", lambda _: disk)
+    log = session_log.EventLog(tmp_path, event_bytes=1000, total_bytes=10000)
+    log.append(event(0), prompt=1)
+    assert log.disk_allowance > 1000
+    clock[0] += 6
+    disk.free = session_log.DISK_HEADROOM
+    log.append(event(1), prompt=1)
+    log.close()
+    assert log.retained == 1 and log.omitted == {"disk_headroom": 1}

@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from labgoblin import guidance, provider, runtime
+from labgoblin.cli import main
 from labgoblin.config import Config
 from labgoblin.processes import own_handle
 from labgoblin.protocol import LaunchReceipt, UncertainExecution
@@ -21,6 +22,102 @@ def fixture_provider(root, monkeypatch, mode="normal"):
     publish_json(root / "fixture-provider.json", {"model_free": True, "root": str(root), "mode": mode})
     command = [sys.executable, str(Path(__file__).with_name("fixed_copilot.py"))]
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: {"command": command, "sdk_controls": "model-free"})
+
+
+@pytest.mark.parametrize("archive", [False, True])
+@pytest.mark.parametrize("completed", [False, True])
+def test_archive_failure_never_overwrites_research_outcome_or_unknown_usage(
+        project, ledger, monkeypatch, archive, completed):
+    from labgoblin.inspection_evidence import Evidence
+    root, config, record = project
+    envelope = arm((root, replace(config, archive_workspace=archive), record), ledger)
+    directory = Path(envelope.root)
+    publish_json(root / ".labgoblin" / "ledger.json", {"path": str(ledger.path), "id": ledger.id})
+    (root / "report.md").write_bytes(b"Current working evidence\n")
+    expected_status = "completed" if completed else "timed_out"
+    expected_reason = "Research loop completed" if completed else "Researcher deadline reached"
+    expected_usage = {"totalNanoAiu": 10_000_000_000} if completed else None
+    publish_json(directory / "result.json", {
+        "run_id": envelope.id, "envelope_digest": envelope.digest,
+        "status": expected_status, "reason": expected_reason})
+    monkeypatch.setattr(runtime, "bound_diagnostics", lambda: None)
+    monkeypatch.setattr(runtime.payload, "run_process", lambda _: {
+        "status": expected_status, "reason": "Native outcome", "returncode": 0 if completed else 124,
+        "elapsed": 60, "executed": True})
+    monkeypatch.setattr(runtime, "usage_record", lambda *args, **kwargs: expected_usage)
+    def fail_snapshot(*args, **kwargs):
+        assert archive, "Archival disabled: no workspace traversal should occur"
+        raise ValueError("Research snapshot exceeds 100000 filesystem entries")
+    monkeypatch.setattr(runtime, "snapshot", fail_snapshot)
+    assert runtime.worker_main(directory / "envelope.json") == (0 if completed else 1)
+    receipt = read_json(directory / "receipt.json")
+    assert receipt["status"] == expected_status and receipt["usage"] == expected_usage
+    assert expected_reason in receipt["reason"]
+    assert ("spending is unknown" in receipt["reason"]) is not completed
+    assert receipt["metadata"]["primary_outcome"] == {"status": expected_status, "reason": expected_reason}
+    assert "100000" not in receipt["reason"]
+    assert receipt["metadata"]["archive"]["status"] == ("failed" if archive else "disabled")
+    if archive:
+        assert "100000" in receipt["metadata"]["archive"]["message"]
+    assert json.loads(ledger.consumer_run(envelope.id)["receipt"]) == receipt
+    assert not ledger.rows()
+    budget = runtime.status(root)["budget"]
+    assert budget["uncovered_unknown"] == ([] if completed else [envelope.id])
+    if completed:
+        assert budget["remaining"] == 290
+    before = (directory / "receipt.json").read_bytes()
+    evidence = Evidence(root, record["id"])
+    with pytest.raises(ValueError, match="workspace snapshot"):
+        evidence.read({"scope": envelope.id, "path": "report.md"})
+    with pytest.raises(ValueError, match="workspace snapshot"):
+        evidence.read({"scope": "latest", "path": "report.md"})
+    assert evidence.read({"scope": "workspace", "path": "report.md"})["live"]
+    terminal = Evidence(root, record["id"], terminal={"research_run": envelope.id,
+                                                    "receipt_sha256": digest(receipt)})
+    with pytest.raises(ValueError, match="Only retained session and evaluation evidence"):
+        terminal.read({"path": "report.md"})
+    with pytest.raises(ValueError, match="handoff"):
+        terminal.read({"scope": "workspace", "path": "report.md"})
+    assert (directory / "receipt.json").read_bytes() == before
+
+
+def test_resume_without_archival_keeps_working_files_and_history(project, ledger, monkeypatch):
+    root, config, record = project
+    (root / "labgoblin.toml").write_text(replace(config, archive_workspace=False).toml(), encoding="utf-8")
+    fixture_provider(root, monkeypatch)
+    first = runtime.run(root)
+    assert first["status"] == "completed", first
+    directory = root / ".labgoblin" / "runs" / first["id"]
+    before = (directory / "receipt.json").read_bytes()
+    (root / "my-retained-result.txt").write_bytes(b"Evidence outside the standard artifact folder\n")
+    second = runtime.run(root, resume=True)
+    assert second["status"] == "completed", second
+    assert not (directory / "snapshot").exists()
+    assert (directory / "receipt.json").read_bytes() == before
+    assert (root / "my-retained-result.txt").read_bytes() == b"Evidence outside the standard artifact folder\n"
+    assert runtime.status(root)["budget"]["remaining"] == 280
+    assert not ledger.rows()
+
+
+def test_cli_scaffold_can_be_replaced_with_a_freeform_brief(tmp_path, ledger, monkeypatch, capsys):
+    root = tmp_path / "research"
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
+    assert main(["init", str(root), "--ledger", str(ledger.path), "--no-research-venv",
+                 "--cpus", "1", "--memory-mb", "1024", "--timeout", "180"]) == 0
+    capsys.readouterr()
+    goal = b"Determine whether adding one increases the mean by one.\r\n"
+    (root / "research_goal.md").write_bytes(goal)
+    fixture_provider(root, monkeypatch)
+    assert main(["run", str(root)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    directory = root / ".labgoblin" / "runs" / result["id"]
+    assert read_json(directory / "prompt.json")["goal"] == goal.decode("utf-8")
+    assert read_json(root / "artifacts" / "metrics.json")["means"] == [4, 4, 5]
+    assert result["metadata"]["archive"]["status"] == "disabled"
+    assert not (directory / "snapshot").exists()
+    assert (root / "research_goal.md").read_bytes() == goal
+    assert ledger.grant(result["id"])["state"] == "released"
+    assert not ledger.rows()
 
 
 def test_real_sdk_stdio_owned_execution_and_cumulative_resume(project, ledger, monkeypatch):
@@ -38,6 +135,8 @@ def test_real_sdk_stdio_owned_execution_and_cumulative_resume(project, ledger, m
     prompt_path = directory / "prompt.json"
     first_prompt = prompt_path.read_bytes()
     assert read_json(prompt_path)["instructions"] == guidance.RESEARCH
+    assert "research_environment" not in read_json(prompt_path)
+    assert not (root / ".venv").exists()
     frozen = Path(read_json(directory / "envelope.json")["runtime"]["root"])
     assert (frozen / "labgoblin" / "guidance.py").read_bytes() == Path(guidance.__file__).read_bytes()
     with pytest.raises(ValueError, match="resume explicitly"):
@@ -54,6 +153,38 @@ def test_real_sdk_stdio_owned_execution_and_cumulative_resume(project, ledger, m
     second_prompt = read_json(root / ".labgoblin" / "runs" / second["id"] / "prompt.json")
     assert second_prompt["instructions"] == (
         guidance.RESEARCH + "\n\nProject-specific research guidance:\n" + project_guidance)
+    assert not ledger.rows()
+
+
+def test_recorded_environment_authority_is_frozen_without_overriding_restrictions(
+        tmp_path, ledger, monkeypatch):
+    from labgoblin import research_environment
+    root = tmp_path / "authorized"
+    goal = "Use only local synthetic inputs. Do not download pretrained models."
+    record = runtime.initialize(root, Config(
+        cpus=1, memory_mb=1024, timeout_seconds=180, ledger=str(ledger.path)), goal=goal)
+    custom = "Do not install third-party packages; use the standard library."
+    (root / ".github" / "copilot-instructions.md").write_text(custom, encoding="utf-8")
+    original_authorization = record["research_environment"]["authorization"]
+    monkeypatch.setattr(research_environment, "AUTHORIZATION", "Changed future-project defaults.")
+    fixture_provider(root, monkeypatch)
+    result = runtime.run(root)
+    assert result["status"] == "completed", result
+    directory = root / ".labgoblin" / "runs" / result["id"]
+    prompt = read_json(directory / "prompt.json")
+    assert prompt["goal"] == goal
+    assert custom in prompt["instructions"]
+    assert original_authorization in prompt["instructions"]
+    assert "Explicit operator restrictions" in prompt["instructions"]
+    assert "Changed future-project defaults" not in prompt["instructions"]
+    python = record["research_environment"]["python"]
+    assert python in prompt["goal_prompt"] and python in prompt["instructions"]
+    assert read_json(root / "artifacts" / "metrics.json")["python_executable"] == python
+    before = (directory / "prompt.json").read_bytes()
+    (root / "labgoblin.toml").write_text(Config(model="operator-next-execution").toml(), encoding="utf-8")
+    record["research_environment"]["authorization"] += "\nNo future package changes."
+    (root / ".labgoblin" / "project.json").write_text(json.dumps(record), encoding="utf-8")
+    assert (directory / "prompt.json").read_bytes() == before
     assert not ledger.rows()
 
 

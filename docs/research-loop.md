@@ -16,12 +16,28 @@ stopping follow-up. There are no framework-authored per-turn packets,
 scientific publication tools, typed handoffs, acknowledgment ceremonies or a
 separate final-analysis model.
 
-The charter asks for a useful baseline, discriminating experiments, separation
-between development and final evaluation, retained failures/negative evidence,
-reproducible commands, concise working notes and an honest report. The researcher
-can challenge its initial framing, revise a method and pursue prerequisites.
-It should reconsider the original goal at meaningful milestones, without
-inventing task-cost forecasts or performing ritual reflection calls.
+The charter makes continuation the default: identify a consequential question,
+carry out an investigation, examine the evidence, then choose and perform the
+next useful investigation toward the original goal. Ordinary scientific choices
+do not require human approval. A working tool, scoped result, report or answered
+reviewer objection is a checkpoint, not an automatic endpoint. Feasible important
+leads should become actual work, not merely a future-work list.
+
+The researcher chooses methods, evaluation and sequencing, with a useful baseline,
+controls and separation between development and independent evaluation. It retains
+failures, negative evidence and reproducible commands in ordinary files, updating
+notes/report at meaningful checkpoints. There are no compulsory experiment phases,
+per-turn reporting forms, task-cost forecasts or reflection calls. Detailed review
+protocol and progress-counter instructions belong to reviewers, not the main
+research charter.
+
+Artifact organization and Git checkpoints are also researcher-owned. Init prepares
+Git without an initial commit; meaningful accomplishments and risky changes are
+useful checkpoint opportunities, not a mandatory schedule. Select files deliberately,
+keep secrets/environments/bulky generated data out of ordinary commits, and preserve
+unrelated work and historical evidence during rollback. Git does not retain ignored
+or untracked files. Full-workspace archives are optional; normal continuation uses
+the working files, while uncaptured historical evidence remains explicitly unavailable.
 
 When stuck, it considers materially different approaches rather than only more
 seeds or tuning. Existing `research-notes.md` retains promising untried ideas,
@@ -100,11 +116,14 @@ a smaller fresh retry.
 An unfunded or interrupted challenge/final review leaves an incomplete execution;
 the initial approval is not a fallback completion. Coach-off behavior is unchanged.
 
-The coach judges the decision to end research, not just the report's honesty.
+The coach uses the same continuation-first standard. It judges the decision to
+end research, not just the report's honesty.
 It examines decisive evidence, failed controls, relevant notes and the strongest
 credible untried alternative: what feasible next investigation could materially
-change the answer, and why is it not being done? A proof must address the intended
-goal, not only a researcher-chosen renderer, benchmark or method.
+change the answer, and why is it not being done? Useful advisory findings do not
+justify closure while central intended-use questions remain investigable. Answering
+the latest criticism does not substitute for answering the original goal. A proof
+must address that goal, not only a researcher-chosen renderer, benchmark or method.
 
 Supported goal completion, including a scope-matching impossibility proof, and
 supported exhaustion of credible feasible avenues are legitimate stopping

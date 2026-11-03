@@ -46,9 +46,11 @@ def prepare(project):
 
 
 def facts(row, receipt):
+    metadata = receipt.get("metadata", {})
     return {"status": receipt["status"], "reason": receipt["reason"],
             "elapsed": receipt["elapsed"], "ended": row["ended"],
-            "usage": receipt.get("usage"), "snapshot": receipt.get("metadata", {}).get("snapshot")}
+            "usage": receipt.get("usage"), "snapshot": metadata.get("snapshot"),
+            **({"archive": metadata["archive"]} if "archive" in metadata else {})}
 
 
 def create(inspector, run_id, *, approval_sha256=None, command=None):

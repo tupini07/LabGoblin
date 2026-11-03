@@ -72,7 +72,13 @@ def exercise():
         if CONFIG.get("mode") == "inspection_wait":
             ABORT.wait(120)
             return
-        if invoke_tool("labgoblin_inspect_read", {"scope": "latest", "path": "report.md"}) is None:
+        if CONFIG.get("inspect_without_archive"):
+            result = invoke_tool("labgoblin_inspect_status", {})
+            if result is None:
+                return
+            if "disabled" not in json.dumps(result):
+                raise ValueError("Reporter did not receive the explicit archive coverage gap")
+        elif invoke_tool("labgoblin_inspect_read", {"scope": "latest", "path": "report.md"}) is None:
             return
         if CONFIG.get("inspect_session"):
             result = invoke_tool("labgoblin_inspect_session", CONFIG["inspect_session"])
@@ -116,6 +122,11 @@ def exercise():
         event("session.idle", {})
         return
     if ROLE in ("coach", "adjudicator"):
+        if CONFIG.get("mode") == "evaluation":
+            saved = json.loads((ROOT / "artifacts" / "evaluation-fixture.json").read_text(encoding="utf-8"))
+            if invoke_tool("labgoblin_read_evaluation", {
+                    "run": saved["confirmation"]["run"], "check": saved["confirmation"]["check"]}) is None:
+                return
         if CONFIG.get("mode") == "progress_reviews":
             if invoke_tool("labgoblin_read_evidence", {"path": f"artifacts/review-control-{COACH_INDEX}.json"}) is None:
                 return
@@ -182,7 +193,22 @@ def exercise():
                 return
     output = ROOT / "artifacts"
     output.mkdir(exist_ok=True)
-    selected = shutil.which("python")
+    selected = os.environ.get("LABGOBLIN_RESEARCH_PYTHON") or shutil.which("python")
+    if CONFIG.get("scientific_wheel") and REQUESTS == 1:
+        for command in (
+            [selected, "-I", "-B", "-m", "ensurepip"],
+            [selected, "-I", "-B", "-m", "pip", "--isolated", "install", "--no-index",
+             "--no-deps", "--no-cache-dir", "--disable-pip-version-check", CONFIG["scientific_wheel"]],
+        ):
+            subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, check=True, timeout=60)
+        trained = subprocess.check_output([
+            selected, "-I", "-B", "-c",
+            "import json,sys; from lg_science_fixture import fit;"
+            "print(json.dumps({'python':sys.executable,'prefix':sys.prefix,"
+            "'weights':fit([(0,1),(1,3)])}))",
+        ], stdin=subprocess.DEVNULL, text=True, timeout=10)
+        (output / "science-model.json").write_text(trained, encoding="utf-8")
     (ROOT / "python-selection.json").write_text(json.dumps({
         "resolved": selected, "parent": sys.executable}), encoding="utf-8")
     child = subprocess.Popen([selected, "-c", "import sys;print(sys.executable)"],
@@ -218,6 +244,28 @@ def exercise():
     (ROOT / "report.md").write_text("Fixed protocol qualification: means are 4, 4 and 5. No model call occurred.\n",
                                   encoding="utf-8")
     (ROOT / "research-notes.md").write_text("Retain the deterministic fixture results.\n", encoding="utf-8")
+    if CONFIG.get("mode") == "evaluation" and REQUESTS == 1:
+        candidate = ROOT / "candidate"
+        candidate.mkdir()
+        (candidate / "model.json").write_text(json.dumps({"lookup": {"0": 1, "1": 3}, "fallback": 0}), encoding="utf-8")
+        measured = invoke_tool("labgoblin_evaluate", {"stage": "development", "candidate": "candidate"})
+        if measured is None:
+            return
+        development = json.loads(measured["textResultForLlm"])
+        (candidate / "model.json").write_text(json.dumps({"slope": 2, "intercept": 1}), encoding="utf-8")
+        measured = invoke_tool("labgoblin_evaluate", {
+            "stage": "confirmation", "source_run": development["run"], "source_check": development["check"]})
+        if measured is None:
+            return
+        confirmation = json.loads(measured["textResultForLlm"])
+        measured = invoke_tool("labgoblin_evaluate", {
+            "stage": "regression", "candidate": "candidate",
+            "source_run": confirmation["run"], "source_check": confirmation["check"]})
+        if measured is None:
+            return
+        regression = json.loads(measured["textResultForLlm"])
+        (output / "evaluation-fixture.json").write_text(json.dumps({
+            "development": development, "confirmation": confirmation, "regression": regression}), encoding="utf-8")
     if CONFIG.get("mode") == "operator_ideas":
         prompt = (ROOT / f"fixture-prompt-{SESSION}-{REQUESTS}.txt").read_text(encoding="utf-8")
         relative = prompt.split("captured delivery index:\n", 1)[1].splitlines()[0]

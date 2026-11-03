@@ -73,6 +73,13 @@ function display(source) {
           { run: source.run, role: source.role, event: event.sequence, offset: 0 }));
       }
     }
+  } else if (source.checks) {
+    if (!source.checks.length) element("p", "No retained evaluation checks on this page.", $("evidence"));
+    for (const check of source.checks) {
+      const score = check.summary ? `; candidate passed ${check.summary.candidate_passed}/${check.summary.cases}, baseline ${check.summary.baseline_passed}/${check.summary.cases}` : "";
+      const button = element("button", `${check.stage}: ${check.status}${score}`, $("evidence"));
+      button.onclick = () => run(() => browse("evaluations", false, 0, { run: source.run, check: check.check }));
+    }
   } else element("pre", source.text === undefined ? JSON.stringify(source, null, 2) : source.text, $("evidence"));
 }
 async function browse(action, image = false, offset = 0, savedArgs = null) {
@@ -80,7 +87,7 @@ async function browse(action, image = false, offset = 0, savedArgs = null) {
   if (!savedArgs) {
     if (action === "read") args.image = image;
     if (action === "search") args.query = $("search").value;
-    if (action === "execution" || action === "session") {
+    if (action === "execution" || action === "session" || action === "evaluations") {
       args = { run: ["latest", "workspace"].includes($("scope").value) ? latestRun : $("scope").value, offset };
       if (action === "session") {
         args.role = $("role").value;
@@ -216,6 +223,7 @@ async function refresh() {
   const latest = research.runs.at(-1);
   latestRun = latest ? latest.id : null;
   $("execution").disabled = latestRun === null;
+  $("evaluations").disabled = latestRun === null;
   $("session").disabled = latestRun === null;
   $("project").textContent = research.root;
   const budget = research.budget;
@@ -252,6 +260,7 @@ $("image").onclick = () => run(() => browse("read", true));
 $("list").onclick = () => run(() => browse("listing"));
 $("find").onclick = () => run(() => browse("search"));
 $("execution").onclick = () => run(() => browse("execution"));
+$("evaluations").onclick = () => run(() => browse("evaluations"));
 $("session").onclick = () => run(() => browse("session"));
 $("next").onclick = () => run(nextPage);
 $("more-history").onclick = () => run(() => messages(false));

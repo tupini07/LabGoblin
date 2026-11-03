@@ -184,7 +184,7 @@ def test_owned_sdk_chat_is_read_only_separately_billed_and_remembers_context(obs
     assert {name.removeprefix("custom:") for name in options["availableTools"]} == {
         "labgoblin_inspect_status", "labgoblin_inspect_read", "labgoblin_inspect_listing",
         "labgoblin_inspect_search", "labgoblin_inspect_session", "labgoblin_inspect_execution",
-        "labgoblin_inspect_ideas", "labgoblin_prepare_idea"}
+        "labgoblin_inspect_ideas", "labgoblin_inspect_evaluations", "labgoblin_prepare_idea"}
     assert not options.get("mcpServers")
     (observer.project / "report.md").write_text("A new control succeeded; global impossibility remains unproved.")
     second = observer.ask("What about the new control?", command=argv)

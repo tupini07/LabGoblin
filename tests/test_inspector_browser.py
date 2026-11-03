@@ -4,6 +4,7 @@ import pytest
 
 from labgoblin import runtime
 from tests.test_inspector import command, observer, server
+from tests.test_evaluation import kit
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("LABGOBLIN_BROWSER_TESTS") != "1",
@@ -177,3 +178,27 @@ def test_browser_indexes_late_events_and_lists_dated_handoffs(page, server, obse
     page.locator("#next").click()
     expect(page.locator("#evidence pre")).to_contain_text("Late result")
     assert observer.status()["inspection"]["budget"]["used"] == 10
+
+
+def test_browser_paired_checks_details_and_paging_are_read_only(page, server, observer, project, ledger, kit):
+    from playwright.sync_api import expect
+    from labgoblin.storage import atomic_json
+    from tests.test_evaluation import admitted, develop, settle
+    from tests.test_inspector import identities
+    atomic_json(kit / "development.json", [
+        {"id": f"case-{i}", "data": {"x": i + 10, "expected": 2 * (i + 10) + 1}} for i in range(5)])
+    envelope, evaluator = admitted(project, ledger, kit)
+    develop(evaluator)
+    settle(envelope, ledger)
+    before = identities(observer.project)
+    ready(page, server, observer)
+    page.locator("#evaluations").click()
+    button = page.locator("#evidence button").filter(has_text="candidate passed 5/5, baseline 0/5")
+    expect(button).to_be_visible()
+    button.click()
+    expect(page.locator("#evidence pre")).to_contain_text("case-0")
+    expect(page.locator("#evidence pre")).not_to_contain_text("case-4")
+    page.locator("#next").click()
+    expect(page.locator("#evidence pre")).to_contain_text("case-4")
+    expect(page.locator("#next")).to_be_hidden()
+    assert identities(observer.project) == before and observer.history()["total"] == 0

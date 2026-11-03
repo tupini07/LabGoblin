@@ -32,6 +32,35 @@ def test_posix_options_preserve_session_behavior(monkeypatch):
     assert processes.background_options(independent=True) == {"start_new_session": True}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX unreaped child process")
+def test_exited_unreaped_supervisor_is_dead():
+    import psutil
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+    owned = psutil.Process(process.pid)
+    handle = {"pid": process.pid, "created": owned.create_time()}
+    try:
+        assert processes.process_state(handle) == "alive"
+        deadline = time.monotonic() + 10
+        while owned.status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert owned.is_running()
+        assert processes.process_state(handle) == "dead"
+    finally:
+        process.wait(timeout=10)
+
+
+def test_unreadable_process_status_is_unknown(monkeypatch):
+    import psutil
+    handle = processes.own_handle("fixture")
+
+    def denied(process):
+        raise psutil.AccessDenied(process.pid)
+
+    monkeypatch.setattr(psutil.Process, "status", denied)
+    assert processes.process_state(handle) == "unknown"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows console creation flags")
 @pytest.mark.parametrize("independent", [False, True])
 def test_windows_background_options(independent):

@@ -351,7 +351,7 @@ class ResourceLedger:
 
     def arm_consumer(self, envelope, *, adjustments=None, inspection=False):
         from labgoblin.config import Config
-        config = Config.parse(envelope.config)
+        config = Config.parse(envelope.config, frozen=True)
         kind = "inspection-run" if inspection else "research-run"
         if inspection and (config.coach or config.consultant or config.gpus or config.credit_limit is None):
             raise ValueError("Inspection requires a finite separate allowance and no research roles or GPUs")

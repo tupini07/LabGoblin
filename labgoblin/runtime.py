@@ -5,12 +5,13 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
 import uuid
 
-from labgoblin import closing, credits, guidance, payload, provider
+from labgoblin import closing, credits, guidance, payload, provider, research_environment
 from labgoblin.config import Config
 from labgoblin.processes import background_options, bound_diagnostics, own_handle, process_state
 from labgoblin.protocol import (
@@ -23,7 +24,38 @@ from labgoblin.storage import (
 )
 
 
-PLACEHOLDER = "# Research goal\n\nDescribe the question, available inputs and evidence that would answer it.\n"
+PLACEHOLDER = """# Research brief
+
+Replace these prompts with the operator's goal and relevant context. The headings
+are optional; a clear free-form brief is equally valid. Do not invent missing facts,
+restrictions, prototype phases or smaller completion targets.
+
+The researcher owns the evolving plan in research-notes.md: scientific formulation,
+methods, experiments, evaluation and sequencing. That plan can change with evidence;
+it does not redefine the original goal or add operator constraints.
+
+## Goal and intended use
+
+[What should this research discover or achieve, and how will the answer be used?
+Describe the full objective and any evidence requirements the operator actually
+specified, not a convenient benchmark or an intermediate prototype.]
+
+## Context and available inputs
+
+[Identify relevant data, code, access paths and prior work. Separate established
+facts from assumptions, unverified findings and known gaps. Include useful context
+without prescribing the researcher's methods or sequence of experiments.]
+
+## Permissions and boundaries
+
+[Record genuine input, privacy, resource and environment boundaries. Use the
+recorded local-research authorization when enabled; add campaign-specific
+restrictions or explicit approvals where needed. Examples of scientific
+techniques are not an exhaustive permission whitelist. Operational limits are
+ceilings, not requirements to spend the allowance or run until the deadline.]
+"""
+# Unfilled briefs from earlier initializations must still fail admission.
+_PREVIOUS_PLACEHOLDER = "# Research goal\n\nDescribe the question, available inputs and evidence that would answer it.\n"
 BOOTSTRAP = """import hashlib,json,sys
 from pathlib import Path
 root=Path(__file__).resolve().parent
@@ -50,7 +82,39 @@ else:
 """
 
 
-def initialize(project, config, *, goal=None):
+def prepare_git(root):
+    executable = shutil.which("git")
+    if executable is None:
+        raise ValueError("Git is required for workspace history; install it explicitly or use init --no-git")
+    command = [executable, "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root)]
+    existing = any((parent / ".git").exists() or (parent / ".git").is_symlink()
+                   for parent in (root, *root.parents))
+    ignore = root / ".gitignore"
+    if ignore.is_symlink() or ignore.resolve() != ignore or ignore.exists() and ignore.stat().st_nlink != 1:
+        raise ValueError("Initialization cannot update a .gitignore file alias")
+    previous = read_text(ignore) if ignore.exists() else ""
+    patterns = ("/.labgoblin/", "/.labgoblin.lock", "/.venv/", "/inputs/", "/.cache/",
+                "__pycache__/", ".pytest_cache/", "node_modules/", ".env", ".env.*",
+                ".ssh/", ".aws/", ".azure/", ".copilot/", ".docker/",
+                ".npmrc", ".pypirc", ".netrc", ".git-credentials")
+    missing = [pattern for pattern in patterns if pattern not in previous.splitlines()]
+    if not existing:
+        payload.probe([*command, "init", "--quiet", "--template=", "--initial-branch=main"])
+    repository = Path(payload.probe([*command, "rev-parse", "--show-toplevel"])).resolve(strict=True)
+    if not root.is_relative_to(repository):
+        raise ValueError("Git resolved a repository outside the research workspace's ancestry")
+    if missing:
+        suffix = ("" if not previous or previous.endswith("\n") else "\n")
+        suffix += "\n# LabGoblin local state, environments and private inputs\n" + "\n".join(missing) + "\n"
+        with ignore.open("ab") as stream:
+            stream.write(suffix.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def initialize(project, config, *, goal=None, research_venv=True, git=True):
+    boolean(research_venv, "research_venv")
+    boolean(git, "git")
     root = Path(project).resolve()
     root.mkdir(parents=True, exist_ok=True)
     state = root / ".labgoblin"
@@ -77,6 +141,10 @@ def initialize(project, config, *, goal=None):
         for name in ("runs", "runtimes", "accounting"):
             (state / name).mkdir()
         value = {"version": CONFIG_VERSION, "id": identifier(), "root": str(root), "created": time.time()}
+        if research_venv:
+            value["research_environment"] = research_environment.prepare(root)
+        if git:
+            prepare_git(root)
         publish_json(state / "project.json", value)
     except BaseException:
         for path in reversed(created):
@@ -92,13 +160,15 @@ def project_record(project):
     if (state / "labgoblin.db").exists():
         raise ValueError("This is a legacy campaign; use its preserved runtime. No migration or reset was performed.")
     value = read_json(state / "project.json")
-    table(value, "project identity", {"version", "id", "root", "created"})
+    table(value, "project identity", {"version", "id", "root", "created", "research_environment"})
     require_version(value.get("version"), CONFIG_VERSION, "project")
     if not re.fullmatch(r"[a-f0-9]{32}", text(value.get("id"), "project id")):
         raise ValueError("Invalid project identity")
     number(value.get("created"), "project creation time")
     if value.get("root") != str(root) or not (root / ".labgoblin.lock").is_file():
         raise ValueError("Project identity or controller lock does not match its recorded root")
+    if "research_environment" in value:
+        research_environment.validate(root, value["research_environment"])
     return root, state, value
 
 
@@ -148,7 +218,7 @@ def status(project):
         candidate_error = f"{type(error).__name__}: {error}"
         if not rows:
             raise
-    config = Config.parse(json.loads(rows[-1]["envelope"])["config"]) if rows else candidate
+    config = Config.parse(json.loads(rows[-1]["envelope"])["config"], frozen=True) if rows else candidate
     budget = credits.summarize(rows, config.credit_limit, adjustments=adjustments(state, rows))
     runs = []
     for row in rows:
@@ -160,6 +230,7 @@ def status(project):
                      "reason": receipt["reason"] if receipt else "",
                      "checkpoint_reason": (receipt.get("metadata", {}).get("provider", {}).get("checkpoint_reason")
                                            if receipt else None),
+                     "archive": receipt.get("metadata", {}).get("archive") if receipt else None,
                      "directory": envelope.root, "config": envelope.config})
     return {"project_id": record["id"], "root": str(root), "budget": budget, "runs": runs,
             "ideas": Inbox(root).status(),
@@ -199,7 +270,7 @@ def verify_runtime(envelope, *, entrypoint="provider"):
         raise ValueError("Research goal/instruction snapshot changed after admission")
     expected = (sys.executable, "-I", "-B", str(root / "bootstrap.py"),
                 entrypoint, str(Path(envelope.root) / "envelope.json"))
-    if envelope.argv != expected or Config.parse(envelope.config).resources != envelope.resources:
+    if envelope.argv != expected or Config.parse(envelope.config, frozen=True).resources != envelope.resources:
         raise ValueError("Provider command or resources differ from their frozen configuration")
 
 
@@ -309,6 +380,9 @@ def settle_dead(ledger, row, *, inspection=False):
         if payload.tree_state(root / "process", envelope.id) != "dead":
             raise UncertainExecution("Owned payload tree is not proven dead; its grant remains held")
         metadata = {"supervisor": handle, "partial_usage": read_usage(envelope, complete=False)}
+        if not inspection and "evaluation" in read_json(root / "prompt.json"):
+            from labgoblin.evaluation import manifest
+            metadata["evaluations"] = manifest(root)
         receipt = LaunchReceipt(envelope.id, envelope.digest, "interrupted", 0, True,
                                 reason="Owned tree died without a terminal receipt; no research is replayed",
                                 usage=read_usage(envelope, complete=True), metadata=metadata)
@@ -431,28 +505,44 @@ def run(project, *, resume=False, handoff=False):
         allowance = credits.available(credits.summarize(rows, config.credit_limit, adjustments=audited),
                                       coach=config.coach, consultant=config.consultant)
         goal = read_text(root / "research_goal.md")
-        if not goal.strip() or goal == PLACEHOLDER:
+        if not goal.strip() or goal.split() in (PLACEHOLDER.split(), _PREVIOUS_PLACEHOLDER.split()):
             raise ValueError("Write a real research question in research_goal.md before running")
+        environment = (research_environment.inspect(root, record["research_environment"])
+                       if "research_environment" in record else None)
         capabilities = provider.capabilities()
         from labgoblin.handoffs import prepare as prepare_handoff
         report_approval = prepare_handoff(root) if handoff else None
         instructions = read_text(root / ".github" / "copilot-instructions.md")
         if instructions != guidance.RESEARCH:
             instructions = guidance.RESEARCH + "\n\nProject-specific research guidance:\n" + instructions
+        if environment is not None:
+            instructions += research_environment.instructions(environment)
         run_id, launcher = identifier(), own_handle(record["id"])
         directory = state / "runs" / run_id
         directory.mkdir()
         frozen = freeze_runtime(state)
         from labgoblin.ideas import VERSION as IDEAS_VERSION
+        environment_hint = (
+            "\nScientific Python: " + environment["python"] + "\nUse the recorded local research authorization."
+            if environment is not None else
+            "\nFor scientific work, use the separate research environment explicitly authorized in the goal, "
+            "if any; otherwise use this existing interpreter.")
         prompt = {"goal": goal, "instructions": instructions, "operator_ideas_version": IDEAS_VERSION,
                   "provider_command": capabilities["command"],
-                  "goal_prompt": goal + "\n\nUse this existing interpreter for local work: " + sys.executable +
+                  "goal_prompt": goal + "\n\nHarness interpreter (do not modify its environment): " + sys.executable +
+                  environment_hint +
                   "\nContinue from retained research-notes.md and artifacts if present. "
                   "Do not rerun completed work merely because this is a new controller execution."}
+        if environment is not None:
+            prompt["research_environment"] = environment
         if config.closure_critic:
             prompt["closure_response_version"] = closing.VERSION
         if report_approval is not None:
             prompt["handoff"] = report_approval
+        if config.evaluation_spec is not None:
+            from labgoblin.evaluation import prepare
+            prompt["evaluation"] = prepare(root, directory, config.evaluation_spec, config.max_snapshot_bytes,
+                                           research_environment=environment)
         publish_json(directory / "prompt.json", prompt)
         owner = {"kind": "research-run", "handle": launcher}
         ledger.request(run_id, record["id"], run_id, "research-run", config.resources, owner, native=True)
@@ -521,11 +611,17 @@ def worker_main(path, *, inspection=False):
         from labgoblin.inspector import usage_record as read_usage
     else:
         read_usage = usage_record
+    root, config = Path(envelope.root), Config.parse(envelope.config, frozen=True)
+    environment = {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
+    if not inspection:
+        prompt = read_json(root / "prompt.json")
+        if "research_environment" in prompt:
+            research_environment.check(envelope.project, prompt["research_environment"])
+            environment.update(research_environment.variables(prompt["research_environment"]))
     ledger = ResourceLedger(envelope.ledger_path, expected_id=envelope.ledger_id)
     supervisor = own_handle(envelope.id)
     if not ledger.claim_consumer(envelope, supervisor):
         raise ValueError("This one-use execution was already claimed or retired")
-    root, config = Path(envelope.root), Config.parse(envelope.config)
     outcome = payload.run_process({
         "argv": envelope.argv, "cwd": envelope.project, "root": str(root / "process"),
         "token": envelope.id, "cpus": envelope.resources.cpus, "memory_mb": envelope.resources.memory_mb,
@@ -533,10 +629,13 @@ def worker_main(path, *, inspection=False):
         "seconds": config.timeout_seconds, "log_bytes": 64 * 1024 * 1024,
         "cancel_path": str(root / "cancel"), "provider": "copilot", "shutdown_grace_seconds": provider.GRACE_SECONDS,
         "job_name": f"labgoblin-{envelope.id}",
-        "environment": {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")},
+        "environment": environment,
     })
     status, reason = outcome["status"], outcome["reason"]
-    metadata = {"supervisor": supervisor, "process": outcome}
+    metadata = {"supervisor": supervisor, "process": outcome,
+                "primary_outcome": {"status": status, "reason": reason}}
+    usage = None
+    stage = "provider result"
     try:
         if (root / "result.json").exists():
             result = read_json(root / "result.json")
@@ -547,16 +646,34 @@ def worker_main(path, *, inspection=False):
                 status, reason = result["status"], result["reason"]
         elif outcome["executed"]:
             status, reason = "failed", "Owned provider ended without its completion record"
+        metadata["primary_outcome"] = metadata.get("provider", {}).get(
+            "primary_outcome", {"status": status, "reason": reason})
+        stage = "final provider usage"
         usage = read_usage(envelope, complete=True)
+        stage = "partial provider usage"
         metadata["partial_usage"] = read_usage(envelope, complete=False)
         if outcome["executed"] and usage is None:
             status = status if status in ("cancelled", "timed_out") else "failed"
             reason = (reason + "; final provider spending is unknown").lstrip("; ")
         if not inspection:
-            metadata["snapshot"] = snapshot(Path(envelope.project), root / "snapshot", config.max_snapshot_bytes)
+            stage = "evaluation evidence"
+            if "evaluation" in read_json(root / "prompt.json"):
+                from labgoblin.evaluation import manifest
+                metadata["evaluations"] = manifest(root)
     except (OSError, ValueError, RuntimeError) as error:
-        status, reason = "failed", f"Retaining execution evidence failed: {type(error).__name__}: {error}"
-        usage = read_usage(envelope, complete=True)
+        metadata["finalization_errors"] = [provider.error_details(stage, error)]
+        status = "failed"
+        reason = "; ".join(filter(None, [reason, f"{stage}: {type(error).__name__}: {error}"]))
+    if not inspection:
+        metadata["archive"] = {"status": "disabled", "reason": "Full workspace archival was not requested"}
+        if config.archive_workspace:
+            try:
+                metadata["snapshot"] = snapshot(Path(envelope.project), root / "snapshot", config.max_snapshot_bytes)
+                metadata["archive"] = {"status": "completed"}
+            except (OSError, ValueError, RuntimeError) as error:
+                metadata["archive"] = {"status": "failed", **provider.error_details("workspace archive", error)}
+                print(f"Workspace archival failed; research outcome is unchanged: {type(error).__name__}: {error}",
+                      file=sys.stderr, flush=True)
     receipt = LaunchReceipt(envelope.id, envelope.digest, status, outcome["elapsed"], outcome["executed"],
                             returncode=outcome["returncode"], reason=reason, usage=usage, metadata=metadata)
     publish_json(root / "receipt.json", asdict(receipt))

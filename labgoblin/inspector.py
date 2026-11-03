@@ -109,7 +109,7 @@ class Inspector:
 
     def profile(self):
         path = self.state / "profile.json"
-        return Config.parse(read_json(path)["config"]) if path.exists() else None
+        return Config.parse(read_json(path)["config"], frozen=True) if path.exists() else None
 
     def ledger(self):
         return runtime.bound_ledger(self.state)

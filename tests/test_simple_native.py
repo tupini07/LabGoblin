@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import time
 import psutil
 import pytest
 
+from labgoblin import payload
 from labgoblin.payload import run_process, tree_state
 from labgoblin.protocol import identifier
 from labgoblin.storage import read_json
@@ -84,6 +86,25 @@ def test_payload_retires_descendants_and_preserves_assigned_cpus(spec):
     assert tree_state(spec["root"], spec["token"]) == "dead"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Linux nested process-group/session ownership")
+def test_nested_evaluator_remains_in_outer_owned_session(spec):
+    nested = {**spec, "root": str(Path(spec["cwd"]) / "nested"), "token": identifier(),
+              "seconds": 60, "parent_session": True}
+    nested["argv"] = [sys.executable, "-c",
+                      "import os,json,time;print(json.dumps({'session':os.getsid(0),'group':os.getpgrp()}),flush=True);time.sleep(60)"]
+    code = ("import sys;sys.path.insert(0," + repr(str(Path(__file__).resolve().parents[1])) + ");"
+            "from labgoblin.payload import run_process;run_process(" + repr(nested) + ")")
+    spec.update(argv=[sys.executable, "-c", code], seconds=3)
+    outcome = run_process(spec)
+    assert outcome["status"] == "timed_out"
+    outer = read_json(Path(spec["root"]) / "process-handle.json")
+    child = read_json(Path(nested["root"]) / "process-handle.json")
+    identity = read_json(Path(nested["root"]) / "stdout.log")
+    assert identity == {"session": outer["pid"], "group": child["pid"]}
+    assert tree_state(spec["root"], spec["token"]) == "dead"
+    assert tree_state(nested["root"], nested["token"]) == "dead"
+
+
 def test_cooperative_cancel_has_time_to_flush_but_not_extend_deadline(spec):
     spec.update(provider="copilot", shutdown_grace_seconds=2)
     code = ("import pathlib,time,sys,os\n"
@@ -102,3 +123,121 @@ def test_cooperative_cancel_has_time_to_flush_but_not_extend_deadline(spec):
     assert outcome["returncode"] == 130
     assert "settled" in (Path(spec["root"]) / "stdout.log").read_text()
     assert outcome["elapsed"] < 5
+
+
+@pytest.mark.parametrize("mode,winerror", [("complete", 5), ("cancel", 32), ("deadline", 33)])
+def test_heartbeat_access_failures_preserve_supervision(spec, monkeypatch, capsys, mode, winerror):
+    original = payload.atomic_json
+    attempts = []
+    signal = Path(spec["cancel_path"] if mode == "cancel" else Path(spec["cwd"]) / "finish")
+    spec.update(seconds=5, provider="copilot", shutdown_grace_seconds=2)
+    if mode == "deadline":
+        spec.update(seconds=1.2, argv=[sys.executable, "-c", "import time;time.sleep(60)"])
+    else:
+        code = ("import pathlib,sys,time\n"
+                f"signal=pathlib.Path({str(signal)!r})\n"
+                "while not signal.exists():time.sleep(.01)\n"
+                "time.sleep(.2)\nprint('settled',flush=True)\n"
+                f"sys.exit({130 if mode == 'cancel' else 0})")
+        spec["argv"] = [sys.executable, "-c", code]
+
+    def blocked(path, value):
+        if Path(path).name == "heartbeat.json":
+            attempts.append(time.monotonic())
+            if len(attempts) == 2 and mode != "deadline":
+                signal.touch()
+            error = PermissionError("blocked heartbeat")
+            error.winerror = winerror
+            raise error
+        return original(path, value)
+
+    monkeypatch.setattr(payload, "atomic_json", blocked)
+    outcome = run_process(spec)
+    if mode == "deadline":
+        assert outcome["status"] == "timed_out", outcome
+    else:
+        assert outcome["returncode"] == (130 if mode == "cancel" else 0), outcome
+        assert "settled" in (Path(spec["root"]) / "stdout.log").read_text()
+        if mode == "complete":
+            assert outcome["status"] == "completed", outcome
+    assert outcome["elapsed"] < 5
+    assert attempts
+    assert all(later - earlier >= .95 for earlier, later in zip(attempts, attempts[1:]))
+    assert outcome["heartbeat"]["write_failures"] == len(attempts)
+    assert outcome["heartbeat"]["last_success_elapsed"] is None
+    assert "blocked heartbeat" in outcome["heartbeat"]["last_error"]
+    assert capsys.readouterr().err.count("Heartbeat publication unavailable") == 1
+    assert_dead(read_json(Path(spec["root"]) / "process-handle.json"))
+    assert tree_state(spec["root"], spec["token"]) == "dead"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Actual Windows file replacement sharing violation")
+def test_heartbeat_recovers_after_windows_reader_releases_file(spec, monkeypatch, capsys):
+    import win32con
+    import win32file
+
+    original = payload.atomic_json
+    heartbeat = Path(spec["root"]) / "heartbeat.json"
+    original(heartbeat, {"token": "previous"})
+    held = win32file.CreateFile(str(heartbeat), win32con.GENERIC_READ,
+                               win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE,
+                               None, win32con.OPEN_EXISTING, win32con.FILE_ATTRIBUTE_NORMAL, None)
+    errors = []
+
+    def publish(path, value):
+        nonlocal held
+        try:
+            return original(path, value)
+        except PermissionError as error:
+            if Path(path) != heartbeat:
+                raise
+            errors.append(error.winerror)
+            held.Close()
+            held = None
+            raise
+
+    code = ("import json,pathlib,time\n"
+            f"path=pathlib.Path({str(heartbeat)!r})\n"
+            f"while json.loads(path.read_text())['token']!={spec['token']!r}:time.sleep(.01)\n"
+            "print('complete',flush=True)")
+    spec["argv"] = [sys.executable, "-c", code]
+    monkeypatch.setattr(payload, "atomic_json", publish)
+    try:
+        outcome = run_process(spec)
+    finally:
+        if held is not None:
+            held.Close()
+    assert outcome["status"] == "completed", outcome
+    assert len(errors) == 1 and errors[0] in (5, 32, 33)
+    assert outcome["heartbeat"]["write_failures"] == 1
+    assert outcome["heartbeat"]["last_success_elapsed"] > outcome["heartbeat"]["last_failure_elapsed"]
+    assert read_json(heartbeat)["token"] == spec["token"]
+    assert not list(heartbeat.parent.glob("heartbeat.json.*"))
+    assert "Heartbeat publication unavailable" in capsys.readouterr().err
+    assert tree_state(spec["root"], spec["token"]) == "dead"
+
+
+@pytest.mark.parametrize("target,kind", [
+    ("process-handle.json", "sharing"),
+    ("heartbeat.json", "permission"),
+    ("heartbeat.json", "disk"),
+])
+def test_heartbeat_recovery_does_not_hide_other_publication_failures(spec, monkeypatch, target, kind):
+    original = payload.atomic_json
+    spec["argv"] = [sys.executable, "-c", "import time;time.sleep(60)"]
+
+    def denied(path, value):
+        if Path(path).name == target:
+            if kind == "disk":
+                raise OSError(errno.ENOSPC, "publication denied")
+            error = PermissionError("publication denied")
+            if kind == "sharing":
+                error.winerror = 5
+            raise error
+        return original(path, value)
+
+    monkeypatch.setattr(payload, "atomic_json", denied)
+    outcome = run_process(spec)
+    assert outcome["status"] == "failed"
+    assert "publication denied" in outcome["reason"]
+    assert tree_state(spec["root"], spec["token"]) == "dead"

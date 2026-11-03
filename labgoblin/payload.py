@@ -253,6 +253,9 @@ def run_process(spec):
     previous_affinity = None
     cooperative = bool(spec.get("provider"))
     cancel_started = None
+    heartbeat = {"write_failures": 0, "last_success_elapsed": None,
+                 "last_failure_elapsed": None, "last_error": None}
+    next_heartbeat = started
     try:
         if cancel.exists():
             status, reason = "cancelled", "Cancellation requested before payload start"
@@ -279,9 +282,10 @@ def run_process(spec):
                 process = WindowsPayload(command, spec["cwd"], env,
                                          streams[0].writer, streams[1].writer, spec)
             else:
+                grouping = ({"process_group": 0} if spec.get("parent_session") else {"start_new_session": True})
                 process = subprocess.Popen(command, cwd=spec["cwd"], env=env,
                                            stdin=subprocess.DEVNULL, stdout=streams[0].writer,
-                                           stderr=streams[1].writer, start_new_session=True)
+                                           stderr=streams[1].writer, **grouping)
             executed = True
             for stream in streams:
                 stream.close_writer()
@@ -296,10 +300,6 @@ def run_process(spec):
                           sum(int(fields[21]) * os.sysconf("SC_PAGE_SIZE")
                               for _, fields in _members(process.pid)) / 1048576)
                 peak_memory = max(peak_memory, memory)
-                atomic_json(root / "heartbeat.json", {
-                    "token": token, "time": time.time(), "elapsed": time.monotonic() - started,
-                    "observed_memory_mb": memory,
-                })
                 if cancel.exists():
                     if cancel_started is None:
                         cancel_started = time.monotonic()
@@ -315,6 +315,26 @@ def run_process(spec):
                     break
                 if any(stream.error for stream in streams):
                     raise OSError("Owned output retention failed")
+                now = time.monotonic()
+                if now >= next_heartbeat:
+                    next_heartbeat = now + 1
+                    try:
+                        atomic_json(root / "heartbeat.json", {
+                            "token": token, "time": time.time(), "elapsed": now - started,
+                            "observed_memory_mb": memory,
+                        })
+                    except PermissionError as error:
+                        if getattr(error, "winerror", None) not in (5, 32, 33):
+                            raise
+                        # The heartbeat is diagnostic, not proof of process ownership.
+                        heartbeat["write_failures"] += 1
+                        heartbeat["last_failure_elapsed"] = time.monotonic() - started
+                        heartbeat["last_error"] = f"{type(error).__name__}: {str(error)[:4000]}"
+                        if heartbeat["write_failures"] == 1:
+                            print("Heartbeat publication unavailable; process supervision continues: "
+                                  + heartbeat["last_error"], file=sys.stderr, flush=True)
+                    else:
+                        heartbeat["last_success_elapsed"] = time.monotonic() - started
                 time.sleep(0.05)
             code = process.poll()
             if code is not None and status == "not_started":
@@ -348,7 +368,7 @@ def run_process(spec):
                     raise UncertainExecution(str(error)) from error
     return {"status": status, "reason": reason, "returncode": code, "executed": executed,
             "elapsed": time.monotonic() - started, "logs": stream_stats,
-            "peak_observed_memory_mb": peak_memory}
+            "peak_observed_memory_mb": peak_memory, "heartbeat": heartbeat}
 
 
 def tree_state(root, token):

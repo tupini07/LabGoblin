@@ -10,8 +10,10 @@ generic exchange shape remain 3. These are separately checked, not migrated.
 |---|---|
 | `config.py`, `protocol.py` | Strict configuration and small execution records, not scientific schemas. |
 | `runtime.py` | Explicit initialization, one controller, frozen launch, recovery and retained evidence. |
+| `research_environment.py` | Explicit project-local scientific environment and recorded research authorization, not a package manager or agent. |
 | `provider.py`, `guidance.py` | One ordinary SDK researcher, bounded read-only stopping review and short instructions. |
 | `consultation.py` | Shared bounded evidence readers and retained public-literature retrieval for optional advisers. |
+| `evaluation.py` | Optional frozen paired evaluator, one-use confirmation exposure and read-only check evidence. |
 | `inspector.py`, `inspection_evidence.py`, `inspection_server.py`, `inspection_ideas.py` | Independently owned campaign chat, qualified evidence, external idea drafts and authenticated human publication. |
 | `ideas.py` | Immutable operator file revisions, exact delivery/reply records and the final-closure cutoff; not scientific state. |
 | `scheduler.py`, `db.py` | Shared machine admission, one-time claims and qualified terminal receipts. |
@@ -53,6 +55,19 @@ Other installed runtimes retain authority over their own pending eligibility and
 grants. Old installed readers can observe these pending records without decoding
 a new scientific schema. No existing campaign, envelope or receipt is rewritten.
 
+New initialization records versioned local-research authorization and a separate
+project `.venv`, prepared without pip/downloads or reused without modification.
+Its exact permission text is preserved rather than regenerated on upgrades.
+Absence of the optional project-record field retains legacy explicit-goal-only
+permissions; reads and resumes never create environments or upgrade authority.
+Existing goal/instruction restrictions prevail over the broad research defaults.
+Admission verifies an isolated venv distinct from the harness and freezes its
+paths, Python/configuration identities and authorization in the prompt.
+The researcher may change scientific packages, not the interpreter, venv target,
+harness runtime or shared environments. Project-local cache defaults and an
+absolute scientific interpreter are supplied to its owned tree. Native trust
+still applies; these checks and guidance are not a package-installation sandbox.
+
 ## Windows and Linux
 
 Windows independent launches use `background_options(independent=True)`:
@@ -70,6 +85,60 @@ the supported research contract.
 All operations have a hard deadline. SDK shutdown grace fits inside it. Rotating
 stdout/stderr spools continue draining after retention fills; log pressure cannot
 disable cancellation or the deadline. Truncation and stream errors are explicit.
+
+The process heartbeat is diagnostic, not an ownership lease. Publication is
+attempted at most once per second, independently of the faster safety checks.
+Windows access/sharing errors (5, 32, 33) defer that update without terminating
+research; supervision, cancellation, deadlines and resource enforcement continue.
+The first failure emits a warning, and bounded failure counts, the last error and
+last successful/failed publication times remain in the process outcome. Other
+publication errors and failures to publish ownership records still fail closed.
+
+## Optional paired evaluation
+
+Only an operator-configured external evaluation kit enables `labgoblin_evaluate`
+on the researcher. Coach, critic, adviser, adjudicator and inspector have only
+qualified readers. No additional agent, machine grant, model allowance or
+scientific publication state is introduced. Native trust still applies: neither
+the kit nor unused cases are protected against a hostile same-user process.
+
+Admission binds the evaluator, baseline, case data and interpreter identity to
+the frozen prompt. Development/regression captures a self-contained candidate;
+confirmation selects exact captured development bytes under the same definition.
+Per-case canonical data fingerprints are recorded in a project-wide exposure
+file before execution, under an exclusive evaluation lock. Failure, cancellation,
+renaming cases, kit changes and explicit resumes never restore freshness.
+Regression may replay a settled failed check, but is never fresh confirmation.
+
+Both sides use the same frozen evaluator, cases, metrics and granted resources.
+With recorded research-environment authorization, both sides run using that
+scientific Python, including its `sys.executable` children. The host SDK,
+controller and evaluation control logic remain in the protected harness runtime.
+Legacy executions retain their original interpreter selection. Interpreter and
+venv-configuration drift is rejected before case exposure; scientific dependency
+versions can change and must be retained with the research, not called frozen.
+Windows evaluator processes inherit the outer Job and receive their own nested
+Job before resume. Linux children get separate groups inside the research
+session, so both inner and outer cleanup retain ownership. Each pair's finite
+deadline fits inside the researcher's current deadline, including closure-response
+reserves. Spools remain bounded/draining. Uncertain cleanup cancels the callback
+instead of returning an error that could authorize further inference.
+
+Requests, captures and results remain immutable. Terminal and recovered receipts
+bind evaluation control-file hashes; requests transitively bind capture manifests.
+Subprocess logs are retained with explicit bounds, not separately sealed by this
+manifest. Readers check exact run/receipt/request provenance and page replies
+below the CLI spill threshold. Output must cover every case exactly once, with
+explicit pass/fail and finite declared metrics. Failed or incomplete execution
+has no successful comparison. Means/deltas are descriptive, not statistical
+significance, automatic promotion or a scientific stopping decision.
+
+One-MiB control records, at most 256 cases per batch, 32 confirmation batches,
+256 checks per execution, 8192 retained exposure fingerprints (also subject to
+the control-record bound), 2048 capture entries and 16-KiB evidence pages bound
+this optional protocol. Exhaustion is explicit; never delete history to retry.
+Installed dependencies and the OS are not frozen. The operator owns evaluator
+validity, reference quality, end-use relevance and any required stronger isolation.
 
 ## SDK lifecycle and spending
 
@@ -272,6 +341,9 @@ rechecks that no supervisor claim won the race. It atomically fences the executi
 as not started. After a claim, owner death alone is insufficient: the named
 Windows job or Linux process session must also be proven quiescent. Unknown
 ownership is not permission to release, retry or infer zero spending.
+An exact matching zombie/dead host process has exited even if its PID has not
+been reaped. This does not bypass the independent payload-tree quiescence check;
+unreadable process status remains unknown.
 
 A matching existing receipt can finish an interrupted ledger write. A ledger
 receipt can restore a missing identical receipt file. Conflicting bytes fail;
@@ -286,18 +358,43 @@ Control JSON is bounded and finite. New provider sessions advertise
 sequence/prompt/type/time/tool-call byte index, and a periodically checkpointed
 manifest. Final owned usage binds the closed manifest; sealed indexes and
 retrieved events are digest-checked. Each event is at most 1 MiB; raw data plus
-indexes are at most 1 GiB per role. Oversized records have omission entries;
+indexes default to 8 GiB per session, configured by positive `max_event_log_bytes`
+up to 64 GiB. Writer/reader inventories allow 16,384 segments and a 16-MiB manifest;
+individual reads and pages remain bounded. Oversized records have omission entries;
 total exhaustion records the unindexed sequence tail. Navigation metadata may
 be shortened, never the retained original event. Live manifests can lag their
 active index, and incomplete tails/unverified coverage stay explicit. Retention
 errors cannot prevent idle/quota event handling. Exact submitted host prompts
 are also retained as `prompt-N.txt`, without extra model calls.
+The writer checks 512-MiB disk headroom before consuming another 8 MiB of cached
+allowance, or after five seconds between checks. This is best-effort, not reserved
+space. Headroom exhaustion records an omitted tail and does not stop settlement
+or cancellation. Existing events are not deleted to make room.
+Before shutdown, `stop.json` records the primary status/reason. Each session
+records phase-specific failures and bounded tracebacks in `shutdown.json`, outside
+its bulk-log budget. Settlement/cleanup failures append to, rather than replace,
+the original reason. Failure to publish a diagnostic still permits owned cleanup
+and remains an explicit finalization error; genuinely missing usage stays unknown.
 Legacy sessions keep their original byte-paged reader. Indexed excerpts return
 at most 30 events; full selected events use UTF-8-aligned 16-KiB byte pages.
-Final workspace capture streams regular files and
+`archive_workspace` defaults to false. When explicitly enabled, final workspace capture streams regular files and
 hashes the retained bytes, rejecting concurrent changes, byte/count exhaustion
 and insufficient free space. Excluded inputs/environments/caches/state/links and
 special files are listed, not passed off as retained sources.
+An archive failure is recorded separately from research status and usage; it cannot
+overwrite the primary stop or skip receipt settlement. Exact evaluation captures
+remain required independently. Resume uses working files, not archive restoration.
+Historical file reads require a qualified archive and never substitute mutable
+files or Git objects. Old admitted records missing retention options retain their
+historical archival/1-GiB logging semantics; current candidate defaults affect only
+new admissions. No frozen record is rewritten.
+
+Model-free init prepares Git or reuses the containing repository, without staging,
+commits, identity changes or automatic hooks from templates. Existing branch/index/
+configuration and ignore bytes are preserved; state/environment/input/credential
+ignores are appended. `--no-git` opts out. Researcher-selected checkpoints and
+artifact organization remain ordinary working practices, not a host-enforced
+scientific cadence or replacement for immutable selected evidence.
 
 `status` and machine inspection do not initialize, reconcile or mutate research.
 The active/last-loaded configuration remains distinct from candidate TOML,
@@ -348,7 +445,7 @@ requests only its own question's cancellation and retains unresolved reservation
 ### Independent terminal handoffs
 
 `run --handoff` freezes the explicit inspection profile digest/directory in the
-new research prompt. After snapshot capture and ledger settlement, the worker
+new research prompt. After optional archival and ledger settlement, the worker
 requests one separately owned inspection of that exact terminal receipt.
 The researcher is already retired; reporting neither appends researcher prompts
 nor changes the research receipt. Inspection admission uses its existing finite

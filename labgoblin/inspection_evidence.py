@@ -197,7 +197,12 @@ class Evidence:
         receipt = json.loads(row["receipt"])
         expected = receipt.get("metadata", {}).get("snapshot")
         if expected is None:
-            raise ValueError("This execution did not retain a workspace snapshot")
+            archive = receipt.get("metadata", {}).get("archive", {})
+            detail = archive.get("message") or archive.get("reason") or "No qualified archive was retained"
+            alternative = ("Only retained session and evaluation evidence is available to this handoff."
+                           if self.terminal is not None else
+                           "Select scope='workspace' explicitly for current, mutable files, not historical evidence.")
+            raise ValueError(f"This execution did not retain a workspace snapshot: {detail}. {alternative}")
         manifest = record(directory / "snapshot.json", 8 * 1024 * 1024)
         if digest(manifest) != expected["manifest_sha256"]:
             raise ValueError("Snapshot manifest identity differs from its owned receipt")
@@ -337,11 +342,22 @@ class Evidence:
                 "reason": receipt["reason"] if receipt else "",
                 "elapsed": receipt["elapsed"] if receipt else None,
                 "checkpoint_reason": provider.get("checkpoint_reason"),
+                "archive": receipt.get("metadata", {}).get("archive") if receipt else None,
+                "primary_outcome": receipt.get("metadata", {}).get("primary_outcome") if receipt else None,
                 "reviews": reviews[offset:offset + 10], "review_count": len(reviews),
                 "next_offset": offset + 10 if offset + 10 < len(reviews) else None,
                 "sessions": (receipt.get("usage") or {}).get("sessions", []) if receipt else [],
                 "live": row["phase"] != "quiescent", "observed_at": time.time(),
                 "coverage": "Frozen goal and owned execution/review records; coach judgments are not scientific certification"}
+
+    def evaluations(self, args):
+        from labgoblin.evaluation import page
+        table(args, "evaluation evidence request", {"run", "check", "offset"})
+        row, envelope, _ = self.run(args.get("run"))
+        receipt = json.loads(row["receipt"]) if row["receipt"] else None
+        expected = receipt.get("metadata", {}).get("evaluations", {}) if receipt else None
+        return {**page(envelope, check=args.get("check"), offset=args.get("offset", 0), expected=expected),
+                "live": row["phase"] != "quiescent", "observed_at": time.time()}
 
     def session(self, args):
         table(args, "session request", {"run", "role", "offset", "prompt", "kind", "tool_call_id", "event"})
@@ -460,7 +476,7 @@ class EvidenceTools:
                   "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
                   "limit": {"type": "integer", "minimum": 1, "maximum": PAGE_BYTES},
                   "image": {"type": "boolean"}, "query": {"type": "string"},
-                  "run": {"type": "string"}, "role": {"type": "string"},
+                  "run": {"type": "string"}, "role": {"type": "string"}, "check": {"type": "string"},
                   "prompt": {"type": "integer", "minimum": 1},
                   "event": {"type": "integer", "minimum": 0, "description": "Page one full indexed event; offset then means a byte position within that event"},
                   "kind": {"type": "string", "description": "Exact SDK event type, for example tool.execution_complete"},
@@ -475,6 +491,8 @@ class EvidenceTools:
             "session": (["run", "role", "offset", "prompt", "kind", "tool_call_id", "event"], ["run"],
                         "Read indexed original session events, optionally filtered by prompt/type/tool call; page a full event by sequence. Legacy logs use byte offsets. Never attach to a session."),
             "execution": (["run", "offset"], ["run"], "Read the frozen original goal, stopping reviews, exact session roles and final usage."),
+            "evaluations": (["run", "check", "offset"], ["run"],
+                            "Read paired baseline/candidate checks and discrepancies, including failures and exposed-case provenance. No execution or scientific certification."),
         }
         if self.evidence.terminal is not None:
             definitions.pop("ideas")

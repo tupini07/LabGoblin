@@ -8,6 +8,53 @@ CLI, and a separate research workspace. Install LabGoblin from the checkout with
 harness never downloads the CLI, installs experiment dependencies or chooses a
 different backend. Windows also uses pywin32 for owned Job Objects.
 
+New initialization prepares an empty project `.venv` with the existing Python,
+without pip, downloads or experiment packages. An existing isolated `.venv` is
+checked and reused without modification; directory aliases, shared site-packages
+and reuse of the harness's own environment are rejected. Its absolute Python path
+and exact local-research authorization are recorded in `.labgoblin/project.json`.
+Initialization calls no model and starts no research.
+
+Write the operator's high-level question, intended use, relevant known context
+and genuine boundaries in `research_goal.md`. With neither `--goal-file` nor an
+existing goal, init supplies optional prompts for these topics, not a required
+questionnaire. Replace the prompts or write a free-form brief. The untouched
+scaffold is refused, including whitespace-only or line-ending changes.
+Supplied briefs are copied unchanged, not expanded or semantically reviewed.
+Separate known facts from assumptions and unverified prior findings.
+
+The researcher owns and revises the scientific formulation, methods, evaluations
+and sequencing in ordinary `research-notes.md`. That working plan is not operator
+authority and cannot redefine the goal. Do not invent prototype/pilot
+phases, method checklists or narrower completion targets while preparing a
+campaign. A working component or honest partial report is an intermediate result
+unless the operator explicitly requested that scope. This does not require
+spending the allowance, running until the deadline or pursuing exhausted ideas.
+
+The recorded environment authorization grants broad ordinary local scientific
+work: researcher-managed dependencies, public license-compatible code/data/model downloads, local inference,
+training and fine-tuning, among other appropriate techniques. This is not an
+exhaustive whitelist; unlisted local methods do not need individual approval.
+Explicit goal/instruction restrictions always take precedence. It does not grant
+hosted model calls, paid/remote compute, additional agents, unadmitted GPUs,
+private-data uploads, secrets access or changes to shared/system/harness software.
+
+Use the recorded absolute scientific Python for commands and scoring, not bare
+`python` or the harness interpreter. Already-installed uv can target it with
+`uv pip --python ABSOLUTE_PYTHON`; alternatively use that Python's `-m ensurepip`
+and `-m pip`. No automatic uv installation is required. The owned researcher
+receives `LABGOBLIN_RESEARCH_PYTHON`, `VIRTUAL_ENV` and project-local package/model
+cache defaults. Preserve dependency versions/locks, model source/license/revision
+and useful checkpoints in ordinary research artifacts. The `.venv` and its caches
+are excluded from output snapshots.
+
+Use `init --no-research-venv` to retain manual preparation instead. Explicitly
+name any separate scientific environment and installation/download permissions in
+the goal. Existing projects without the recorded authorization keep this older
+policy; an upgrade or resume never creates an environment or adds permission.
+The recorded authority and interpreter are frozen for each newly admitted
+execution; historical prompts, receipts and running installations are unchanged.
+
 ```powershell
 labgoblin init .\research --goal-file .\question.md --model auto --credits 1000
 labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
@@ -15,9 +62,26 @@ labgoblin run .\research
 ```
 
 Initialization makes `labgoblin.toml`, a goal if absent, short instructions if
-absent, and `.labgoblin` state. It preserves existing goal/instruction content and
-refuses existing configuration/state. An incomplete initialization is not a valid
+absent, a separate `.venv` by default, and `.labgoblin` state. It preserves existing
+goal/instruction content and refuses existing configuration/state. An incomplete initialization is not a valid
+project. A failed environment preparation leaves its partial files for explicit
+operator inspection, never overwrites an existing environment or publishes a ready
 project. No model is called during initialization.
+
+By default init also initializes Git (without a commit) or reuses the existing
+containing repository. It preserves its branch, index, configuration and existing
+ignore text, appending ignores for runtime state, `.venv`, inputs, caches and
+common credentials. It does not exclude an entire artifact folder or configure
+global Git identity. Git must already be installed; `--no-git` skips this step.
+Failed preparation never publishes a ready project; partially created Git files
+remain for explicit inspection, not destructive rollback.
+
+The researcher chooses folder organization and meaningful local commits, especially
+before risky edits. Prefer reverting a commit or restoring selected files while
+preserving unrelated work, historical results and evaluation exposure. Notes can
+reference useful versions; no fixed cadence or automatic commits/pushes are imposed.
+Ignored/untracked data needs its own retention, and a local repository is not an
+independent backup. Missing commit identity can be configured repository-locally.
 
 Machine configuration is a separate explicit action. It cannot replace or
 reconfigure capacity while a grant is held or uncertain. Use the same machine
@@ -43,6 +107,8 @@ consultant = false
 closure_critic = false
 ledger = ""
 max_snapshot_bytes = 68719476736
+archive_workspace = false
+max_event_log_bytes = 8589934592
 ```
 
 Coaching is opt-in (`init --coach` or `coach = true`). `model` and
@@ -51,6 +117,16 @@ matched evaluations. The SDK transport and ordinary researcher tools remain the
 same with coaching on or off. Skills, extensions, MCP servers, automatic custom
 instruction discovery, memory, scheduled prompts and unrestricted nested agents are disabled;
 the reviewed project instructions are supplied explicitly.
+
+Optional `evaluation_spec` is an absolute path to an operator-reviewed external
+JSON evaluation kit. `init --evaluation-spec PATH` resolves it without executing
+anything. Each new execution captures the kit; changing its source or TOML cannot
+change an admitted execution. Omit the setting to keep the ordinary research path.
+The [synthetic example](../examples/evaluation/README.md) documents inputs, output
+validation, exact-candidate confirmation and retained regression replay.
+The view-only inspector's **Paired evaluation checks** button and
+`evaluations PROJECT --run RUN_ID [--check CHECK_ID] [--offset N]` read the same
+qualified evidence. Neither command executes the evaluator or buys model calls.
 
 Four optional model overrides apply to fresh review sessions:
 
@@ -115,6 +191,13 @@ already-frozen configurations and receipts are not rewritten.
 the persistent researcher, optional reviews, consultations, continuation and shutdown. It must
 be at least 60 seconds. The final 30 seconds are reserved for bounded settlement.
 Normal progress and output flooding never renew the deadline.
+TOML also accepts a quoted arithmetic expression, for example
+`timeout_seconds = "48 * 60 * 60"`. Numbers, parentheses and `+`, `-`, `*`, `/`
+are supported, including unary signs; names, calls and other operators are not.
+Expressions are limited to 256 characters and 64 syntax nodes and must remain
+finite. Configuration loading resolves the expression to numeric seconds for
+the frozen execution without rewriting TOML. Other numeric fields and CLI
+`--timeout` remain numeric-only.
 
 `max_stalled_reviews` defaults to 10 and must be a positive integer. It counts
 consecutive follow-up stopping reviews without meaningful progress, not all
@@ -138,7 +221,9 @@ consumers, not every process or user on the machine.
 identity. Subsequent runs refuse a different ledger; accounting cannot be reset
 by changing this setting.
 
-`max_snapshot_bytes` defaults to 64 GiB. The snapshot also has a 100,000-entry
+Full-workspace archival is opt-in: `init --archive-workspace` or
+`archive_workspace = true`. `max_snapshot_bytes` defaults to 64 GiB and also
+bounds exact evaluation captures when full archival is off. The archive has a 100,000-entry
 bound and requires 512 MiB of free-space headroom per copied file. These are soft
 storage safeguards, not a filesystem quota.
 
@@ -150,9 +235,12 @@ separately displays candidate configuration or a candidate parse error.
 
 The goal and short charter are supplied once to an ordinary, persistent SDK
 conversation. Use normal code, foreground experiments and artifacts; no research
-publication CLI exists. The researcher is asked to maintain `research-notes.md`
-and `report.md`, retain failures and negative evidence, and put important results
-in `artifacts`.
+publication CLI exists. The researcher chooses an investigation, carries it out,
+examines the evidence and uses it to choose the next useful investigation. It
+continues without asking whether to keep going while consequential feasible work
+remains. It maintains `research-notes.md` and `report.md` at meaningful checkpoints,
+retains failures and negative evidence, and puts important results in `artifacts`.
+Reports, working tools and answered reviewer objections are not automatic endpoints.
 
 The notes also retain promising untried ideas and reasons remaining leads cannot
 usefully proceed. Stopping requires the original goal's evidence requirements
@@ -193,14 +281,19 @@ They are intentionally not copied into every result snapshot. Pin important inpu
 identities and reproducible commands in the scientific report. The harness does
 not certify dataset provenance or reconstruct overwritten intermediate results.
 
-The final workspace snapshot excludes `.git`, `.labgoblin`, its lock,
+When requested, the final workspace snapshot excludes `.git`, `.labgoblin`, its lock,
 environments, Python/pytest caches, `node_modules`, `inputs`, common credential
 paths (such as `.ssh`, `.aws`, `.copilot` and `.env*`), links and special files.
 Name exclusions are case-insensitive; they are not a general secret scanner.
 The manifest explicitly lists exclusions and hashes every retained regular
 file. A growing/changed file, exhausted limit or copy failure is an explicit
-retention error, not a truncated success. Immutable execution snapshots coexist
-with ordinary editable working files.
+archive error, not a truncated success. Its separate receipt metadata and `status`
+entry report failure without replacing the research status/reason or final usage.
+Disabling archival skips the whole-workspace traversal/copy; it does not disable
+exact evaluation captures, logs, receipts or independent reporter source captures.
+Old immutable archives remain readable alongside editable working files.
+Without a qualified archive, historical file inspection reports the coverage gap;
+Git history is not automatically imported as captured research evidence.
 
 ## Run, stop and continue
 
@@ -232,7 +325,12 @@ Before a supervisor claim, an exactly dead launcher can be fenced as not started
 A racing claim prevents that recovery. Unknown liveness keeps the reservation.
 Neither `status` nor `machine status` performs recovery.
 
-Completion means the provider loop and evidence retention finished. A coach's
+Completion means the provider loop and required finalization finished, not that an
+optional full archive succeeded. Primary stopping reasons are preserved separately
+from settlement errors; shutdown records identify abort, idle wait, metrics,
+disconnect and runtime-stop failures, with bounded tracebacks. They survive a
+filled event-log allowance, but storage/OS failures can still prevent publication.
+Missing final billing remains unknown and blocks capped admission. A coach's
 acceptance is a stopping assessment, not scientific certification. `checkpointed`
 means unfinished work at an operational boundary, with `checkpoint_reason` exposed
 in status. `needs_operator` instead requires the exact human question, dependency
@@ -293,8 +391,9 @@ project credits and all actual spending persist across explicit resumes.
 
 Exact requests, inspected pages, web results, answers and usage are retained
 under the execution's `sessions/consult-N` directory. Successful readable briefs
-are also published under `artifacts/consultations` and captured in the final
-snapshot. Tool-call replay does not purchase the same consultation twice.
+are also published under `artifacts/consultations` and included when full-workspace
+archival is enabled. The original session records survive independently of that
+optional copy. Tool-call replay does not purchase the same consultation twice.
 Coach-requested consultation artifact paths accompany any researcher follow-up.
 The researcher alone chooses what to adopt and updates `research-notes.md`;
 advice is neither an independent validation nor a binding instruction.
@@ -425,7 +524,8 @@ It shows harness-computed execution state and spending, ordinary text files,
 bounded search, PNG/JPEG images, the original frozen goal, stopping reviews and
 qualified public session excerpts. Opening, refreshing, browsing and loading
 retained conversation never call a model. A completed execution defaults to its
-retained snapshot; select **Working files** explicitly to inspect later edits.
+retained snapshot if available; otherwise it reports unavailable historical
+coverage. Select **Working files** explicitly to inspect current mutable files.
 For an active execution, the latest source is the mutable workspace.
 
 To ask questions, supply an explicit model and a **separate finite cumulative**
@@ -446,8 +546,15 @@ the inspector never starts summaries or model polling.
 
 ### Indexed logs and dated terminal handoffs
 
-New sessions retain original SDK events in 8-MiB segments, up to 1 GiB per role
-including their navigation indexes. Events over 1 MiB are explicitly omitted;
+New research sessions retain original SDK events in 8-MiB segments, defaulting to
+8 GiB per session including navigation indexes. Set `max_event_log_bytes` in TOML
+or `init --max-event-log-bytes` to a positive byte budget up to 64 GiB.
+New inspection approvals use the same default; existing approved/frozen profiles
+retain their recorded policy. Disk headroom is best-effort, not a reservation:
+the writer checks for 512 MiB free beyond log bytes at most every 8 MiB or five
+seconds of writing. Low space or total-cap exhaustion stops bulk retention, not
+usage observation or cancellation. Original logs are never evicted.
+Events over 1 MiB are explicitly omitted;
 later ordinary events can still be retained. Total-cap exhaustion leaves an
 explicit missing tail, not an apparently complete history. Sequence, prompt,
 timestamp and tool-call metadata locate original bytes. The browser supports
@@ -470,8 +577,9 @@ labgoblin handoff .\research --run EXACT_TERMINAL_RUN_ID
 after the research worker has captured and settled its terminal receipt.
 The fresh reporter shares the separate cumulative inspection pool with chat;
 it has no new allowance, prior chat, researcher attachment or idea-drafting tool.
-Only that exact run's frozen goal, captured session/review evidence and immutable
-snapshot are accessible. Later mutable files cannot silently enter the report.
+Only that exact run's frozen goal, captured session/review/evaluation evidence and
+any qualified immutable archive are accessible. Missing archives are explicit
+limitations, not reporting failures by themselves. Later mutable files cannot enter the report.
 The existing inspection model, finite deadline and evidence bounds apply.
 
 The research command can return before reporting finishes. Refresh the inspector

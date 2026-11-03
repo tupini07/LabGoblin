@@ -13,6 +13,8 @@ assert len(wheels) == len(sources) == 1, (wheels, sources)
 expected = {f"labgoblin/{path.name}": path.read_bytes() for path in (root / "labgoblin").glob("*.py")}
 assets = {f"labgoblin/inspection_assets/{path.name}": path.read_bytes()
           for path in (root / "labgoblin" / "inspection_assets").iterdir() if path.is_file()}
+evaluation = {path.relative_to(root).as_posix(): path.read_bytes()
+              for path in (root / "examples" / "evaluation").rglob("*") if path.is_file()}
 assert len(assets) == 3
 with zipfile.ZipFile(wheels[0]) as archive:
     names = set(archive.namelist())
@@ -31,10 +33,13 @@ with zipfile.ZipFile(wheels[0]) as archive:
     assert not any(f"Requires-Dist: {name}" in metadata for name in ("docker", "rich", "markdown-it-py"))
     for name in ("experiment.py", "research_goal.md", "README.md"):
         assert any(item.endswith(f"/examples/local-synthetic/{name}") for item in names)
+    for relative, body in evaluation.items():
+        member = next(name for name in names if name.endswith("/" + relative))
+        assert archive.read(member) == body, relative
     assert any(name.endswith("/LICENSE") for name in names)
 with tarfile.open(sources[0]) as archive:
     names = archive.getnames()
-    for name, body in {**expected, **assets}.items():
+    for name, body in {**expected, **assets, **evaluation}.items():
         member = next(item for item in names if item.endswith("/" + name))
         assert archive.extractfile(member).read() == body, name
     assert any(name.endswith("/tests/fixed_copilot.py") for name in names)

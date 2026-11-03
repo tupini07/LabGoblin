@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,30 @@ def test_terminal_report_tools_cannot_escape_source_or_publish(observer, project
     names = {tool.name for tool in EvidenceTools(evidence, observer.root / "captures").tools()}
     assert "labgoblin_inspect_session" in names
     assert "labgoblin_inspect_ideas" not in names and "labgoblin_prepare_idea" not in names
+
+
+def test_native_handoff_without_archive_uses_retained_events_and_discloses_coverage(
+        observer, project, ledger, monkeypatch):
+    from tests.test_simple_runtime import fixture_provider
+    root, config, _ = project
+    (root / "labgoblin.toml").write_text(replace(config, archive_workspace=False).toml(), encoding="utf-8")
+    fixture_provider(root, monkeypatch)
+    result = runtime.run(root)
+    assert result["status"] == "completed", result
+    before, rows = identities(root), ledger.runs(observer.project_id)
+    observer.approve(100, model="model-free", timeout=60)
+    report = handoffs.create(observer, result["id"], command=command(
+        observer, inspect_without_archive=True, inspect_session={"run": result["id"]},
+        required_event_text="assistant.message",
+        answer="No workspace archive was retained [E2]. The session reports fixture completion [E3]; "
+               "current notes and artifacts were not inspected."))
+    assert report["status"] == "completed", report
+    assert report["facts"]["archive"]["status"] == "disabled"
+    assert "No workspace archive" in Path(report["report"]).read_text(encoding="utf-8")
+    events = observer.source(report["inspection_id"], "E3")["result"]
+    assert events["receipt_verified"] and events["manifest_closed"]
+    assert identities(root) == before and ledger.runs(observer.project_id) == rows
+    assert not ledger.rows()
 
 
 @pytest.mark.parametrize("failure", ["approval", "missing_usage", "citation"])

@@ -2,7 +2,10 @@
 
 import hashlib
 import json
+import shutil
 import stat
+import sys
+import time
 from pathlib import Path
 
 from labgoblin.protocol import integer, text
@@ -11,6 +14,11 @@ from labgoblin.storage import atomic_json, canonical, digest
 
 VERSION = 1
 SEGMENT_BYTES = 8 * 1024 * 1024
+DEFAULT_LOG_BYTES = 8 * 1024 * 1024 * 1024
+MAX_LOG_BYTES = 64 * 1024 * 1024 * 1024
+MAX_SEGMENTS = 16384
+MANIFEST_BYTES = 16 * 1024 * 1024
+DISK_HEADROOM = 512 * 1024 * 1024
 INDEX_LINE_BYTES = 4096
 PAGE_SCAN_BYTES = 2 * 1024 * 1024
 PUBLIC_EVENTS = {
@@ -28,12 +36,17 @@ class EventLog:
         self.omitted = {}
         self.unindexed_from = None
         self.exhausted = self.closed = False
+        self.exhaustion_reason = None
+        self.disk_allowance = 0
+        self.disk_checked = 0.0
         self.segments = []
         self._open_segment()
         self.checkpoint()
 
     def _open_segment(self):
         number = len(self.segments)
+        if number >= MAX_SEGMENTS:
+            raise ValueError("Session event segment inventory exceeds its supported bound")
         value = {"events": "events.jsonl" if number == 0 else f"events-{number:06}.jsonl",
                  "index": f"events-index-{number:06}.jsonl", "bytes": 0, "index_bytes": 0,
                  "first_sequence": self.seen, "end_sequence": self.seen,
@@ -54,6 +67,9 @@ class EventLog:
             raise ValueError("Cannot append to a closed session event log")
         sequence = self.seen
         self.seen += 1
+        if self.exhausted:
+            self.omitted[self.exhaustion_reason] += 1
+            return
         body = canonical(value) + b"\n"
         data = value.get("data") or {}
         metadata = {"type": str(value.get("type", "")), "timestamp": str(value.get("timestamp", "")),
@@ -62,7 +78,7 @@ class EventLog:
         entry = {"sequence": sequence, "prompt": prompt,
                  **{key: item[:128] for key, item in metadata.items()},
                  "metadata_truncated": any(len(item) > 128 for item in metadata.values())}
-        reason = "storage_limit" if self.exhausted else "event_size" if len(body) - 1 > self.event_limit else None
+        reason = "event_size" if len(body) - 1 > self.event_limit else None
         if reason:
             entry["omitted"] = reason
         else:
@@ -71,12 +87,18 @@ class EventLog:
         entry["offset"] = segment["bytes"]
         encoded = canonical(entry) + b"\n"
         required = len(encoded) + (0 if reason else len(body))
-        if self.total_bytes + required > self.total_limit or self.exhausted:
-            self.exhausted = True
-            if self.unindexed_from is None:
-                self.unindexed_from = sequence
-            self.omitted["storage_limit"] = self.omitted.get("storage_limit", 0) + 1
+        if self.total_bytes + required > self.total_limit:
+            self._exhaust(sequence, "storage_limit")
             return
+        now = time.monotonic()
+        if required > self.disk_allowance or now - self.disk_checked >= 5:
+            self.disk_allowance = min(SEGMENT_BYTES, max(
+                0, shutil.disk_usage(self.directory).free - DISK_HEADROOM))
+            self.disk_checked = now
+        if required > self.disk_allowance:
+            self._exhaust(sequence, "disk_headroom")
+            return
+        self.disk_allowance -= required
         if segment["index_bytes"] and (segment["index_bytes"] + len(encoded) > self.segment_limit
                                        or not reason and segment["bytes"] + len(body) > self.segment_limit):
             self._close_segment()
@@ -104,6 +126,14 @@ class EventLog:
         segment["last_prompt"] = prompt
         self.total_bytes += len(encoded)
 
+    def _exhaust(self, sequence, reason):
+        self.exhausted, self.exhaustion_reason = True, reason
+        self.unindexed_from = sequence
+        self.omitted[reason] = self.omitted.get(reason, 0) + 1
+        print(f"Session event retention stopped at sequence {sequence}: {reason}; "
+              "later events will be counted but not retained. Finalization records are separate.",
+              file=sys.stderr, flush=True)
+
     def checkpoint(self):
         value = self._manifest()
         if not self.closed:
@@ -129,13 +159,13 @@ def page(directory, args, *, terminal_log=None):
     from labgoblin.inspection_evidence import bounded_bytes, record
 
     directory = Path(directory)
-    manifest = record(directory / "events-manifest.json")
+    manifest = record(directory / "events-manifest.json", MANIFEST_BYTES)
     if manifest.get("version") != VERSION:
         raise ValueError("Unsupported session event-log version")
     if terminal_log is not None and digest(manifest) != terminal_log.get("manifest_sha256"):
         raise ValueError("Session event manifest differs from its final owned usage")
     segments = manifest["segments"]
-    if len(segments) > 1024:
+    if len(segments) > MAX_SEGMENTS:
         raise ValueError("Session event segment inventory exceeds its read bound")
     offset = integer(args.get("offset", 0), "event sequence offset", zero=True)
     selected = args.get("event")

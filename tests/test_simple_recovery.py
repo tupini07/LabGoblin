@@ -51,6 +51,30 @@ def test_dead_launcher_is_fenced_before_late_claim(project, ledger):
     assert budget["used_nano"] == 0 and budget["remaining"] == 300
 
 
+def test_changed_research_environment_fails_before_claim_and_recovers_as_not_started(
+        tmp_path, project, ledger, monkeypatch):
+    root = tmp_path / "authorized"
+    record = runtime.initialize(root, project[1], goal="Use only local synthetic data.")
+    process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"])
+    try:
+        handle = {"pid": process.pid, "created": psutil.Process(process.pid).create_time(), "token": record["id"]}
+        envelope = arm((root, project[1], record), ledger, launcher=handle)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    config = root / ".venv" / "pyvenv.cfg"
+    config.write_text(config.read_text() + "\n# changed after admission\n", encoding="utf-8")
+    monkeypatch.setattr(runtime, "bound_diagnostics", lambda: None)
+    with pytest.raises(ValueError, match="changed after admission"):
+        runtime.worker_main(Path(envelope.root) / "envelope.json")
+    row = ledger.consumer_run(envelope.id)
+    assert row["phase"] == "armed" and row["supervisor"] is None
+    receipt = runtime.settle_dead(ledger, row)
+    assert receipt.status == "not_started" and not receipt.executed
+    assert not ledger.rows()
+    assert credits.summarize(ledger.runs(record["id"]), 300)["remaining"] == 300
+
+
 def test_preclaim_recovery_rechecks_a_competing_claim(project, ledger, monkeypatch):
     root, config, record = project
     process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"])

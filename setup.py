@@ -15,7 +15,12 @@ setup(
     data_files=[('share/labgoblin/examples/local-synthetic', [
         'examples/local-synthetic/README.md', 'examples/local-synthetic/research_goal.md',
         'examples/local-synthetic/experiment.py',
-    ])],
+    ]), ('share/labgoblin/examples/evaluation', [
+        'examples/evaluation/README.md', 'examples/evaluation/spec.json',
+        'examples/evaluation/development.json', 'examples/evaluation/confirmation.json',
+    ]), ('share/labgoblin/examples/evaluation/evaluator', ['examples/evaluation/evaluator/check.py']),
+        ('share/labgoblin/examples/evaluation/baseline', ['examples/evaluation/baseline/model.json']),
+        ('share/labgoblin/examples/evaluation/candidate', ['examples/evaluation/candidate/model.json'])],
     entry_points={
         'console_scripts': [
             'labgoblin=labgoblin.cli:main',

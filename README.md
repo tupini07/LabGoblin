@@ -4,10 +4,21 @@
 stopping review.**
 
 LabGoblin gives one persistent Copilot SDK session a research question, short
-instructions and a normal workspace. The researcher writes code, runs experiments,
-keeps notes and produces a report. There are no hypothesis-registration forms,
-research handoffs, publication transactions, separate reflection agents or
+instructions and a normal workspace. The researcher chooses a useful investigation,
+carries it out, examines the evidence and uses it to choose the next investigation.
+Notes and reports document meaningful checkpoints, not automatic endpoints.
+There are no hypothesis-registration forms, research handoffs, publication
+transactions, separate reflection agents or
 mandatory final-analysis calls.
+
+Give it the high-level goal, relevant context and actual constraints; let it choose
+the scientific formulation, methods and sequence of work. Do not turn a broad
+research question into an imposed prototype or pilot deliverable. Intermediate
+tools and scoped findings support the investigation, not a smaller finish line.
+The default is to keep working while consequential feasible questions remain,
+without asking whether to continue or ending with a future-work list. This is
+continuation within the authorized execution, not indefinite spending or an
+automatic restart.
 
 An optional read-only coach reviews the proposed stopping point. Useful feedback
 returns to the **same researcher conversation**. By default, ten consecutive
@@ -21,8 +32,8 @@ or request useful further work; coach-off runs remain one ordinary conversation.
 Approaching the deadline or repeating an unproductive stopping discussion instead
 produces `checkpointed`, not scientific completion or a new human research question.
 The stopping standard is the original goal's evidence requirements or supported
-exhaustion of credible feasible avenues, not merely an honest bounded negative
-report. Unresolved controls and promising untried approaches deserve scrutiny;
+exhaustion of credible feasible avenues, not merely a working prototype or an
+honest partial report. Unresolved controls and promising untried approaches deserve scrutiny;
 exhausted ideas are not proof of impossibility.
 The harness owns resources, cumulative spending, cancellation and retained
 execution evidence; it does not decide what constitutes scientific truth.
@@ -49,6 +60,14 @@ conditions on exit. Withholding product release does not by itself justify endin
 scientific investigation. The critic
 can inspect bounded PNG/JPEG images but cannot run experiments or veto stopping.
 Failed criticism is not acceptance; hard limits and operator stops still prevail.
+
+An optional **paired evaluation kit** supplies executable checks outside the
+researcher's own experiment code. LabGoblin captures the operator-reviewed
+evaluator, baseline and cases, compares exact candidate bytes, spends confirmation
+cases once, and replays earlier failures as explicitly non-fresh regressions.
+Only the researcher can run checks; reviewers and the inspector read retained
+results. It adds no agents, progress-writing requirement or automatic promotion.
+See [the evaluation example and protocol](examples/evaluation/README.md).
 
 Review roles can use different Copilot models without switching the researcher:
 set optional `coach_model`, `closure_critic_model`, `advice_model` and
@@ -82,11 +101,32 @@ labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
 labgoblin run .\my-research
 ```
 
-`init` is deterministic and never calls a model. Without `--goal-file`, edit the
-generated `research_goal.md` before running. Existing goal and instruction files
-are preserved. Review `labgoblin.toml` and `.github\copilot-instructions.md`;
+`init` is deterministic and never calls a model. Without a supplied or existing
+goal, it writes an editable `research_goal.md` brief with optional prompts for the
+objective/intended use, context/inputs and genuine permissions/boundaries. Replace
+those prompts before running; a free-form question is also valid. The evolving
+research plan belongs to the researcher in `research-notes.md`, not to setup.
+`--goal-file` copies your brief unchanged; existing goal and instruction files
+are preserved, and conflicting goals are refused. Init does not generate or
+semantically review a scientific plan. Review `labgoblin.toml` and
+`.github\copilot-instructions.md`;
 starting `run` authorizes the configured research execution and its credit pool.
 The machine example is a capacity choice, not a recommendation for every host.
+
+New projects also prepare/reuse an isolated `.venv`, separate from LabGoblin's
+own installation. The researcher may manage its scientific dependencies, download
+public license-compatible models, and perform local inference, training and
+fine-tuning. These are examples of broad local research autonomy, not a technique
+whitelist. Initialization downloads nothing; explicit project restrictions,
+data privacy and admitted resources still govern. Use `init --no-research-venv`
+for a manually prepared environment with permissions specified in the goal.
+Upgrading LabGoblin does not grant these new permissions to existing projects.
+
+Init also creates Git history storage or reuses the containing repository, adding
+local ignore rules without staging, committing or changing Git identity. Use
+`init --no-git` to opt out. Researchers choose meaningful checkpoints, safe
+selected-file rollback and artifact organization; there is no commit schedule.
+Git does not protect ignored/untracked evidence or replace an independent backup.
 
 The researcher runs alone by default. Add `--coach` during initialization, or set
 `coach = true` before a new run, to enable stopping review. The default execution
@@ -97,7 +137,7 @@ the total number of reviews; set it in TOML or with `init --max-stalled-reviews`
 
 ## Ordinary research, small controls
 
-The researcher works with `research-notes.md`, `report.md`, code and `artifacts\`.
+The researcher works with `research-notes.md`, `report.md`, code and self-organized artifacts.
 Keep large read-only source datasets in `inputs\` or outside the workspace;
 the harness does not duplicate them into result snapshots.
 
@@ -108,6 +148,7 @@ the harness does not duplicate them into result snapshots.
 | `run PROJECT --resume` | Explicitly start another conversation from retained files, using the remaining cumulative allowance. |
 | `status PROJECT` | Read execution state, loaded configuration and accounting; never reconcile or start work. |
 | `inspect PROJECT --open` | Browse research evidence locally, without model calls or research changes. |
+| `evaluations PROJECT --run RUN_ID` | Read paired-check history; add `--check CHECK_ID` for case discrepancies. |
 | `stop PROJECT` | Request bounded cancellation of exactly this project's owned execution. |
 | `reconcile PROJECT` | Retire only proven-dead owned executions; never replay research. |
 | `record-usage PROJECT ...` | Append explicitly confirmed final usage or a separately labeled operator estimate. |
@@ -197,20 +238,30 @@ routine model prompts do not repeat countdowns or balances. Individual evidence 
 See the operating guide for exact bounds, failure behavior and retained artifacts.
 
 Each execution keeps frozen instructions/configuration/helpers, bounded provider
-events and logs, qualified spending records, a terminal receipt and an immutable
-workspace snapshot. Snapshots retain regular source/output files, including
+events and logs, qualified spending records and a terminal receipt. Full workspace
+archives are **off by default**; select `init --archive-workspace` or set
+`archive_workspace = true` before a new execution if needed. Snapshots retain regular source/output files, including
 multi-gigabyte artifacts, within explicit byte/file-count limits. Excluded inputs,
 environments, common credential paths (including `.env*`), state, caches, links
 and special files are listed. These exclusions are not a general secret scanner.
 Working files remain editable; this is not a database of every scientific interpretation.
+Resume uses those working files, not archive restoration. Archive failures are
+reported separately and never replace the research outcome or discard settled usage.
+Exact paired-evaluation captures remain independent of this option.
 
 Original SDK events are split into bounded segments with a host-built sequence,
 prompt and tool-call index. The inspector can filter excerpts and page full
 retained events without asking the researcher to narrate progress.
+Retention defaults to **8 GiB per session**, including indexes; configure
+`max_event_log_bytes` (positive bytes, up to 64 GiB). A best-effort 512-MiB
+disk-headroom guard and explicit missing-tail records preserve bounded storage.
+Primary stopping reasons and phase-specific shutdown errors are retained separately.
 
 After separately approving inspection credits, `labgoblin run PROJECT --handoff`
 opts that execution into an automatic dated end report. A fresh read-only session
-reads the exact terminal snapshot, logs and reviews, outside researcher context.
+reads retained logs, reviews, evaluation evidence and any qualified terminal
+archive, outside researcher context. Uncaptured historical files remain explicit
+coverage gaps; the reporter cannot substitute today's mutable files.
 Reports use the **separate inspection pool**, not research credits. Read the growing
 history with `labgoblin handoffs PROJECT` or the inspector; no model runs on reads.
 `labgoblin handoff PROJECT --run RUN_ID` explicitly requests a report for an older
@@ -238,8 +289,10 @@ the old dashboard/observer orchestration, structured publications, supervisor me
 research report/compaction/final-analysis jobs are retired from this runtime. Independent
 opt-in terminal handoffs belong to inspection instead. There is no
 second legacy orchestrator hidden behind a simple-mode flag. No automatic image
-pulls, environment installations, remote execution, uploads or unrestricted
-nested model sessions are part of the new loop. Only the explicitly enabled,
+pulls, shared/system installations, remote execution, uploads or unrestricted
+nested agent/provider sessions are part of the new loop. Explicit initialization
+may prepare the separate research `.venv`; its recorded authorization permits
+researcher-managed scientific dependencies and local models. Only the explicitly enabled,
 host-owned consultation tool can start an adviser inside research. The independent
 on-demand inspector does not restore that orchestration or change the research loop.
 

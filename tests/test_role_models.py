@@ -185,8 +185,8 @@ def test_fresh_adjudicator_model_cannot_change_before_its_prompt(project, ledger
 
 
 def test_model_attribution_survives_event_truncation(project, ledger, monkeypatch):
-    monkeypatch.setattr(provider, "MAX_EVENTS_BYTES", 0)
-    envelope = configured(project, ledger, coach=False, consultant=False, closure_critic=False)
+    envelope = configured(project, ledger, coach=False, consultant=False, closure_critic=False,
+                          max_event_log_bytes=1)
     code, _, outcome = exercise(envelope, scripts_with_models([{}]))
     assert code == 0, outcome
     session = runtime.usage_record(envelope, complete=True)["sessions"][0]

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
+import traceback
 import uuid
 
 from labgoblin import consultation, credits, guidance
@@ -22,7 +23,11 @@ GRACE_SECONDS = 30
 CLOSURE_CRITIC_SECONDS = 2 * 60 * 60
 ADJUDICATION_SECONDS = 10 * 60
 MAX_EVENT_BYTES = 1024 * 1024
-MAX_EVENTS_BYTES = 1024 * 1024 * 1024
+
+
+def error_details(stage, error):
+    return {"stage": stage, "type": type(error).__name__, "message": str(error)[:4000],
+            "traceback": "".join(traceback.format_exception(error))[-8192:]}
 
 
 def executable():
@@ -92,7 +97,7 @@ class Session:
     def __init__(self, envelope, role, session_id, allowance, client, deadline, *, purpose=None):
         self.envelope, self.role, self.id, self.allowance = envelope, role, session_id, allowance
         self.client, self.deadline = client, deadline
-        self.config = Config.parse(envelope.config)
+        self.config = Config.parse(envelope.config, frozen=True)
         self.purpose = purpose if purpose is not None else ("coach" if role.startswith("coach-") else role)
         self.model = self.config.model_for(self.purpose)
         self.model_snapshot = {}
@@ -118,7 +123,8 @@ class Session:
         self.last_progress = time.time()
         self.directory = Path(envelope.root) / "sessions" / role
         self.directory.mkdir(parents=True)
-        self.events = EventLog(self.directory, event_bytes=MAX_EVENT_BYTES, total_bytes=MAX_EVENTS_BYTES)
+        self.events = EventLog(self.directory, event_bytes=MAX_EVENT_BYTES,
+                               total_bytes=self.config.max_event_log_bytes)
         publish_json(self.directory / "identity.json", {
             "run_id": envelope.id, "envelope_digest": envelope.digest, "session_id": self.id,
             "role": role, "allowance_nano": allowance, "purpose": self.purpose,
@@ -128,10 +134,15 @@ class Session:
 
     async def bounded(self, awaitable, seconds=10):
         from copilot._jsonrpc import JsonRpcError
+        remaining = self.deadline - time.monotonic()
+        wait = max(0.01, min(seconds, remaining))
         try:
-            return await asyncio.wait_for(awaitable, max(0.01, min(seconds, self.deadline - time.monotonic())))
+            return await asyncio.wait_for(awaitable, wait)
         except JsonRpcError as error:
             raise RuntimeError(f"Copilot transport: {error}") from error
+        except TimeoutError as error:
+            raise TimeoutError(f"Copilot operation timed out after {wait:.3f}s "
+                               f"({max(0, remaining):.3f}s remained before the session deadline)") from error
 
     def event(self, event):
         kind, data = event.type.value, event.data
@@ -163,7 +174,8 @@ class Session:
         self.events_bytes = self.events.total_bytes
         self.events_truncated = bool(self.events.omitted)
         if kind == "assistant.message" and data.content:
-            print(data.content, flush=True)
+            encoding = sys.stdout.encoding or "utf-8"
+            print(data.content.encode(encoding, errors="backslashreplace").decode(encoding), flush=True)
 
     async def start(self, *, tools=None, system="", audit=None, verify_tools=False):
         from copilot import PermissionHandler, ToolSet
@@ -370,31 +382,64 @@ class Session:
         self.allowance_revisions += 1
 
     async def close(self):
+        failures = []
+        primary = None
+        stage = "settlement"
         try:
             if self.session is not None:
                 if self.sent and not self.idle.is_set():
                     self.aborting = True
                     self.idle.clear()
+                    stage = "abort"
                     await self.bounded(self.session.abort(), 5)
+                    stage = "wait for idle after abort"
                     await self.bounded(self.idle.wait(), 10)
                 if not self.complete:
+                    stage = "final usage metrics"
                     await self.metrics()
                 self.complete = True
+                stage = "publish final usage"
                 publish_json(self.directory / "usage.json", self.record())
             elif not self.sent:
                 self.usage = {"totalNanoAiu": 0, "basis": "Owned driver failed before sending any prompt"}
                 self.complete = True
+                stage = "publish proven zero usage"
                 publish_json(self.directory / "usage.json", self.record())
+        except (OSError, ValueError, RuntimeError, ExceptionGroup) as error:
+            primary = error
+            failures.append(error_details(stage, error))
         finally:
             try:
                 if self.session is not None:
+                    stage = "disconnect"
                     await self.bounded(self.session.disconnect(), 3)
+                stage = "stop runtime"
                 await self.bounded(self.client.stop(), 5)
-            except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup):
-                await self.bounded(self.client.force_stop(), 3)
-                raise
+            except (OSError, ValueError, RuntimeError, ExceptionGroup) as error:
+                primary = primary if primary is not None else error
+                failures.append(error_details(stage, error))
+                try:
+                    await self.bounded(self.client.force_stop(), 3)
+                except (OSError, ValueError, RuntimeError, ExceptionGroup) as error:
+                    failures.append(error_details("force stop runtime", error))
             finally:
-                self.events.close()
+                try:
+                    self.events.close()
+                except (OSError, ValueError, RuntimeError) as error:
+                    primary = primary if primary is not None else error
+                    failures.append(error_details("close event log", error))
+        try:
+            publish_json(self.directory / "shutdown.json", {
+                "run_id": self.envelope.id, "envelope_digest": self.envelope.digest,
+                "session_id": self.id, "role": self.role, "usage_complete": self.complete,
+                "errors": failures,
+            })
+        except (OSError, ValueError, RuntimeError) as error:
+            primary = primary if primary is not None else error
+            failures.append(error_details("publish shutdown record", error))
+        if failures:
+            raise RuntimeError("; ".join(f"{item['stage']}: {item['type']}: {item['message']}"
+                                         for item in failures)) from primary
         self.waiting = False
 
 
@@ -513,6 +558,9 @@ class Consultations:
                 self.raise_if_failed()
                 if invocation.session_id != caller.id or not caller.waiting or caller.aborting or decision:
                     raise ValueError("Consultation requires this caller's active, undecided research/review turn")
+                evaluation = getattr(self, "evaluation", None)
+                if evaluation is not None and evaluation.active is not None:
+                    raise ValueError("Wait for the researcher's owned evaluation before requesting advice")
                 args = invocation.arguments
                 table(args, "consultation", {"question", "evidence_paths", "purpose"})
                 purpose = args.get("purpose", "advice")
@@ -676,6 +724,9 @@ class Consultations:
         system = guidance.CONSULTANT + (guidance.CLAIM_REVIEW if purpose == "claim_review" else "")
         if critic:
             system = guidance.CLOSURE_CRITIC
+        evaluation = getattr(self, "evaluation", None)
+        if evaluation is not None:
+            system += guidance.EVALUATION_REVIEW
         outcome = {"status": "failed", "purpose": purpose, "caller": caller.role, "tool_call_id": call_id,
                    "adviser_role": role}
         timing = ({"execution_seconds_remaining_including_shutdown": max(0, self.deadline - time.monotonic()),
@@ -700,9 +751,10 @@ class Consultations:
                 **closing_context, **timing})
             for path, preview in zip(args.get("evidence_paths", []), previews):
                 audit.record("labgoblin_read_evidence", {"path": path}, preview)
-            await adviser.start(tools=consultation.evidence_tools(
-                self.envelope.project, audit=audit, images=purpose == "closure_critique"),
-                                system=system, audit=audit)
+            tools = consultation.evidence_tools(self.envelope.project, audit=audit, images=purpose == "closure_critique")
+            if evaluation is not None:
+                tools.append(evaluation.reader(audit))
+            await adviser.start(tools=tools, system=system, audit=audit)
             brief = await adviser.ask(
                 "Original goal:\n" + self.prompt["goal"] + "\n\nConsultation question:\n" + args["question"] +
                 "\n\nOriginal research instructions for scope/disclosure restrictions only; "
@@ -782,7 +834,7 @@ class Consultations:
 async def drive(envelope, deadline, *, client_factory=client_for):
     from labgoblin import closing
     from labgoblin.ideas import RunInbox, VERSION
-    config, root = Config.parse(envelope.config), Path(envelope.root)
+    config, root = Config.parse(envelope.config, frozen=True), Path(envelope.root)
     prompt = read_json(root / "prompt.json")
     inbox = RunInbox(envelope) if prompt.get("operator_ideas_version") == VERSION else None
     sessions, reviews, errors = [], [], []
@@ -803,6 +855,7 @@ async def drive(envelope, deadline, *, client_factory=client_for):
     researcher = Session(envelope, "researcher", str(uuid.UUID(envelope.id)), research_allowance,
                          client_factory(envelope), deadline)
     sessions.append(researcher)
+    evaluation = None
 
     async def ask_researcher(message, *, extra=False, closure_delivery=None):
         if extra and researcher.allowance is not None:
@@ -812,25 +865,39 @@ async def drive(envelope, deadline, *, client_factory=client_for):
         if extra and delivery is None:
             raise ValueError("An additional researcher prompt requires a captured operator-idea delivery")
         if delivery is None and closure_delivery is None:
-            return await researcher.ask(message, checkpoint)
-        answer = await researcher.ask(message + (delivery.notice() if delivery else ""), checkpoint,
-                                      idea_delivery=delivery, closure_delivery=closure_delivery)
+            answer = await researcher.ask(message, checkpoint)
+        else:
+            answer = await researcher.ask(message + (delivery.notice() if delivery else ""), checkpoint,
+                                          idea_delivery=delivery, closure_delivery=closure_delivery)
+        if evaluation is not None:
+            evaluation.raise_if_failed()
+            if evaluation.active is not None:
+                raise RuntimeError("Researcher ended while its owned evaluation was unsettled")
         if delivery:
             delivery.responded(answer)
         if closure_delivery:
             closure_delivery.responded(answer)
         return answer
 
-    idea_follow_up = ("Operator ideas arrived at a stopping boundary. Read their captured files and reconsider "
-                      "your stopping point against the unchanged original goal. You choose whether and how to "
-                      "investigate; explain prior coverage, disagreement or deferral rather than treating every "
-                      "suggestion as a mandatory experiment.\n\nOriginal goal:\n" + prompt["goal"])
+    idea_follow_up = ("New operator ideas are available. Read their captured files and assess them against "
+                      "the unchanged original goal. You choose whether and how to investigate; explain prior "
+                      "coverage, disagreement or deferral rather than treating every suggestion as mandatory. "
+                      "Use useful ideas to continue the research loop, not just to prepare a reply. "
+                      "Respect the original permissions and host stops.\n\nOriginal goal:\n" + prompt["goal"])
     try:
         if not closing.enabled(prompt) and config.closure_critic:
             raise ValueError("Closure criticism requires the frozen researcher-response capability")
-        research_tools = [consultations.tool(researcher, protected=credits.COACH_RESERVE if config.coach else 0)] if consultations else None
-        await researcher.start(tools=research_tools, system=prompt["instructions"] +
-                               (guidance.CONSULT_CALLER if consultations else ""))
+        research_tools = [consultations.tool(researcher, protected=credits.COACH_RESERVE if config.coach else 0)] if consultations else []
+        if "evaluation" in prompt:
+            from labgoblin.evaluation import Evaluator
+            evaluation = Evaluator(envelope, lambda: researcher.deadline)
+            research_tools.extend((evaluation.tool(researcher), evaluation.reader()))
+            if consultations:
+                consultations.evaluation = evaluation
+        await researcher.start(tools=research_tools or None, system=prompt["instructions"] +
+                               (guidance.CONSULT_CALLER if consultations else "") +
+                               (guidance.EVALUATION if evaluation else "") +
+                               ("\nEvaluation purpose: " + evaluation.definition["purpose"] if evaluation else ""))
         answer = await ask_researcher(prompt["goal_prompt"])
         if consultations:
             consultations.raise_if_failed()
@@ -859,14 +926,18 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                 sessions.append(coach)
                 status, reason = "review_unavailable", "Stopping review did not complete"
                 try:
+                    audit = consultation.EvidenceAudit(coach.directory) if config.closure_critic else None
                     tools = coach_tools(envelope.project, decision, follow_up=index > 0,
                                         stalled_reviews=stalled_reviews, deadline=deadline, consultations=consultations,
-                                        closure=closure, audit=consultation.EvidenceAudit(coach.directory) if config.closure_critic else None)
+                                        closure=closure, audit=audit)
                     if consultations:
                         tools.append(consultations.tool(coach, protected=lambda: protected, decision=decision))
+                    if evaluation:
+                        tools.append(evaluation.reader(audit))
                     await coach.start(tools=tools, system=guidance.COACH +
                                       (guidance.CONSULT_CALLER + guidance.COACH_CLAIM_REVIEW if consultations else "") +
-                                      (guidance.COACH_CLOSURE if config.closure_critic else ""))
+                                      (guidance.COACH_CLOSURE if config.closure_critic else "") +
+                                      (guidance.EVALUATION_REVIEW if evaluation else ""))
                     phase = ("Initial stopping review (provisional)." if index == 0 else
                              f"Stopping review after researcher follow-up {index}.")
                     context = {"stalled_reviews": stalled_reviews, "max_stalled_reviews": config.max_stalled_reviews,
@@ -877,6 +948,10 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                         context["available_consultations"] = consultations.briefs
                     if inbox:
                         context["operator_ideas"] = inbox.context()
+                    if evaluation:
+                        context["evaluation"] = {"name": evaluation.definition["name"],
+                                                 "purpose": evaluation.definition["purpose"],
+                                                 "run": envelope.id}
                     await coach.ask(phase + "\n\nHost review context:\n" +
                                     json.dumps(context) + "\n\nOriginal goal:\n" + prompt["goal"] +
                                     "\n\nResearcher's stopping response:\n" + answer, checkpoint)
@@ -926,10 +1001,14 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                         publish_json(judge.directory / "closure-adjudication.json", {
                             "review": index, "request_sha256": digest(delivery.value),
                             "response_sha256": digest(response)})
+                        audit = consultation.EvidenceAudit(judge.directory)
                         tools = coach_tools(envelope.project, decision, follow_up=True,
                                             stalled_reviews=stalled_reviews, deadline=deadline,
-                                            closure=closure, audit=consultation.EvidenceAudit(judge.directory))
-                        await judge.start(tools=tools, system=guidance.COACH + guidance.CLOSURE_ADJUDICATOR)
+                                            closure=closure, audit=audit)
+                        if evaluation:
+                            tools.append(evaluation.reader(audit))
+                        await judge.start(tools=tools, system=guidance.COACH + guidance.CLOSURE_ADJUDICATOR +
+                                          (guidance.EVALUATION_REVIEW if evaluation else ""))
                         context.update(available_consultations=consultations.briefs)
                         if deadline - time.monotonic() <= 2 * GRACE_SECONDS:
                             context["boundary_notice"] = "A deadline checkpoint is now available; preserve the unfinished conclusion."
@@ -991,17 +1070,20 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                     follow_up = idea_follow_up
                 else:
                     follow_up = (
-                        "Stopping review:\n" + json.dumps(decision) +
-                        "\nInvestigate this concrete question and reconsider the stopping point. You choose the method. "
-                        "Continue useful experiments toward the original goal, not just a report answering this follow-up. "
+                        "Research review:\n" + json.dumps(decision) +
+                        "\nUse this question to continue the research loop, not just to prepare a reply. "
+                        "Choose and carry out a useful investigation, then use its result to choose the next "
+                        "investigation. Keep going while consequential feasible work remains toward the original goal. "
                         "If the goal is answered, genuinely blocked or credible feasible avenues are exhausted, "
                         "explain that with evidence and retain unresolved questions. "
+                        "Respect host stops. "
                         "Keep the original goal and operational boundaries unchanged.")
                 if consultations:
                     follow_up += "\nConsultation artifacts available to you:\n" + json.dumps(consultations.briefs)
                     follow_up += (
-                        "\nInspect applicable claim-review objections before restating the conclusion. "
+                        "\nInspect applicable claim-review objections as input to the investigation. "
                         "Test, repair or narrow a challenged claim as warranted; you choose the method. "
+                        "Narrowing a claim does not narrow the original goal. "
                         "Do not merely polish the report or treat adviser agreement as scientific certification.")
                 answer = await ask_researcher(follow_up)
                 if consultations:
@@ -1015,9 +1097,21 @@ async def drive(envelope, deadline, *, client_factory=client_for):
     except StopRequested as error:
         status, reason = error.status, str(error)
     except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup) as error:
+        status = "review_unavailable" if status == "review_unavailable" else "failed"
         reason = f"{type(error).__name__}: {error}"
         errors.append(reason)
     finally:
+        primary_outcome = {"status": status, "reason": reason}
+        try:
+            publish_json(root / "stop.json", {"run_id": envelope.id, "envelope_digest": envelope.digest,
+                                             **primary_outcome})
+        except (OSError, ValueError, RuntimeError) as error:
+            errors.append(f"Publish primary outcome: {type(error).__name__}: {error}")
+        if evaluation:
+            try:
+                await evaluation.close()
+            except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+                errors.append(f"Evaluation shutdown: {error}")
         if consultations:
             try:
                 await consultations.close()
@@ -1029,18 +1123,22 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                     await session.close()
                 except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup) as error:
                     errors.append(f"{session.role} settlement: {type(error).__name__}: {error}")
-        checkpoint()
-        if all(session.complete for session in sessions):
-            publish_json(root / "usage.json", {
-                "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": True,
-                "totalNanoAiu": sum(credits.usage_nano(session.usage) for session in sessions),
-                "sessions": [session.record() for session in sessions],
-            })
+        try:
+            checkpoint()
+            if all(session.complete for session in sessions):
+                publish_json(root / "usage.json", {
+                    "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": True,
+                    "totalNanoAiu": sum(credits.usage_nano(session.usage) for session in sessions),
+                    "sessions": [session.record() for session in sessions],
+                })
+        except (OSError, ValueError, RuntimeError) as error:
+            errors.append(f"Publish aggregate usage: {type(error).__name__}: {error}")
         if errors:
             status = "review_unavailable" if status == "review_unavailable" else "failed"
-            reason = "; ".join(errors)
+            reason = "; ".join(dict.fromkeys(filter(None, [reason, *errors])))
         publish_json(root / "result.json", {"run_id": envelope.id, "envelope_digest": envelope.digest,
                                           "status": status, "reason": reason, "checkpoint_reason": checkpoint_reason,
+                                          "primary_outcome": primary_outcome, "finalization_errors": errors,
                                           "reviews": reviews,
                                           "sessions": [session.record() for session in sessions]})
     return 0 if status == "completed" else 130 if status == "cancelled" else 124 if status == "timed_out" else 1

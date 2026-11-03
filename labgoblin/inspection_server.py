@@ -166,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.server.inspector.publish_idea(args["run"], args["draft"], args["sha256"])
             elif self.path == "/api/idea-draft-file":
                 result = self.server.inspector.idea_draft_file(args)
-            elif self.path in ("/api/read", "/api/listing", "/api/search", "/api/session", "/api/execution"):
+            elif self.path in ("/api/read", "/api/listing", "/api/search", "/api/session", "/api/execution", "/api/evaluations"):
                 evidence = Evidence(self.server.inspector.project, self.server.inspector.project_id)
                 result = getattr(evidence, self.path.removeprefix("/api/"))(args)
             else:

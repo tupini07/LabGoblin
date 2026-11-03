@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "Affine prediction reality check",
+  "purpose": "Predict y = 2*x + 1 on each supplied case. Development memorization is not generalization. This synthetic example demonstrates the evaluation protocol, not research quality.",
+  "evaluator": "evaluator",
+  "entrypoint": "check.py",
+  "baseline": "baseline",
+  "development": "development.json",
+  "confirmation": ["confirmation.json"],
+  "metrics": {"absolute_error": "minimize"},
+  "seconds": 30,
+  "max_capture_bytes": 1048576
+}
