@@ -177,7 +177,7 @@ def test_drain_never_treats_idle_alone_as_quiescence(project, ledger, monkeypatc
                     raise runtime.UncertainExecution("test membership unavailable")
                 monkeypatch.setattr(payload, "tree_members", unknown)
             assert not await meeting.drained()
-            await asyncio.sleep(.02)
+            await asyncio.wait_for(meeting.task_wait, timeout=5)
             assert not await meeting.drained()
             if kind == "unknown_tree":
                 assert "unavailable" in read_json(meeting.directory / "drain.json")["error"]
@@ -186,7 +186,7 @@ def test_drain_never_treats_idle_alone_as_quiescence(project, ledger, monkeypatc
                 caller.session.rpc.tasks.wait_for_pending = caller.session.wait_for_tasks
                 offset[0] = 0
                 assert not await meeting.drained()
-                await asyncio.sleep(.01)
+                await asyncio.wait_for(meeting.task_wait, timeout=5)
                 assert await meeting.drained()
             assert not client.stopped and not caller.session.aborted
         finally:
