@@ -13,10 +13,11 @@ generic exchange shape remain 3. These are separately checked, not migrated.
 | `research_environment.py` | Explicit project-local scientific environment and recorded research authorization, not a package manager or agent. |
 | `provider.py`, `guidance.py` | One ordinary SDK researcher, bounded read-only stopping review and short instructions. |
 | `consultation.py` | Shared bounded evidence readers and retained public-literature retrieval for optional advisers. |
+| `checkins.py` | Coalesced advisory goal reviews and a once-only deadline notice at an awaited researcher tool boundary. |
 | `evaluation.py` | Optional frozen paired evaluator, one-use confirmation exposure and read-only check evidence. |
 | `inspector.py`, `inspection_evidence.py`, `inspection_server.py`, `inspection_ideas.py` | Independently owned campaign chat, qualified evidence, external idea drafts and authenticated human publication. |
 | `ideas.py` | Immutable operator file revisions, exact delivery/reply records and the final-closure cutoff; not scientific state. |
-| `scheduler.py`, `db.py` | Shared machine admission, one-time claims and qualified terminal receipts. |
+| `scheduler.py`, `db.py` | Shared execution/accounting ledger, one-time claims and qualified terminal receipts. |
 | `payload.py`, `processes.py` | Native ownership, affinity, memory checks, finite deadlines and bounded streams. |
 | `credits.py`, `storage.py` | Cumulative reported/estimated spending and immutable retained files. |
 | `cli.py`, `paths.py` | Explicit local controls and LabGoblin names. |
@@ -32,8 +33,9 @@ missing or a report was not published through an API.
    Recovery precedes candidate configuration activation or another admission.
 2. The controller reads current configuration, goal and instructions once.
    Prior exact receipts and accounting corrections determine the remaining pool.
-3. The shared ledger grants native CPU/RAM/GPU placement. Probes and owner-liveness
-   observations occur outside its writer transaction.
+3. Native observation validates optional local CPU/RAM limits and selected GPU
+   visibility. It does not require idle GPUs, spare RAM, disjoint CPUs or configured
+   machine capacity. Probes and owner-liveness checks stay outside ledger writers.
 4. The controller freezes package helpers and prompt/configuration bytes, then
    arms one exact execution against the grant. Project identity, grant ID,
    resources, CPU set, launcher and allowance must agree.
@@ -42,18 +44,28 @@ missing or a report was not published through an API.
    consume a retired grant.
 6. The native owned tree runs one provider driver and its children. Only after
    tree retirement, pipe EOF and evidence retention does a matching receipt settle
-   execution and release resources.
+   execution and retire its claim.
 
 The ledger still uses its v3 envelope/receipt shape, with the exact private record
 inside metadata. The outer digest covers that entire representation. The new
 runtime verifies the outer/inner mapping rather than trust inconsistent copies.
 This is transport compatibility, not an old campaign reader or an old scientific
-workflow. Native research is a genuine `research-run` resource owner, never an
+workflow. Native research is a genuine `research-run` execution owner, never an
 observer or build impersonation.
 
-Other installed runtimes retain authority over their own pending eligibility and
-grants. Old installed readers can observe these pending records without decoding
-a new scientific schema. No existing campaign, envelope or receipt is rewritten.
+New requests freeze the exact configuration, numeric resource observations and
+CPU set in their `policy = "local"` request. The configuration distinguishes
+finite limits from `"unlimited"`; numeric exchange resources for an unlimited
+field describe the observed machine, not a reservation or an enforced cap.
+Shared CPU/RAM/GPU counters and reserved CPU sets are empty/zero, so old
+schedulers do not count local limits as reservations. Verified local claims are
+published already granted, never as pending rows an old scheduler could reject.
+Arming validates the exact request and remaining credit allowance. Other installed
+runtimes retain authority over their own pending eligibility and grants; new code cannot admit an old
+pending allocation. No existing capacity, campaign, envelope or receipt is rewritten.
+An explicit run or inspection approval can initialize an absent ledger under an
+initialization lock; a missing bound ledger fails rather than discarding accounting.
+Read-only status never creates it.
 
 New initialization records versioned local-research authorization and a separate
 project `.venv`, prepared without pip/downloads or reused without modification.
@@ -72,15 +84,22 @@ still applies; these checks and guidance are not a package-installation sandbox.
 
 Windows independent launches use `background_options(independent=True)`:
 breakaway and a windowless console, not `DETACHED_PROCESS`. The payload starts
-suspended, receives its named Job Object, RAM limit and exact CPU affinity, then
+suspended, receives its named Job Object and any selected RAM/CPU limits, then
 resumes. Kill-on-job-close and verified job retirement cover ordinary descendants.
 Unmodified descendants inherit a windowless console.
 
 Linux uses a dedicated process session and exact boot/start identities, with
-pidfds for signaling owned members. Affinity is applied before launch; process
-session RSS is monitored. This is trusted native execution, not a cgroup security
+pidfds for signaling owned members. Optional affinity is applied before launch;
+process-session RSS is monitored and enforced only when capped. This is trusted native execution, not a cgroup security
 boundary. Deliberately escaped daemons, other hosts, WSL and containers are outside
 the supported research contract.
+
+CPU and RAM limits default to `"unlimited"` independently. Existing finite settings
+and frozen missing-field defaults retain their former bounds. Thread-count hints
+are added only for finite CPU settings; nested evaluation uses the same optional
+limits. Explicit GPU UUIDs set CUDA visibility without exclusive admission or
+VRAM/utilization enforcement. OS scheduling and external workloads can cause
+contention; no availability guarantee or automatic retry is implied.
 
 All operations have a hard deadline. SDK shutdown grace fits inside it. Rotating
 stdout/stderr spools continue draining after retention fills; log pressure cannot
@@ -156,10 +175,20 @@ Owned CLI processes disable history sync/export with `--sync-session=off` and
 client-level remote-session support also remains disabled. Do not use the removed
 `--no-remote` CLI flag or change shared user settings to enforce these boundaries.
 
-Optional `coach_model`, `closure_critic_model`, `advice_model` and
-`claim_review_model` belong to the frozen configuration. Omission inherits the
-campaign model independently for each purpose; it never inherits a caller's
-override or enables a role. Researcher and independent inspector selection remain
+New candidate configurations default to Sol (`gpt-6.1-sol`) with high effort,
+coaching, consultations and closing criticism. An omitted closing-critic option
+follows its two prerequisites; an explicit true value requires both. Serialized
+configurations always carry the resolved boolean. Explicit JSON null is invalid.
+CLI initialization shares these defaults; single prerequisite opt-outs suppress
+only the default critic, never silently override an explicit critic request.
+
+`coach_model`, `closure_critic_model`, `advice_model` and
+`claim_review_model` belong to the frozen configuration and default to
+`gpt-6-astra`. Explicit `"inherit"` (or Python `None`, serialized as `"inherit"`)
+follows the campaign model independently for each purpose; it never inherits a caller's
+override or enables a disabled role. Historical frozen omissions retain disabled
+roles, inherited models, and the original auto/medium base defaults without
+rewriting any record. Researcher and independent inspector selection remain
 their respective configured model. All purposes use the shared reasoning effort.
 The first research client's startup validates every enabled named selection
 against the SDK catalog before any prompt, without another client or allowance.
@@ -207,14 +236,96 @@ receipts, frozen runtimes and hashes are never rewritten. Previous review contex
 is bounded to one retained decision; full history remains in per-review records.
 Failure, cancellation or exhaustion cannot fall back to provisional approval.
 
+New prompts freeze `research_checkins_version = 1`. With coaching enabled and a
+positive `goal_review_interval_seconds` (default 10800), the next eligible
+pre-tool hook awaits one fresh `goal-review-N` session using purpose/model `coach`.
+It has curated workspace and original-researcher-event readers, optional qualified
+evaluation reads, and no shell, public fetch, writes, recursion or stopping tool.
+Trajectory pages reuse the bounded indexed reader and retain exact read evidence,
+cursors and incomplete/live coverage; the recent offset is not a complete history.
+Advice is at most 4 KiB and remains nonbinding. It is returned as `additionalContext`
+in the same tool hook, not a queued prompt or new researcher conversation.
+Its `goal_review_timeout_seconds` defaults to 1800 seconds, including shutdown;
+the original deadline and protected checkpoint window still bound the review.
+This ceiling is independent of the ordinary consultation timeout.
+
+Concurrent hooks serialize. An active consultation/evaluation or insufficient
+shutdown/checkpoint time defers review. Next due time is measured from completion,
+without catch-up reviews; the closing-critique response suppresses reviews.
+Stopping counts, scientific autonomy and the absolute deadline remain unchanged.
+The same blocked-caller transfer/settlement guards below protect the shared pool
+and stopping reserve. A pre-tool hook supplies no SDK tool-call ID, so records
+instead bind a host-generated hook ID, exact researcher session/prompt and frozen
+envelope; allowance revisions never pretend this is a provider tool-call ID.
+Unknown spend, failed transfers or unexpected researcher resumption fail closed;
+ordinary SDK hook exceptions fail open, so fatal paths cancel the callback.
+Settled nonfatal adviser failures return explicit failure context.
+Shared adviser shutdown preserves its bounded final-usage settlement when caller
+cancellation arrives during cleanup, then propagates cancellation without returning advice.
+
+The first tool boundary within the final min(900 seconds, ten percent of configured
+execution time) before shutdown grace returns a single checkpoint suggestion,
+including on coach-off runs. Hook response records attest the host response,
+not model consumption or a saved scientific checkpoint. Running tools are never
+aborted to obtain a review; missing boundaries can prevent delivery entirely.
+The SDK transport is covered model-free; real CLI long-hook behavior and
+research-quality effects require separately authorized qualification before rollout.
+Missing frozen capability disables both hooks; missing interval in an old frozen
+configuration defaults to zero. Unsupported capability values fail explicitly.
+No historical configuration, prompt, receipt or helper is rewritten.
+
+Optional `[supervisor_review]` freezes a version-1 appointment (`due_at` in UTC)
+in the hash-bound admission prompt. Missing schedule/capability remains disabled;
+an incomplete or unsupported binding fails. Calendar evaluation uses explicit
+IANA timezone, local time, date anchor and day interval. Spring gaps move forward
+and autumn folds occur once. Admission chooses the next future occurrence.
+
+Meeting request, hook/prompt notice, control-process identities, drain observation
+and checkpoint records bind the exact envelope. A request suppresses new timed
+advice and stopping reviews at the next safe boundary, not already-active
+settlement. No extra researcher/report prompt is purchased. Existing idea and
+closure-response retention completes before scheduled stopping.
+The host requires researcher idle/no active tools, SDK task/follow-up draining
+and exact owned native membership with no processes beyond the initial control
+identities. Unknown membership or task inspection remains explicitly unverified.
+The owned researcher runtime uses a known ten-minute internal task-wait timeout.
+An empty RPC response at that timeout is not drain proof: retain the uncertainty
+and check again within the original execution deadline. Automatic follow-up
+responses are retained separately from the ordinary prompt answer, and final
+usage is refreshed after draining rather than reusing its earlier prompt bill.
+Native execution is cooperative, not a hostile-code or scientific-checkpoint
+certification boundary; unfamiliar persistent helpers may delay a meeting until
+the original deadline. Cancellation, real failures, quota and deadline take priority.
+
+Only a final quiescent receipt with complete spending and the specific
+`checkpointed/supervisor_review` outcome and matching checkpoint-file digest is
+a successful planned hold.
+Requests interrupted by a failure or deadline remain interrupted, not successful
+checkpoints. Read-only status derives holds from chronological frozen admissions,
+terminal cutoffs and request records; a past terminal run does not become due
+merely because it is read later. No new ledger schema or mutable acknowledgment
+file is needed. `run --resume --reviewed RUN_ID` binds the pending terminal receipt
+in the next admitted prompt. Unarmed preparation cannot consume it; an admitted
+proven nonstart can. Removing candidate scheduling does not erase the old hold.
+Continuation preserves cumulative accounting and retained files, starts a fresh
+conversation and uses the full configured timeout. The inspector remains
+read-only, separately funded and without restart authority.
+
 An explicitly enabled `consultant` flag supplies one host-owned consultation
 tool to researcher and coach. It does not change their existing tool/role policy.
 Each fresh `consult-N` adviser has only curated evidence reads and a verified
 `web_fetch` allowlist, never the coach's decision tool or ordinary coding tools.
 It runs within the same supervised tree, resource envelope and absolute deadline,
-with a 30-minute per-consultation bound for both advice and claim review,
+with `consultation_timeout_seconds` defaulting to a 60-minute bound for both advice and claim review,
 including shutdown grace. There is no additional machine grant, detached worker,
 recursive delegation or scientific task scheduler.
+
+Both review timeouts are finite configured ceilings of at least sixty seconds,
+not requested durations. Init persists the resolved defaults. Missing fields in
+old frozen configurations retain 1800 seconds for consultations and 900 seconds
+for goal reviews; candidate omissions use the new defaults. Explicit settings
+survive freezing. No admitted record is rewritten and the closing critic,
+campaign deadline, cancellation and SDK settlement limits remain unchanged.
 
 Consultations have no independent credit pool or per-call quota. The exact
 host-owned tool callback blocks its caller until allowance transfer and adviser
@@ -234,7 +345,7 @@ These fatal conditions cancel the SDK tool callback without returning a result
 that could permit another model response, then abort the caller through owned
 shutdown. Settled, nonfatal consultation failures remain ordinary tool errors.
 Exact contiguous adviser roles and deterministic session IDs qualify aggregate
-usage. The optional flag defaults off in existing format-5 records; no frozen
+usage. The flag defaults off when missing from historical frozen format-5 records; no frozen
 configuration, helper or receipt is rewritten.
 
 Requests bind the caller/session/tool-call identity, original goal/instructions
@@ -378,6 +489,11 @@ records phase-specific failures and bounded tracebacks in `shutdown.json`, outsi
 its bulk-log budget. Settlement/cleanup failures append to, rather than replace,
 the original reason. Failure to publish a diagnostic still permits owned cleanup
 and remains an explicit finalization error; genuinely missing usage stays unknown.
+Session disconnect allows up to ten seconds; owned runtime stop allows fifteen,
+including the SDK's own ten-second shutdown RPC and transport/process cleanup.
+Both are clipped to the existing session deadline, without extending research
+or review time. Genuine timeout or cleanup errors still force bounded cleanup,
+remain recorded and block further inference even when final usage is known.
 Legacy sessions keep their original byte-paged reader. Indexed excerpts return
 at most 30 events; full selected events use UTF-8-aligned 16-KiB byte pages.
 `archive_workspace` defaults to false. When explicitly enabled, final workspace capture streams regular files and
@@ -452,7 +568,7 @@ new research prompt. After optional archival and ledger settlement, the worker
 requests one separately owned inspection of that exact terminal receipt.
 The researcher is already retired; reporting neither appends researcher prompts
 nor changes the research receipt. Inspection admission uses its existing finite
-cumulative pool, model, deadline and genuine machine grant. A changed approval
+cumulative pool, model, deadline and genuine execution grant. A changed approval
 fails instead of silently adopting a larger allowance.
 
 The reporter has no prior chat or draft tool. Its evidence scope rejects mutable

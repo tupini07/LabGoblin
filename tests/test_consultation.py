@@ -19,17 +19,18 @@ from tests.test_simple_provider import exercise
 QUESTION = {"question": "Which assumptions or materially different approaches are worth checking?"}
 
 
-def test_consultant_is_strict_opt_in_and_preserves_old_configuration(tmp_path, capsys):
-    assert Config.parse({"version": 5}).consultant is False
-    assert main(["init", str(tmp_path / "plain"), "--credits", "30"]) == 0
+def test_consultant_defaults_on_with_explicit_opt_out_and_frozen_compatibility(tmp_path, capsys):
+    assert Config.parse({"version": 5}).consultant is True
+    assert Config.parse({"version": 5}, frozen=True).consultant is False
+    assert main(["init", str(tmp_path / "plain"), "--no-coach", "--no-consultant", "--credits", "30"]) == 0
     capsys.readouterr()
     assert Config.load(tmp_path / "plain").consultant is False
-    assert main(["init", str(tmp_path / "advice"), "--consultant", "--credits", "60"]) == 0
+    assert main(["init", str(tmp_path / "advice"), "--no-coach", "--credits", "60"]) == 0
     capsys.readouterr()
     assert Config.load(tmp_path / "advice").consultant is True
     assert main(["init", str(tmp_path / "both"), "--coach", "--consultant", "--credits", "90"]) == 0
     capsys.readouterr()
-    for args in ({"consultant": "true"}, {"consultant": True, "max_ai_credits": 59},
+    for args in ({"consultant": "true"}, {"consultant": True, "coach": False, "max_ai_credits": 59},
                  {"consultant": True, "coach": True, "max_ai_credits": 89}):
         with pytest.raises(ValueError):
             Config(**args)
@@ -330,13 +331,15 @@ def test_parallel_requests_are_rejected_not_queued(project, ledger):
 
 @pytest.mark.parametrize("purpose", ["advice", "claim_review"])
 @pytest.mark.parametrize("caller", ["researcher", "coach"])
-@pytest.mark.parametrize("seconds, expected", [(86400, 1800), (900, 900)])
-def test_ordinary_advisers_get_thirty_minutes_within_campaign_time(
-        project, ledger, monkeypatch, purpose, caller, seconds, expected):
-    root, _, _ = project
+@pytest.mark.parametrize("configured,seconds,expected", [(None, 86400, 3600), (7200, 86400, 7200), (None, 900, 900)])
+def test_ordinary_advisers_use_configured_timeout_within_campaign_time(
+        project, ledger, monkeypatch, purpose, caller, configured, seconds, expected):
+    root, config, record = project
+    if configured is not None:
+        config = replace(config, consultation_timeout_seconds=configured)
     (root / "research-notes.md").write_text("A retained claim and its evidence.", encoding="utf-8")
     request = {**QUESTION, "purpose": purpose, "evidence_paths": ["research-notes.md"]}
-    envelope = arm(project, ledger, coach=caller == "coach", consultant=True)
+    envelope = arm((root, config, record), ledger, coach=caller == "coach", consultant=True)
     deadlines, remaining = {}, {}
     ask = provider.Session.ask
 
@@ -352,7 +355,7 @@ def test_ordinary_advisers_get_thirty_minutes_within_campaign_time(
     assert code == 0, outcome
     assert expected - 5 < remaining["consult-0"] <= expected
     assert deadlines["consult-0"] <= deadlines["researcher"]
-    if seconds < 1800:
+    if seconds < config.consultation_timeout_seconds:
         assert deadlines["consult-0"] == deadlines["researcher"]
     if caller == "coach":
         assert deadlines["coach-0"] == deadlines["coach-1"] == deadlines["researcher"]
@@ -363,9 +366,12 @@ def test_ordinary_advisers_get_thirty_minutes_within_campaign_time(
 
 
 def test_local_consultation_deadline_is_bounded_without_resetting_run(project, ledger, monkeypatch):
-    monkeypatch.setattr(consultation, "CONSULT_SECONDS", 30.4)
-    envelope = arm(project, ledger, consultant=True)
-    code, clients, outcome = exercise(envelope, [{"consult": [QUESTION]}, {"wait": True}])
+    root, config, record = project
+    config = replace(config, consultation_timeout_seconds=60)
+    # Exercise the real deadline without waiting a minute.
+    monkeypatch.setattr(provider, "GRACE_SECONDS", 59.6)
+    envelope = arm((root, config, record), ledger, consultant=True)
+    code, clients, outcome = exercise(envelope, [{"consult": [QUESTION]}, {"wait": True}], seconds=120)
     assert code == 0 and outcome["status"] == "completed"
     assert clients[0].session.tool_results[0].result_type == "failure"
     assert clients[1].session.aborted

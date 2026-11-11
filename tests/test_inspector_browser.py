@@ -17,7 +17,7 @@ def page():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True, executable_path=os.environ.get("LABGOBLIN_BROWSER_EXECUTABLE") or None)
-        context = browser.new_context(viewport={"width": 1440, "height": 1000})
+        context = browser.new_context(viewport={"width": 1440, "height": 1000}, timezone_id="UTC", locale="en-US")
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -33,6 +33,21 @@ def ready(page, server, observer):
     from playwright.sync_api import expect
     page.goto(server.url)
     expect(page.locator("#project")).to_have_text(str(observer.project))
+
+def test_supervisor_hold_uses_appointment_timezone_without_starting_chat(page, server, observer, monkeypatch):
+    from playwright.sync_api import expect
+    value = observer.status()
+    value["research"]["supervisor_review"] = {
+        "state": "awaiting_review", "due_at": 1794330000,
+        "schedule": {"timezone": "America/Los_Angeles"}, "notice_delivered": True,
+        "requires_review": True, "continuation": "labgoblin run --resume --reviewed exact-run",
+    }
+    monkeypatch.setattr(observer, "status", lambda: value)
+    ready(page, server, observer)
+    expect(page.locator("#status")).to_contain_text("11/10/2026, 9:00:00 AM (America/Los_Angeles)")
+    expect(page.locator("#status")).to_contain_text("--reviewed exact-run")
+    expect(page.locator("#ask")).to_be_disabled()
+    assert observer.history()["total"] == 0
 
 
 def test_read_only_browser_refresh_images_paging_and_mobile(page, server, observer, tmp_path):

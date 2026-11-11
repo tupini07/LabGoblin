@@ -1,7 +1,7 @@
 """Separately authorized inspection conversations, outside research state."""
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
@@ -16,7 +16,7 @@ from labgoblin import credits, provider, runtime
 from labgoblin.config import Config
 from labgoblin.inspection_evidence import Evidence, EvidenceTools
 from labgoblin.processes import background_options, own_handle, process_state
-from labgoblin.protocol import LaunchEnvelope, UncertainExecution, identifier, text
+from labgoblin.protocol import LaunchEnvelope, Resources, UncertainExecution, identifier, text
 from labgoblin.scheduler import ResourceLedger
 from labgoblin.storage import atomic_json, canonical, hash_file, publish_bytes, publish_json, read_json, run_lock
 
@@ -40,6 +40,12 @@ observation, not a promise of current liveness. Prefer terminal execution snapsh
 for finished work; label mutable workspace reads and cross-run comparisons.
 Distinguish researcher claims, observed artifacts, and your interpretation.
 Completion, a coach's approval and arithmetic checks do not certify science.
+When a supervisor meeting is pending, help the human review results, failures,
+uncertainties and useful next questions using existing evidence. Distinguish a
+checkpoint request from fully settled research and an interrupted wrap-up.
+Discussion or an idea draft never acknowledges the hold or restarts research.
+Only the explicit operator CLI continuation does so; it preserves spending and
+starts a fresh conversation with the full configured execution timeout.
 Cite tool evidence using [E1], [E2], etc. Do not invent citation IDs or file links.
 Inspect relevant images with image=true when visual comparisons would help.
 Explain meaningful results, limitations and concrete unresolved questions in plain
@@ -89,13 +95,17 @@ class Inspector:
         if not model or model == "auto":
             raise ValueError("Choose an explicit --model for inspection; auto does not support the selected reasoning effort")
         _, target_state, _ = runtime.project_record(self.project)
-        ledger = runtime.bound_ledger(target_state)
-        if ledger is None:
-            ledger = ResourceLedger(Config.load(self.project).ledger_path)
         config = Config(model=model, reasoning_effort=reasoning_effort, max_ai_credits=allowance,
-                        timeout_seconds=timeout, cpus=1, memory_mb=1024, ledger=str(ledger.path))
+                        timeout_seconds=timeout, cpus=1, memory_mb=1024,
+                        coach=False, consultant=False, closure_critic=False)
         with run_lock(self.lock):
+            research_ledger = runtime.bound_ledger(target_state)
+            ledger_path = research_ledger.path if research_ledger else Config.load(self.project).ledger_path
+            config = replace(config, ledger=str(ledger_path))
             path = self.state / "ledger.json"
+            ledger = runtime.bound_ledger(self.state, config=config) if path.exists() else research_ledger
+            if ledger is None:
+                ledger = ResourceLedger.ensure(ledger_path)
             binding = {"path": str(ledger.path), "id": ledger.id}
             if path.exists() and read_json(path) != binding:
                 raise ValueError("Inspection ledger cannot change and discard prior spending")
@@ -308,18 +318,18 @@ class Inspector:
                 prompt["idea_drafts_version"] = 1
             publish_json(directory / "prompt.json", prompt)
             frozen = runtime.freeze_runtime(self.state)
-            ledger.request(run_id, self.id, run_id, "inspection-run", config.resources,
-                           {"kind": "inspection-run", "handle": launcher}, native=True)
+            grant = ledger.request(run_id, self.id, run_id, "inspection-run", config,
+                                   {"kind": "inspection-run", "handle": launcher}, native=True)
             armed = False
             try:
                 self.active = run_id
-                grant = ledger.reserve(run_id)
                 if grant["state"] != "granted":
-                    raise ValueError(f"Inspection capacity unavailable: {grant['reason']}; research is not interrupted")
+                    raise ValueError(f"Inspection admission unavailable: {grant['reason']}; research is not interrupted")
+                request = json.loads(grant["request"])
                 argv = (sys.executable, "-I", "-B", str(Path(frozen["root"]) / "bootstrap.py"),
                         "inspection", str(directory / "envelope.json"))
                 envelope = LaunchEnvelope(run_id, self.id, str(self.root), str(directory), str(ledger.path), ledger.id,
-                                          argv, config.resources, tuple(json.loads(grant["native_cpus"])),
+                                          argv, Resources.parse(request["resources"]), tuple(request["cpu_ids"]),
                                           config.to_dict(), allowance, launcher, frozen,
                                           hash_file(directory / "prompt.json"))
                 publish_json(directory / "envelope.json", asdict(envelope))

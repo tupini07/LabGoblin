@@ -21,6 +21,16 @@ async function api(path, args) {
   return result;
 }
 function showError(error) { $("error").textContent = error.message || String(error); }
+function appointmentTime(meeting) {
+  const date = new Date(meeting.due_at * 1000);
+  const zone = meeting.schedule.timezone;
+  try {
+    return `${date.toLocaleString(undefined, { timeZone: zone })} (${zone})`;
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return `${date.toISOString()} (UTC; browser cannot display ${zone})`;
+  }
+}
 function run(action) { $("error").textContent = ""; return action().catch(showError); }
 function element(tag, value, parent) {
   const node = document.createElement(tag);
@@ -228,10 +238,15 @@ async function refresh() {
   $("project").textContent = research.root;
   const budget = research.budget;
   const observer = value.inspection.budget;
+  const meeting = research.supervisor_review;
   chatEnabled = value.chat_enabled;
   $("status").textContent =
     `Observed ${new Date(research.observed_at * 1000).toLocaleString()}\n` +
     `Research: ${research.state}${latest ? `; recorded owner ${latest.owner}; ${latest.phase}` : ""}\n` +
+    (meeting ? `Supervisor meeting: ${meeting.state}; due ${appointmentTime(meeting)}` +
+      `; notice ${meeting.notice_delivered ? "delivered" : "not delivered"}\n` +
+      (meeting.drain?.error ? `Checkpoint quiescence unverified: ${meeting.drain.error}\n` : "") +
+      (meeting.requires_review ? `Research stays stopped after settlement until explicit reviewed continuation. ${meeting.continuation}\n` : "") : "") +
     `Research usage: ${budget.used.toFixed(3)} credits (includes ${(budget.partial_nano / 1e9).toFixed(3)} partial lower bound); cap ${budget.configured}; unknown bills ${budget.uncovered_unknown.length}\n` +
     `Research reserved: ${(budget.reserved_nano / 1e9).toFixed(3)}; estimates: ${budget.estimated.toFixed(3)}\n` +
     (observer ? `Separate inspection usage: ${observer.used.toFixed(3)} / ${observer.configured}; reserved ${(observer.reserved_nano / 1e9).toFixed(3)}; estimates ${observer.estimated.toFixed(3)}; unknown bills ${observer.uncovered_unknown.length}` :

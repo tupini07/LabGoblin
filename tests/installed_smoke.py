@@ -1,15 +1,17 @@
 """Installed-wheel acceptance with actual owned trees and a model-free SDK server."""
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
 import sys
 import threading
+import time
 from urllib.request import Request, urlopen
 
 import labgoblin
-from labgoblin import handoffs, ideas, inspector, payload, runtime
+from labgoblin import handoffs, ideas, inspector, payload, runtime, supervisor
 from labgoblin.inspection_evidence import Evidence
 from labgoblin.inspection_server import InspectionServer
 from labgoblin.config import Config
@@ -34,16 +36,19 @@ for name in ("experiment.py", "research_goal.md"):
 metrics = root / "standalone-metrics.json"
 payload.probe([sys.executable, "-I", str(project / "experiment.py"), "--offset", "1", "--output", str(metrics)])
 assert read_json(metrics)["mean"] == 5
-ledger = ResourceLedger.create(root / "machine.db")
-ledger.configure(1, 2048, headroom_mb=512)
-record = runtime.initialize(project, Config(cpus=1, memory_mb=1024, timeout_seconds=60,
-                                           coach=False, max_ai_credits=300, ledger=str(ledger.path),
+ledger_path = root / "machine.db"
+plain = Config(model="auto", reasoning_effort="medium", coach=False, consultant=False, closure_critic=False,
+               coach_model=None, closure_critic_model=None, advice_model=None, claim_review_model=None)
+record = runtime.initialize(project, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=60,
+                                           coach=False, max_ai_credits=300, ledger=str(ledger_path),
                                            archive_workspace=True))
 provider = root / "fixed-copilot.py"
 shutil.copyfile(Path(__file__).with_name("fixed_copilot.py"), provider)
 publish_json(project / "fixture-provider.json", {"model_free": True, "root": str(project)})
 runtime.provider.capabilities = lambda: {"command": [sys.executable, str(provider)]}
 result = runtime.run(project)
+ledger = ResourceLedger(ledger_path)
+assert ledger.capacity() is None
 assert result["status"] == "completed", result
 assert result["usage"]["totalNanoAiu"] == 10_000_000_000
 snapshot = project / ".labgoblin" / "runs" / result["id"] / "snapshot"
@@ -52,11 +57,74 @@ assert read_json(snapshot / "artifacts" / "metrics.json")["python_executable"] =
 assert not (snapshot / ".venv").exists()
 assert runtime.status(project)["budget"]["remaining"] == 290
 assert not ledger.rows()
+checkin_project = root / "checkins"
+runtime.initialize(checkin_project, replace(plain,
+    cpus=1, memory_mb=1024, timeout_seconds=180, coach=True, max_ai_credits=300,
+    goal_review_interval_seconds=1, ledger=str(ledger.path), model="model-free", coach_model="fixture-coach"),
+    goal="Keep a model-free experiment intact while reviewing the original intended use.")
+publish_json(checkin_project / "fixture-provider.json", {
+    "model_free": True, "root": str(checkin_project), "mode": "goal_checkins",
+    "models": ["model-free", "fixture-coach"]})
+checked_in = runtime.run(checkin_project)
+assert checked_in["status"] == "completed", checked_in
+assert checked_in["usage"]["totalNanoAiu"] == 50_000_000_000
+assert [item["role"] for item in checked_in["usage"]["sessions"]] == [
+    "researcher", "goal-review-0", "coach-0", "coach-1"]
+assert [item["prompts"] for item in checked_in["usage"]["sessions"]] == [2, 1, 1, 1]
+assert [item["model"] for item in checked_in["usage"]["sessions"]] == ["model-free"] + ["fixture-coach"] * 3
+observed_checkin = read_json(checkin_project / "fixture-checkin-observed.json")
+assert observed_checkin["experiment_returncode"] == 0
+assert "original intended use" in observed_checkin["feedback"]
+checkin_view = Evidence(checkin_project, runtime.project_record(checkin_project)[2]["id"]).session(
+    {"run": checked_in["id"], "role": "goal-review-0"})
+assert checkin_view["events"] and checkin_view["receipt_verified"] and not checkin_view["live"]
+assert runtime.status(checkin_project)["budget"]["remaining"] == 250
+assert not ledger.rows()
+meeting_project = root / "supervisor-review"
+runtime.initialize(meeting_project, replace(plain,
+    cpus=1, memory_mb=1024, timeout_seconds=180, max_ai_credits=300, ledger=str(ledger.path),
+    supervisor_review=supervisor.Schedule("09:00", "UTC", "2026-01-01")),
+    goal="Retain an experiment and wait for an explicitly reviewed continuation.")
+publish_json(meeting_project / "fixture-provider.json", {
+    "model_free": True, "root": str(meeting_project), "mode": "supervisor_review",
+    "supervisor_mode": "followup_turn"})
+next_appointment = supervisor.Schedule.next_after
+try:
+    supervisor.Schedule.next_after = lambda self, now: time.time() - .1
+    paused = runtime.run(meeting_project)
+finally:
+    supervisor.Schedule.next_after = next_appointment
+assert paused["status"] == "checkpointed" and paused["usage"]["complete"], paused
+assert runtime.status(meeting_project)["supervisor_review"]["state"] == "awaiting_review"
+assert (meeting_project / "fixture-experiment-complete").read_text() == "survived"
+meeting_directory = meeting_project / ".labgoblin" / "runs" / paused["id"]
+assert payload.tree_state(meeting_directory / "process", paused["id"]) == "dead"
+assert (meeting_directory / "supervisor-review" / "response.txt").read_text() == (
+    "Background result retained; ready for review.")
+spent_before = runtime.status(meeting_project)["budget"]["used_nano"]
+candidate = replace(Config.load(meeting_project), supervisor_review=None)
+(meeting_project / "labgoblin.toml").write_text(candidate.toml(), encoding="utf-8")
+try:
+    runtime.run(meeting_project, resume=True)
+except ValueError as error:
+    assert "--reviewed" in str(error), error
+else:
+    raise AssertionError("Removing the schedule bypassed its persistent review hold")
+atomic_json(meeting_project / "fixture-provider.json", {"model_free": True, "root": str(meeting_project)})
+continued = runtime.run(meeting_project, resume=True, reviewed=paused["id"])
+assert continued["status"] == "completed", continued
+meeting_status = runtime.status(meeting_project)
+assert meeting_status["budget"]["used_nano"] > spent_before
+assert meeting_status["supervisor_review"] is None
+assert meeting_status["runs"][-1]["config"]["timeout_seconds"] == 180
+assert (paused["metadata"]["provider"]["sessions"][0]["session_id"]
+        != continued["metadata"]["provider"]["sessions"][0]["session_id"])
+assert not ledger.rows()
 evaluation_kit = root / "evaluation-kit"
 shutil.copytree(example.parent / "evaluation", evaluation_kit,
                 ignore=shutil.ignore_patterns("__pycache__"))
 evaluation_project = root / "evaluation"
-runtime.initialize(evaluation_project, Config(
+runtime.initialize(evaluation_project, replace(plain,
     cpus=1, memory_mb=1024, timeout_seconds=180, coach=True, max_ai_credits=300,
     ledger=str(ledger.path), evaluation_spec=str(evaluation_kit / "spec.json")),
     goal="Distinguish development fit from unseen confirmation and retained regression.")
@@ -87,7 +155,7 @@ role_models = {"model": "model-free", "coach_model": "fixture-coach",
                "claim_review_model": "fixture-review"}
 model_catalog = list(role_models.values())
 consulting = root / "consulting"
-runtime.initialize(consulting, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
+runtime.initialize(consulting, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=180,
                                      coach=True, consultant=True, max_ai_credits=1000, ledger=str(ledger.path),
                                      **role_models),
                    goal="Qualify a model-free research and coach consultation.")
@@ -105,7 +173,7 @@ assert [s["model"] for s in advised["usage"]["sessions"]] == [
     "model-free", "fixture-advice", "fixture-coach", "fixture-advice", "fixture-coach"]
 assert not ledger.rows()
 claim_review = root / "claim-review"
-runtime.initialize(claim_review, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
+runtime.initialize(claim_review, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=180,
                                        coach=True, consultant=True, max_ai_credits=1000, ledger=str(ledger.path),
                                        archive_workspace=True, **role_models),
                    goal="Determine whether x*x-x is nonnegative for all real x.")
@@ -128,18 +196,18 @@ assert claim_decisions[1]["consultations"] == []
 assert not ledger.rows()
 critic_project = root / "closure-critic"
 runtime.initialize(critic_project, Config(cpus=1, memory_mb=1024, timeout_seconds=1800,
-                                         coach=True, consultant=True, closure_critic=True,
                                          max_ai_credits=300, ledger=str(ledger.path),
-                                         archive_workspace=True, **role_models),
+                                         archive_workspace=True),
                    goal="Determine whether x*x-x is nonnegative for all real x.")
 publish_json(critic_project / "fixture-provider.json", {
-    "model_free": True, "root": str(critic_project), "mode": "closure_critic", "models": model_catalog})
+    "model_free": True, "root": str(critic_project), "mode": "closure_critic",
+    "models": ["gpt-6.1-sol", "gpt-6-astra"]})
 critic_result = runtime.run(critic_project)
 assert critic_result["status"] == "completed", critic_result
 assert critic_result["usage"]["totalNanoAiu"] == 70_000_000_000
 assert [s["prompts"] for s in critic_result["usage"]["sessions"]] == [3, 1, 1, 1, 1]
 assert [s["model"] for s in critic_result["usage"]["sessions"]] == [
-    "model-free", "fixture-coach", "fixture-coach", "fixture-critic", "fixture-coach"]
+    "gpt-6.1-sol", "gpt-6-astra", "gpt-6-astra", "gpt-6-astra", "gpt-6-astra"]
 critic_run = critic_project / ".labgoblin" / "runs" / critic_result["id"]
 assert read_json(critic_run / "snapshot" / "artifacts" / "closure-counterexample.json") == {"x": "1/2", "value": "-1/4"}
 assert [read_json(critic_run / f"review-{i}.json")["decision"] for i in range(2)] == ["accept", "accept"]
@@ -150,7 +218,7 @@ critic_view = Evidence(critic_project, runtime.project_record(critic_project)[2]
 assert critic_view["events"] and not critic_view["live"]
 assert not ledger.rows()
 closing = root / "closing"
-runtime.initialize(closing, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
+runtime.initialize(closing, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=180,
                                   coach=True, max_ai_credits=300, ledger=str(ledger.path), archive_workspace=True),
                    goal="Qualify useful work after provisional stopping approval.")
 publish_json(closing / "fixture-provider.json", {"model_free": True, "root": str(closing),
@@ -164,7 +232,7 @@ assert read_json(closing_run / "snapshot" / "artifacts" / "closing-control.json"
 assert [read_json(closing_run / f"review-{index}.json")["decision"] for index in range(2)] == ["accept", "accept"]
 assert not ledger.rows()
 progress = root / "progress"
-runtime.initialize(progress, Config(cpus=1, memory_mb=1024, timeout_seconds=180,
+runtime.initialize(progress, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=180,
                                    coach=True, max_stalled_reviews=2, max_ai_credits=300, ledger=str(ledger.path),
                                    archive_workspace=True),
                    goal="Qualify progress-aware continuation without renewing spending or the closing challenge.")
@@ -183,7 +251,7 @@ assert read_json(progress_run / "snapshot" / "artifacts" / "review-control-3.jso
 assert runtime.status(progress)["budget"]["remaining"] == 200
 assert not ledger.rows()
 stalled = root / "stalled"
-runtime.initialize(stalled, Config(cpus=1, memory_mb=1024, timeout_seconds=120,
+runtime.initialize(stalled, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=120,
                                   coach=True, max_stalled_reviews=2, max_ai_credits=300, ledger=str(ledger.path)),
                    goal="Qualify unfinished checkpoints separately from operator dependencies.")
 publish_json(stalled / "fixture-provider.json", {

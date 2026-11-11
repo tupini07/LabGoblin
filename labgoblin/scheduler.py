@@ -1,4 +1,4 @@
-"""One-time machine grants with nonblocking, cross-campaign drain-to-fit admission."""
+"""One-use local execution claims and accounting, without machine reservations."""
 
 from dataclasses import asdict, dataclass
 import json
@@ -9,11 +9,13 @@ import time
 
 from labgoblin.db import connection
 from labgoblin import credits
+from labgoblin.config import Config
 from labgoblin.paths import machine_ledger_path
 from labgoblin.protocol import (
     LEDGER_VERSION, LaunchEnvelope, LaunchReceipt, Resources, canonical, fingerprint, identifier, integer,
     require_version, text,
 )
+from labgoblin.storage import LockBusy, publish_bytes, run_lock
 
 
 APPLICATION_ID = 0x58474C33
@@ -114,14 +116,13 @@ def sample_machine(gpus: tuple[str, ...] = ()) -> MachineSample:
     memory = psutil.virtual_memory()
     process = psutil.Process()
     cpus = tuple(process.cpu_affinity()) if hasattr(process, "cpu_affinity") else tuple(range(os.cpu_count() or 1))
-    visible, busy = set(), set()
+    visible = set()
     if gpus:
         from labgoblin.payload import probe
-        for query, target in (("--query-gpu=uuid", visible), ("--query-compute-apps=gpu_uuid", busy)):
-            output = probe(["nvidia-smi", query, "--format=csv,noheader"], timeout=10)
-            target.update(line.strip() for line in output.splitlines() if line.strip())
+        output = probe(["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"], timeout=10)
+        visible.update(line.strip() for line in output.splitlines() if line.strip())
     return MachineSample(cpus, memory.total // (1024 * 1024), memory.available // (1024 * 1024),
-                         frozenset(visible), frozenset(busy),
+                         frozenset(visible), frozenset(),
                          os.name != "nt" or ((os.cpu_count() or 1) <= 64 and all(cpu < 64 for cpu in cpus)))
 
 
@@ -187,47 +188,34 @@ class ResourceLedger:
     def write(self):
         return connection(self.path, write=True)
 
-    def configure(self, cpus: int, memory_mb: int, gpus: tuple[str, ...] = (), headroom_mb: int = 2048):
-        resources = Resources(cpus, memory_mb, tuple(gpus))
-        integer(headroom_mb, "headroom_mb", zero=True)
-        sample = self.sampler(resources.gpus)
-        if cpus > len(sample.cpus) or memory_mb + headroom_mb > sample.total_mb:
-            raise ValueError("Machine capacity and headroom exceed observed physical capacity")
-        if not set(resources.gpus).issubset(sample.visible_gpus):
-            raise ValueError("Configured physical GPUs are not visible")
-        with self.write() as conn:
-            if conn.execute("SELECT 1 FROM grants WHERE state='granted'").fetchone():
-                raise ValueError("Cannot reconfigure capacity while an allocation is granted or uncertain")
-            old = conn.execute("SELECT revision FROM capacity WHERE id=1").fetchone()
-            revision = old[0] + 1 if old else 1
-            conn.execute("""INSERT INTO capacity(id,revision,cpus,memory_mb,gpus,headroom_mb,native_cpus,placement_supported)
-                VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-                revision=excluded.revision,cpus=excluded.cpus,memory_mb=excluded.memory_mb,
-                gpus=excluded.gpus,headroom_mb=excluded.headroom_mb,native_cpus=excluded.native_cpus,
-                placement_supported=excluded.placement_supported""",
-                         (revision, cpus, memory_mb, canonical(resources.gpus).decode(), headroom_mb,
-                          canonical(sample.cpus).decode(), int(sample.placement_supported)))
+    @classmethod
+    def ensure(cls, path: str | Path):
+        """Create only for explicit admission; never recreate a bound, missing ledger."""
+        path = Path(path).absolute()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path = path.parent.resolve(strict=True) / path.name
+        lock = path.with_name(path.name + ".init.lock")
+        try:
+            publish_bytes(lock, b"\0")
+        except FileExistsError:
+            pass
+        until = time.monotonic() + 30
+        while True:
+            try:
+                with run_lock(lock, owner="ledger initializer"):
+                    return cls(path) if path.exists() else cls.create(path)
+            except LockBusy:
+                if time.monotonic() >= until:
+                    raise
+                time.sleep(0.05)
 
-    @staticmethod
-    def _capacity(conn) -> dict:
-        row = conn.execute("SELECT * FROM capacity WHERE id=1").fetchone()
-        if row is None:
-            raise ValueError("Machine capacity is not configured; use machine configure explicitly")
-        return dict(row)
-
-    def capacity(self) -> dict:
+    def capacity(self) -> dict | None:
+        """Historical settings only; new execution admission never consults them."""
         with self.read() as conn:
-            return self._capacity(conn)
+            row = conn.execute("SELECT * FROM capacity WHERE id=1").fetchone()
+            return dict(row) if row else None
 
-    @staticmethod
-    def _validate(resources: Resources, capacity: dict, native: bool):
-        if (resources.cpus > capacity["cpus"] or resources.memory_mb > capacity["memory_mb"]
-                or not set(resources.gpus).issubset(json.loads(capacity["gpus"]))):
-            raise ValueError("Resource request cannot fit configured machine capacity")
-        if native and not capacity["placement_supported"]:
-            raise ValueError("Native CPU placement is unsupported on this processor topology")
-
-    def request(self, token: str, owner_id: str, work_id: str, kind: str, resources: Resources,
+    def request(self, token: str, owner_id: str, work_id: str, kind: str, config: Config,
                 owner: dict, *, native: bool) -> dict:
         for label, value in (("token", token), ("owner_id", owner_id), ("work_id", work_id), ("kind", kind)):
             text(value, label)
@@ -237,90 +225,38 @@ class ResourceLedger:
         if (not isinstance(handle, dict) or type(handle.get("pid")) is not int
                 or type(handle.get("created")) not in (int, float) or handle.get("token") != owner_id):
             raise ValueError("Research owner requires an exact PID, creation time and project identity")
-        request = {"owner_id": owner_id, "work_id": work_id, "kind": kind,
-                   "resources": asdict(resources), "owner": owner, "native": native}
+        sample = self.sampler(config.gpus)
+        cpus = len(sample.cpus) if config.cpus == "unlimited" else config.cpus
+        memory_mb = sample.total_mb if config.memory_mb == "unlimited" else config.memory_mb
+        resources = Resources(cpus, memory_mb, config.gpus)
+        if cpus > len(sample.cpus) or memory_mb > sample.total_mb:
+            raise ValueError("Local CPU/RAM limits exceed observed physical capacity")
+        if config.cpus != "unlimited" and not sample.placement_supported:
+            raise ValueError("Native CPU placement is unsupported; use cpus = \"unlimited\"")
+        if not set(config.gpus).issubset(sample.visible_gpus):
+            raise ValueError("Selected physical GPUs are not visible")
+        intent = {"owner_id": owner_id, "work_id": work_id, "kind": kind,
+                  "config": config.to_dict(), "owner": owner, "native": native, "policy": "local"}
+        request = {**intent, "resources": asdict(resources), "cpu_ids": sorted(sample.cpus)[:cpus]}
         digest = fingerprint(request)
+        eligible, reason = self.eligibility({"owner": canonical(owner).decode()})
+        if not eligible:
+            raise ValueError(f"Execution admission unavailable: {reason}")
         with self.write() as conn:
             old = conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone()
             if old:
-                if old["owner_id"] != owner_id or (old["digest"] != digest and old["digest"]):
+                previous = json.loads(old["request"])
+                if (old["owner_id"] != owner_id or fingerprint(previous) != old["digest"] or
+                        any(previous.get(key) != value for key, value in intent.items())):
                     raise ValueError("Allocation token already belongs to a different request")
                 return dict(old)
-            self._validate(resources, self._capacity(conn), native)
+            # Never publish a pending zero-resource row for legacy schedulers to evaluate.
+            now = time.time()
             conn.execute("""INSERT INTO grants(
-                token,owner_id,work_id,kind,owner,request,digest,cpus,memory_mb,gpus,native,state,created)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)""",
+                token,owner_id,work_id,kind,owner,request,digest,cpus,memory_mb,gpus,native,state,created,granted)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,'granted',?,?)""",
                          (token, owner_id, work_id, kind, canonical(owner).decode(), canonical(request).decode(),
-                          digest, resources.cpus, resources.memory_mb, canonical(resources.gpus).decode(),
-                          int(native), time.time()))
-            return dict(conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone())
-
-    def reserve(self, token: str) -> dict:
-        capacity = self.capacity()
-        with self.read() as conn:
-            requested = conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone()
-            if not requested:
-                raise ValueError("Unknown allocation token")
-            if requested["state"] != "pending":
-                return dict(requested)
-            candidates = [dict(r) for r in conn.execute(
-                "SELECT * FROM grants WHERE state='pending' ORDER BY eligible DESC,sequence LIMIT 256")]
-            if all(row["token"] != token for row in candidates):
-                candidates.append(dict(requested))
-        eligibility = {row["token"]: self.eligibility(row) for row in candidates}
-        sample = self.sampler(tuple(json.loads(capacity["gpus"])))
-        with self.write() as conn:
-            current = self._capacity(conn)
-            requested = conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone()
-            if requested["state"] != "pending":
-                return dict(requested)
-            if current["revision"] != capacity["revision"]:
-                conn.execute("UPDATE grants SET reason='Capacity changed during observation; retry admission' WHERE token=?",
-                             (token,))
-                return dict(conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone())
-            for candidate, (eligible, reason) in eligibility.items():
-                conn.execute("UPDATE grants SET eligible=?,reason=? WHERE token=? AND state='pending'",
-                             (int(eligible), reason, candidate))
-            pending = list(conn.execute("SELECT * FROM grants WHERE state='pending' AND eligible=1 ORDER BY sequence"))
-            valid = []
-            for row in pending:
-                try:
-                    self._validate(Resources(row["cpus"], row["memory_mb"], tuple(json.loads(row["gpus"]))),
-                                   current, bool(row["native"]))
-                except ValueError as error:
-                    conn.execute("UPDATE grants SET state='rejected',reason=? WHERE token=?", (str(error), row["token"]))
-                else:
-                    valid.append(row)
-            target = next((row for row in valid if row["token"] == token), None)
-            if target is None:
-                return dict(conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone())
-            active = list(conn.execute("SELECT cpus,memory_mb,gpus,native_cpus FROM grants WHERE state='granted'"))
-            used_cpus = sum(row["cpus"] for row in active)
-            used_mb = sum(row["memory_mb"] for row in active)
-            used_gpus = {gpu for row in active for gpu in json.loads(row["gpus"])} | set(sample.busy_gpus)
-            used_native = {cpu for row in active for cpu in json.loads(row["native_cpus"])}
-            eligible_cpus = sorted(set(json.loads(current["native_cpus"])) & set(sample.cpus) - used_native)
-            barrier = valid[0]
-            held_cpus = barrier["cpus"] if barrier["token"] != token else 0
-            held_mb = barrier["memory_mb"] if barrier["token"] != token else 0
-            barrier_gpus = set(json.loads(barrier["gpus"])) if barrier["token"] != token else set()
-            target_gpus = set(json.loads(target["gpus"]))
-            fits = (used_cpus + target["cpus"] + held_cpus <= current["cpus"]
-                    and used_mb + target["memory_mb"] + held_mb <= current["memory_mb"]
-                    and used_mb + target["memory_mb"] + held_mb + current["headroom_mb"] <= sample.available_mb
-                    and not target_gpus.intersection(used_gpus | barrier_gpus)
-                    and target_gpus.issubset(sample.visible_gpus)
-                    and (not target["native"] or len(eligible_cpus) >= target["cpus"]
-                         + (held_cpus if barrier["native"] else 0)))
-            if fits:
-                selected = eligible_cpus[:target["cpus"]] if target["native"] else []
-                conn.execute("""UPDATE grants SET state='granted',granted=?,native_cpus=?,reason=''
-                    WHERE token=? AND state='pending'""", (time.time(), canonical(selected).decode(), token))
-            else:
-                reason = ("Waiting for oldest eligible request to drain-to-fit"
-                          if barrier["token"] != token else
-                          "Waiting for CPU/RAM/GPU capacity or conservative available-RAM headroom")
-                conn.execute("UPDATE grants SET reason=? WHERE token=?", (reason, token))
+                          digest, 0, 0, "[]", int(native), now, now))
             return dict(conn.execute("SELECT * FROM grants WHERE token=?", (token,)).fetchone())
 
     def release(self, token: str, *, owner_id: str):
@@ -350,7 +286,6 @@ class ResourceLedger:
             return dict(row) if row else None
 
     def arm_consumer(self, envelope, *, adjustments=None, inspection=False):
-        from labgoblin.config import Config
         config = Config.parse(envelope.config, frozen=True)
         kind = "inspection-run" if inspection else "research-run"
         if inspection and (config.coach or config.consultant or config.gpus or config.credit_limit is None):
@@ -362,13 +297,17 @@ class ResourceLedger:
             raise ValueError("Execution directory must belong to its exact project and grant")
         with self.write() as conn:
             grant = conn.execute("SELECT * FROM grants WHERE token=?", (envelope.id,)).fetchone()
+            request = json.loads(grant["request"]) if grant else {}
             if (not grant or grant["state"] != "granted" or grant["owner_id"] != envelope.project_id
                     or grant["work_id"] != envelope.id or grant["kind"] != kind or not grant["native"]
                     or json.loads(grant["owner"]) != {"kind": kind, "handle": envelope.launcher}
-                    or grant["cpus"] != envelope.resources.cpus or grant["memory_mb"] != envelope.resources.memory_mb
-                    or json.loads(grant["gpus"]) != list(envelope.resources.gpus)
-                    or json.loads(grant["native_cpus"]) != list(envelope.cpu_ids)):
-                raise ValueError("Research authorization differs from its machine grant")
+                    or request.get("policy") != "local" or fingerprint(request) != grant["digest"]
+                    or request["config"] != config.to_dict()
+                    or Resources.parse(request["resources"]) != envelope.resources
+                    or request["cpu_ids"] != list(envelope.cpu_ids)
+                    or grant["cpus"] != 0 or grant["memory_mb"] != 0
+                    or json.loads(grant["gpus"]) or json.loads(grant["native_cpus"])):
+                raise ValueError("Research authorization differs from its execution grant")
             old = conn.execute("SELECT digest FROM consumer_runs WHERE token=?", (envelope.id,)).fetchone()
             if old:
                 raise ValueError("A research grant is one-use and was already armed")

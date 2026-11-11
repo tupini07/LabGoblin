@@ -30,8 +30,18 @@ and a persisted allowance outside the evaluated research project.
   program unless the operator requests them; methods and sequencing are researcher-owned.
 - One persistent ordinary researcher owns scientific choices and working files.
   A coach can inspect evidence and ask a concrete stopping question; it cannot
-  prescribe a workflow or edit research. Only an explicitly enabled host-owned
-  consultation tool may start a read-only adviser, never arbitrary agents.
+  prescribe a workflow or edit research. Only an enabled host-owned consultation
+  or frozen timed goal-review hook may start a read-only adviser, never arbitrary agents.
+  Timed reviews use the coach model, are nonbinding and do not reset context,
+  add researcher prompts or affect stopping-review counters. Defer to an awaited
+  tool boundary; never interrupt experiments to obtain a review. Coalesce missed
+  intervals and retain explicit delivery limits, not a guarantee of saved work.
+- Opt-in calendar supervisor meetings request a cooperative checkpoint, then hold
+  for explicit receipt-bound human continuation. Idle alone is not quiescence:
+  settle SDK tasks/follow-ups and non-control native descendants before shutdown.
+  Unknown work is not finished; cancellation, deadlines, failures and billing
+  retain precedence. No automatic review call or restart. Continuation uses a
+  fresh conversation, retained files, cumulative credits and the full timeout.
 - Research guidance is continuation-first: investigate, examine evidence, choose
   and perform the next useful investigation. Reports and answered objections are
   checkpoints, not endpoints. Keep closing-protocol details with reviewers, not
@@ -59,15 +69,24 @@ and a persisted allowance outside the evaluated research project.
   preserves legacy permissions, never a silent upgrade. Freeze exact authority
   and scientific interpreter at admission; use it for both paired-evaluation
   sides while leaving host control code in the harness environment.
-- Optional coach, closure-critic, advice and claim-review model overrides inherit
-  the campaign model independently, never the caller's override. Select advisers
+- New candidate configurations enable coaching, consultation/claim review and
+  dependent closing criticism, with Sol/high research and Astra/high reviews.
+  Keep explicit opt-outs and historical frozen defaults. An omitted critic follows
+  its prerequisites; an explicit invalid combination fails. Model overrides set
+  to `"inherit"` follow the campaign model independently, never the caller's override. Select advisers
   by explicit purpose, not their `consult-N` operational name. Preserve the same
   configured coach model in a fresh adjudicator session, common effort and one pool.
   Fail unavailable or incompatible selections explicitly; retain applied model
   attribution outside bounded events. No researcher rotation or implicit role enablement.
-- Resource grants and supervisor claims are one-use. Observe/probe outside ledger
+- Execution grants and supervisor claims are one-use. Observe/probe outside ledger
   writer transactions. Unknown ownership is not death, unused budget, permission
   to release, or permission to retry. Never impersonate an observer/build.
+- New executions share local hardware without capacity provisioning, global
+  CPU/RAM reservations or exclusive GPU admission. Optional per-run CPU/RAM caps
+  default to `"unlimited"`; GPU permission/device selection stays explicit.
+  Keep ownership/cleanup/deadlines even when uncapped. Zero shared resource
+  counters prevent old schedulers from mistaking local limits for reservations;
+  preserve their existing capacity/grants and all financial accounting.
 - The shared ledger and its exchange envelope stay v3-readable for existing
   installed consumers. Private execution format 4 is verified inside that
   envelope. Configuration/project format 5 has no campaign database or migration.
@@ -83,7 +102,7 @@ and a persisted allowance outside the evaluated research project.
   cumulative research project pool. Independent inspection has a separately
   authorized cumulative pool; never borrow research allowance for chat.
   Limit updates reassign only observed remaining allowance at idle boundaries
-  or inside the exact host-owned consultation callback that blocks its caller;
+  or inside the exact host-owned consultation/check-in callback that blocks its caller;
   they never renew an exhausted session or reset usage.
 - Optional consultations have no independent credit quota. Before adviser
   admission, reduce the blocked caller's ceiling to its observed usage plus
@@ -97,7 +116,7 @@ and a persisted allowance outside the evaluated research project.
   A coach must await an active consultation before deciding. Review arguments,
   not reviewer agreement; preserve scope/coverage and return objections to the
   same researcher. No compulsory review on every stop or proof-certification claim.
-  Explicit closure_critic mode is the exception for discretionary final acceptance:
+  Enabled closure_critic mode is the exception for discretionary final acceptance:
   retain the proposal, independently challenge it, deliver the critique to the
   persistent researcher, then require fresh read-only adjudication. The proposing
   coach never decides its own objection. Required corrections route to research;
@@ -113,8 +132,10 @@ and a persisted allowance outside the evaluated research project.
   use more available time but must leave the adjudicator's ten-minute reserve.
   Preserve bounded individual evidence payloads and protected caller allowance.
   Return unused critic funding only after settlement. Ordinary advice and claim
-  reviews have a 30-minute maximum within the campaign deadline, including
-  shutdown; their evidence-count limits remain unchanged. Unlimited campaigns
+  reviews default to a 60-minute maximum; timed goal reviews default to 30 minutes.
+  Their configured ceilings include shutdown and cannot extend the campaign
+  deadline; timed reviews also leave its checkpoint window. Old frozen omissions keep the
+  historical 30/15-minute limits; evidence-count limits remain unchanged. Unlimited campaigns
   impose no hidden adviser credit quota either.
   Keep routine countdowns, balances and effort forecasts out of model-facing
   guidance. The host enforces limits and exposes actionable refusals/checkpoints.

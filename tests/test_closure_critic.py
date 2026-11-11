@@ -153,9 +153,9 @@ def test_failed_allowance_return_never_starts_adjudication(project, ledger, monk
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 50 * credits.NANO
 
 
-def test_opt_in_configuration_and_init_surface():
-    assert Config().closure_critic is False
-    for values in ({}, {"coach": True}, {"consultant": True}):
+def test_default_critic_and_explicit_configuration_dependencies():
+    assert Config().closure_critic is True
+    for values in ({"coach": False, "consultant": False}, {"coach": False}, {"consultant": False}):
         with pytest.raises(ValueError, match="requires both"):
             Config(closure_critic=True, **values)
     config = Config(coach=True, consultant=True, closure_critic=True)

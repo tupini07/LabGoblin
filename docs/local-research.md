@@ -56,8 +56,7 @@ The recorded authority and interpreter are frozen for each newly admitted
 execution; historical prompts, receipts and running installations are unchanged.
 
 ```powershell
-labgoblin init .\research --goal-file .\question.md --model auto --credits 1000
-labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
+labgoblin init .\research --goal-file .\question.md --credits 1000
 labgoblin run .\research
 ```
 
@@ -83,10 +82,13 @@ reference useful versions; no fixed cadence or automatic commits/pushes are impo
 Ignored/untracked data needs its own retention, and a local repository is not an
 independent backup. Missing commit identity can be configured repository-locally.
 
-Machine configuration is a separate explicit action. It cannot replace or
-reconfigure capacity while a grant is held or uncertain. Use the same machine
-ledger for cooperating consumers; pointing a project at a second ledger is not a
-way to bypass existing reservations.
+No machine-capacity configuration is required. The first explicit run creates an
+absent execution/accounting ledger; initialization and status reads do not.
+Projects share hardware under normal OS scheduling, without whole-session
+reservations or an idle-GPU prerequisite. Concurrent work can contend for CPU,
+RAM and GPU memory; optional local limits do not guarantee capacity is available.
+`machine status` reads execution claims and labels retained capacity settings
+historical. Old installed executions and their reservations are left unchanged.
 
 ## Configuration
 
@@ -94,26 +96,42 @@ The default configuration is flat TOML:
 
 ```toml
 version = 5
-model = "auto"
-reasoning_effort = "medium"
+model = "gpt-6.1-sol"
+reasoning_effort = "high"
 max_ai_credits = 1000
 timeout_seconds = 5400
-cpus = 2
-memory_mb = 4096
+cpus = "unlimited"
+memory_mb = "unlimited"
 gpus = []
-coach = false
+coach = true
+goal_review_interval_seconds = 10800
+goal_review_timeout_seconds = 1800
 max_stalled_reviews = 10
-consultant = false
-closure_critic = false
+consultant = true
+consultation_timeout_seconds = 3600
+closure_critic = true
+coach_model = "gpt-6-astra"
+closure_critic_model = "gpt-6-astra"
+advice_model = "gpt-6-astra"
+claim_review_model = "gpt-6-astra"
 ledger = ""
 max_snapshot_bytes = 68719476736
 archive_workspace = false
 max_event_log_bytes = 8589934592
 ```
 
-Coaching is opt-in (`init --coach` or `coach = true`). `model` and
-`reasoning_effort` are passed to Copilot. Choose an explicit model for
-matched evaluations. The SDK transport and ordinary researcher tools remain the
+Coaching, consultations/claim review and independent closing criticism default on.
+Use `init --no-coach --no-consultant` for research alone, or
+`init --no-closure-critic` to keep coaching and advice without closing criticism.
+Disabling either prerequisite at init also disables the default critic; explicitly
+requesting `--closure-critic` without both prerequisites fails before creating files.
+For an existing TOML, set `closure_critic = false` when disabling either prerequisite.
+Omitted candidate settings use the new defaults at the next execution. Explicit
+settings remain respected, and historical frozen records keep their old defaults;
+upgrading never rewrites configuration or changes an active execution.
+
+`model` and `reasoning_effort` are passed to Copilot; the default research profile
+is `gpt-6.1-sol` / `high`. The SDK transport and ordinary researcher tools remain the
 same with coaching on or off. Skills, extensions, MCP servers, automatic custom
 instruction discovery, memory, scheduled prompts and unrestricted nested agents are disabled;
 the reviewed project instructions are supplied explicitly.
@@ -128,16 +146,17 @@ The view-only inspector's **Paired evaluation checks** button and
 `evaluations PROJECT --run RUN_ID [--check CHECK_ID] [--offset N]` read the same
 qualified evidence. Neither command executes the evaluator or buys model calls.
 
-Four optional model overrides apply to fresh review sessions:
+Four model presets default to `gpt-6-astra` for fresh review sessions:
 
 | Setting | Session selected |
 |---|---|
-| `coach_model` | Every stopping coach and fresh closure adjudicator. |
+| `coach_model` | Every stopping coach, timed goal reviewer and fresh closure adjudicator. |
 | `closure_critic_model` | The host-triggered adversarial closure critic. |
 | `advice_model` | A consultation with omitted purpose or `purpose="advice"`. |
 | `claim_review_model` | A consultation with `purpose="claim_review"`. |
 
-For example, after enabling the required roles:
+For example, customize the coach while explicitly inheriting the researcher
+model for ordinary advice and claim review:
 
 ```toml
 model = "gpt-6.1-sol"
@@ -147,12 +166,16 @@ consultant = true
 closure_critic = true
 coach_model = "claude-opus-5.5"
 closure_critic_model = "gpt-6-astra"
+advice_model = "inherit"
+claim_review_model = "inherit"
 ```
 
 This is a configuration example, not a claim that these models are available to
-every account or that mixing them improves scientific quality. Omitted advice and
-claim-review overrides inherit `gpt-6.1-sol`, even when the requesting coach uses
-Opus. Remove an override to inherit again; empty strings are invalid. The matching
+every account or that mixing them improves scientific quality. In this example,
+advice and claim review inherit `gpt-6.1-sol`, even when the requesting coach uses
+Opus. Use `"inherit"` to follow `model`; omitting a preset selects Astra, and empty
+strings are invalid. The Python configuration API also accepts `None` for inheritance,
+serialized explicitly as `"inherit"` so it survives saving and reloading. The matching
 initialization options are `--coach-model`, `--closure-critic-model`,
 `--advice-model` and `--claim-review-model`. Setting an override does not enable
 its role or create any additional session.
@@ -178,14 +201,17 @@ researcher rotation. These settings do not affect the independently configured
 inspector or change limits, permissions, review counts or cumulative accounting.
 
 `max_ai_credits` is cumulative across all executions of this project. Use at least
-30 credits without coaching or at least 60 with coaching. `"unlimited"` explicitly
+90 credits for the default support combination, 60 for coaching-only or
+consultation-only, or 30 with both disabled. `"unlimited"` explicitly
 removes the cap; zero does not. The cap is post-response and therefore soft.
 There are no separate coach, task or report budgets within research. The independent
 inspector has its own explicit allowance; research configuration does not enable it.
-Consultations are also opt-in (`init --consultant` or `consultant = true`).
+Consultations are enabled by default (`init --no-consultant` disables them).
 They require at least 60 remaining credits without coaching or 90 with coaching.
-Omitting the new optional flag in a format-5 configuration keeps it disabled;
-already-frozen configurations and receipts are not rewritten.
+Review sessions share this allowance, not a separate or increased budget; they can
+consume a substantial share without guaranteeing scientific validity.
+Missing role flags in historical frozen format-5 records remain disabled, and
+missing model presets there still inherit the historical campaign model.
 
 `timeout_seconds` is the finite deadline for the entire owned execution, including
 the persistent researcher, optional reviews, consultations, continuation and shutdown. It must
@@ -208,13 +234,108 @@ and inconsequential artifacts do not qualify. This is a fallible review judgment
 not a machine-certified progress metric. `init --max-stalled-reviews` sets it for
 a new project; editing TOML takes effect only on a new execution.
 
-CPU placement and RAM admission cover the owned provider/experiment process
-tree. On Windows, an assigned Job Object enforces CPU affinity and job RAM before
-the suspended payload resumes. On Linux, affinity and monitored process-session
-RSS are used; RSS monitoring is not a kernel-hard memory quota. Linux requires
-pidfd support for identity-safe shutdown. CUDA-visible GPU IDs must be explicitly
-configured, visible and unoccupied at admission. This coordinates cooperating
-consumers, not every process or user on the machine.
+`goal_review_interval_seconds` is a nonnegative integer, defaulting to 10800
+(three hours). With coaching enabled, a fresh advisory coach can inspect the
+original intended use, recent actual researcher events and ordinary evidence.
+It returns one or two observations/questions, not a method prescription or stop
+vote. The researcher may adopt, adapt or reject them; productive depth and staying
+the course remain legitimate. No status report, commit format or separate reply
+is required. Set `0` to disable these reviews without disabling stopping coaching.
+
+The host checks elapsed time at an awaited pre-tool boundary, without sending
+another researcher prompt, resetting its context or aborting running experiments.
+Intervals coalesce rather than accumulating missed meetings. Active consultation
+or paired evaluation defers a review. Each review defaults to at most thirty
+minutes (`goal_review_timeout_seconds = 1800`), including shutdown, inside the
+original deadline and shared research credit pool. The researcher waits at that
+tool boundary until the review finishes; a larger ceiling does not require using it.
+It needs enough remaining allowance for the caller response and stopping review;
+unavailable advice is explicit, never a successful review. Goal reviews do not
+increment or reset `max_stalled_reviews` and do not run during a closing-critique response.
+
+New executions also receive one best-effort checkpoint reminder at a tool boundary,
+up to fifteen minutes (ten percent for shorter runs) before shutdown grace begins,
+even with coaching disabled. Preserve completed/partial work, useful pointers,
+reasons for setting work aside and resume instructions rather than rushing every
+branch to completion. A long tool or uninterrupted reasoning can delay either
+notice past the deadline: delivery and saved work are not guaranteed. Neither
+notice extends limits or authorizes another execution. Existing frozen executions
+retain their original behavior; config edits and upgrades affect only new runs.
+
+### Scheduled supervisor meetings
+
+Human review meetings are separate from automatic advisory coaching. They are
+off unless the following table is added to `labgoblin.toml`, for example:
+
+```toml
+[supervisor_review]
+time = "09:00"
+timezone = "America/Los_Angeles"
+start_date = "2026-11-10"
+every_days = 2
+```
+
+Use an explicit IANA timezone, `HH:MM` local time, date anchor and positive
+integer day interval (`1` for daily). Windows installs the declared `tzdata`
+dependency. An ambiguous autumn time occurs only once, at its first occurrence;
+a nonexistent spring time moves forward to the first valid local minute.
+Each new execution freezes the next strictly future appointment. Missed meetings
+coalesce: a later explicit continuation chooses the next future appointment,
+not a backlog of overdue meetings. Editing TOML cannot alter a running appointment.
+
+The appointment requests a checkpoint, not a cancellation. A prompt or the next
+awaited tool boundary asks the researcher to stop starting new investigations,
+finish or safely checkpoint existing experiments, and retain ordinary resume
+pointers. The harness waits for the response, tracked SDK tasks and their
+automatic follow-up turns, and owned experimental processes to settle before
+closing the execution. A successful scheduled hold returns `checkpointed` with
+`checkpoint_reason = "supervisor_review"` and exit code zero; it is not scientific
+completion. An idle message alone is insufficient. Unknown process/task state
+cannot count as quiescence. Existing cancellation, failures, credit limits and
+the hard deadline still apply and can interrupt wrap-up; no allowance is extended.
+Notice delivery and useful scientific checkpoint contents are not guaranteed.
+
+`status` and the inspector distinguish a scheduled appointment, pending request,
+wrap-up/waiting work, settled `awaiting_review`, and interrupted wrap-up. No research
+continues while the human is absent. Use the existing inspector to examine results,
+limitations and next questions; chat still needs its separate approved allowance.
+With full archival disabled, explicitly select **Current workspace** to read
+mutable files rather than treating them as a historical snapshot. Discussion does
+not steer research; publish any chosen suggestion explicitly through the ideas inbox.
+
+After review, use the exact execution ID shown by status:
+
+```powershell
+labgoblin run --resume --reviewed RUN_ID
+```
+
+The acknowledgment binds that execution's settled receipt. Plain `--resume`,
+a stale ID, inspector discussion or removing the schedule cannot bypass an
+existing hold. Admission consumes the acknowledgment even if the new execution
+later proves not started; an unarmed preparation does not. Existing explicit
+restart semantics remain: a fresh conversation uses retained files, cumulative
+credits do not reset, and the full configured execution timeout applies. The
+schedule neither starts research nor grants permission for additional spending,
+automatic continuation or a paid review.
+
+### Local resources and retention
+
+`cpus` and `memory_mb` accept a positive integer or `"unlimited"` independently.
+Existing numeric settings retain their limits. With no limit, the harness adds
+no affinity, thread-count hint or RAM cap. Finite limits cover the owned
+provider/experiment process tree, not unrelated applications. On Windows, a
+Job Object applies CPU affinity and aggregate committed-memory limits before
+the suspended payload resumes. CPU affinity is not a percentage throttle or an
+exclusive core reservation. On Linux, affinity and monitored process-session RSS
+are used; RSS monitoring is not a kernel-hard memory quota. Linux requires pidfd
+support for identity-safe shutdown. Ownership and tree cleanup remain mandatory
+even without CPU/RAM caps.
+
+CUDA-visible GPU UUIDs must be explicitly configured and visible, but may already
+be in use. The harness does not reserve GPUs or cap VRAM/utilization. Visibility
+is a cooperative environment restriction, not a hostile-code isolation boundary.
+An empty `gpus` list keeps CUDA devices hidden. GPU permission never implies
+permission for hosted/remote compute or additional model services.
 
 `ledger = ""` selects the normal local machine ledger, or the explicit
 `LABGOBLIN_RESOURCE_DB` override. The first run records its exact path and
@@ -366,7 +487,8 @@ dataset contents or secrets. Native execution and content-disclosure rules are
 trusted policy, not a hostile-agent sandbox or general secret detector.
 
 Calls are one at a time, without a background queue or recursion. Each ordinary
-advice or claim-review call allows at most 30 minutes including shutdown,
+advice or claim-review call defaults to at most 60 minutes including shutdown
+(`consultation_timeout_seconds = 3600`),
 128 evidence reads, 16 KiB text pages (16384 characters for web pages), and a
 16 KiB final brief. The original execution
 deadline and cancellation always take precedence. The researcher retains its
@@ -374,6 +496,15 @@ ordinary coding tools; neither the adviser nor coach receives a shell.
 The time limit is a ceiling, not a target duration. Existing executions retain
 their frozen adviser policy; the longer limit requires an updated runtime for
 a new execution.
+
+`init --consultation-timeout` and `init --goal-review-timeout` set these ceilings
+in seconds for a new project. Both fields accept finite numeric seconds (at least
+60, including shutdown) or arithmetic expressions in TOML, such as `"60 * 60"`.
+Editing them requires a new execution; omitted fields in old frozen records
+retain the historical 30-minute consultation and 15-minute goal-review limits.
+New candidate configurations with omitted fields use the longer defaults.
+These settings do not change the campaign timeout, credit pool, check-in cadence,
+closing critic's two-hour ceiling or SDK/final-billing timeouts.
 
 There is no separate adviser credit quota. While the caller is blocked on its
 owned consultation tool, the harness reduces its cumulative ceiling to observed
@@ -428,7 +559,7 @@ Selection and scientific judgment are model-guided, not a deterministic proof
 checker or a mandatory additional call on every stop. The host does enforce
 request shape, the read-only tool boundary, settling an active consultation before
 recording a stopping decision, ownership and existing accounting. No new budget,
-review loop, automatic restart or default enablement is introduced. With the
+review loop or automatic restart is introduced by a claim-review request. With the
 consultant disabled, no adviser is invoked. Failed or inconclusive reviews remain
 explicit limitations, not approval or a new `needs_operator` escape hatch.
 
@@ -440,8 +571,9 @@ not evidence that all scientific avenues have been exhausted.
 ### Adversarial closure criticism
 
 `closure_critic = true` requires both `coach = true` and `consultant = true`.
-For fresh projects use `init --coach --consultant --closure-critic`. It defaults
-off, including in old frozen format-5 records. Enable it before a new execution;
+It defaults on when both prerequisites are enabled; use `init --no-closure-critic`
+or explicit `closure_critic = false` to disable it. Missing flags in old frozen
+format-5 records remain off. Configuration changes require a new execution;
 resuming preserves cumulative spending and the completed execution's evidence.
 
 The initial neutral challenge and ordinary coach continuations are unchanged.
@@ -589,7 +721,7 @@ They live under the external inspection directory's `.labgoblin\handoffs`, not
 in the research workspace. Each restart adds another execution entry; old reports
 and original research receipts never change. Reading history does not call a model.
 
-Insufficient inspection funds/capacity, changed approval, missing evidence,
+Insufficient inspection funds, failed local admission, changed approval, missing evidence,
 unknown spending and report failures remain explicit. They never turn research
 success into failure or restart research. There is no automatic retry; repeated
 requests for an attempted run return its retained result. If a crash prevented
@@ -619,9 +751,9 @@ Windows, or `~/.local/state/labgoblin/inspections/PROJECT_ID` on Linux.
 The printed location is authoritative. They are not injected into researcher
 context or research snapshots. Only explicitly published idea files and their
 attribution cross into the research workspace. The deterministic inspection owner shares the
-project's machine ledger but not its research credit pool. Admission requires
-one CPU and 1024 MiB without interrupting research; unavailable capacity is an
-explicit error. Each question has a finite deadline, at least 60 seconds,
+project's execution ledger but not its research credit pool. Inspection keeps
+local limits of one CPU and 1024 MiB, without reserving them or interrupting research.
+Each question has a finite deadline, at least 60 seconds,
 including shutdown. The default is five minutes.
 
 Use the exact printed `http://127.0.0.1:PORT/#TOKEN` URL. The token stays in the

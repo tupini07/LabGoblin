@@ -15,7 +15,7 @@ from labgoblin import closing, credits, guidance, payload, provider, research_en
 from labgoblin.config import Config
 from labgoblin.processes import background_options, bound_diagnostics, own_handle, process_state
 from labgoblin.protocol import (
-    CONFIG_VERSION, LaunchEnvelope, LaunchReceipt, UncertainExecution, boolean, identifier, integer,
+    CONFIG_VERSION, LaunchEnvelope, LaunchReceipt, Resources, UncertainExecution, boolean, identifier, integer,
     number, require_version, table, text,
 )
 from labgoblin.scheduler import ResourceLedger
@@ -181,7 +181,7 @@ def bound_ledger(state, *, config=None, bind=False):
         return ResourceLedger(value["path"], expected_id=value["id"])
     if config is None:
         return None
-    ledger = ResourceLedger(config.ledger_path)
+    ledger = ResourceLedger.ensure(config.ledger_path) if bind else ResourceLedger(config.ledger_path)
     if bind:
         publish_json(path, {"path": str(ledger.path), "id": ledger.id})
     return ledger
@@ -208,6 +208,7 @@ def adjustments(state, rows):
 
 def status(project):
     from labgoblin.ideas import Inbox
+    from labgoblin.supervisor import observation
     root, state, record = project_record(project)
     ledger = bound_ledger(state)
     rows = ledger.runs(record["id"]) if ledger else []
@@ -233,6 +234,7 @@ def status(project):
                      "archive": receipt.get("metadata", {}).get("archive") if receipt else None,
                      "directory": envelope.root, "config": envelope.config})
     return {"project_id": record["id"], "root": str(root), "budget": budget, "runs": runs,
+            "supervisor_review": observation(rows),
             "ideas": Inbox(root).status(),
             "state": runs[-1]["status"] if runs else "initialized",
             "candidate_config": candidate.to_dict() if candidate else None, "candidate_error": candidate_error,
@@ -270,7 +272,10 @@ def verify_runtime(envelope, *, entrypoint="provider"):
         raise ValueError("Research goal/instruction snapshot changed after admission")
     expected = (sys.executable, "-I", "-B", str(root / "bootstrap.py"),
                 entrypoint, str(Path(envelope.root) / "envelope.json"))
-    if envelope.argv != expected or Config.parse(envelope.config, frozen=True).resources != envelope.resources:
+    config = Config.parse(envelope.config, frozen=True)
+    if (envelope.argv != expected or config.gpus != envelope.resources.gpus
+            or any(limit != "unlimited" and limit != observed for limit, observed in (
+                (config.cpus, envelope.resources.cpus), (config.memory_mb, envelope.resources.memory_mb)))):
         raise ValueError("Provider command or resources differ from their frozen configuration")
 
 
@@ -287,9 +292,13 @@ def usage_record(envelope, *, complete):
     if not isinstance(sessions, list) or not sessions:
         raise ValueError("Usage must identify its owned provider sessions")
     roles, amount, research_prompts = set(), 0, 0
+    goal_hooks, researcher_prompt_count = {}, 0
     adjudications = []
     progress_reviews = "max_stalled_reviews" in envelope.config
     fresh_closure = closing.enabled(read_json(Path(envelope.root) / "prompt.json"))
+    from labgoblin.checkins import enabled as checkins_enabled
+    timed_reviews = (checkins_enabled(read_json(Path(envelope.root) / "prompt.json"))
+                     and envelope.config["coach"] and envelope.config.get("goal_review_interval_seconds", 0) > 0)
     for session in sessions:
         table(session, "provider session")
         role = session.get("role")
@@ -300,17 +309,36 @@ def usage_record(envelope, *, complete):
                       and isinstance(role, str) and re.fullmatch(r"consult-(0|[1-9][0-9]{0,5})", role))
         judge = (fresh_closure and envelope.config.get("closure_critic", False)
                  and isinstance(role, str) and re.fullmatch(r"adjudicator-([1-9][0-9]{0,5})", role))
-        if (role not in allowed and not consultant and not coach and not judge) or role in roles:
+        goal_review = (timed_reviews and isinstance(role, str)
+                       and re.fullmatch(r"goal-review-(0|[1-9][0-9]{0,5})", role))
+        if (role not in allowed and not consultant and not coach and not judge and not goal_review) or role in roles:
             raise ValueError("Usage contains an unauthorized or duplicated provider role")
         expected = str(uuid.UUID(envelope.id) if role == "researcher" else uuid.uuid5(uuid.UUID(envelope.id), role))
         if session.get("session_id") != expected:
             raise ValueError("Provider usage belongs to a different owned session")
+        if goal_review:
+            request = read_json(Path(envelope.root) / "sessions" / role / "request.json")
+            hook_id = request.get("hook_id")
+            if (session.get("purpose") != "coach" or request.get("purpose") != "goal_review"
+                    or request.get("caller") != "researcher" or request.get("tool_call_id") is not None
+                    or request.get("caller_session_id") != str(uuid.UUID(envelope.id))
+                    or not isinstance(hook_id, str) or not re.fullmatch(r"[0-9a-f]{32}", hook_id)):
+                raise ValueError("Goal review lacks its exact researcher hook")
+            hook = read_json(Path(envelope.root) / "checkins" / hook_id / "request.json")
+            if (hook.get("run_id") != envelope.id or hook.get("envelope_digest") != envelope.digest
+                    or hook.get("session_id") != str(uuid.UUID(envelope.id)) or hook.get("hook_id") != hook_id):
+                raise ValueError("Goal review hook belongs to another execution")
+            if (hook_id in goal_hooks or hook.get("trigger") != "elapsed_interval"
+                    or hook.get("interval_seconds") != envelope.config["goal_review_interval_seconds"]):
+                raise ValueError("Goal review must use its unique frozen timed hook")
+            goal_hooks[hook_id] = integer(hook.get("prompt"), "goal-review caller prompt")
         boolean(session.get("complete"), "session usage completeness")
         if session["complete"] and session.get("usage") is None or complete and not session["complete"]:
             raise ValueError("Final usage cannot contain an unsettled session")
         prompts = integer(session.get("prompts"), "session prompt count", zero=True)
         if role == "researcher":
             from labgoblin.ideas import extra_prompts
+            researcher_prompt_count = prompts
             research_prompts = prompts - extra_prompts(envelope, prompts)
         adjudication = (not fresh_closure and coach and role != "coach-0" and envelope.config.get("closure_critic", False)
                         and envelope.config.get("consultant", False))
@@ -328,6 +356,8 @@ def usage_record(envelope, *, complete):
         roles.add(role)
     if "researcher" not in roles or ("coach-1" in roles and "coach-0" not in roles) or amount != credits.usage_nano(value):
         raise ValueError("Aggregate usage does not match its exact owned sessions")
+    if any(prompt > researcher_prompt_count for prompt in goal_hooks.values()):
+        raise ValueError("Goal review does not name an admitted researcher prompt")
     closure_prompts = closing.response_prompts(envelope, {item["role"]: item for item in sessions})
     for number in closure_prompts:
         idea_path = Path(envelope.root) / "ideas" / f"prompt-{number}.json"
@@ -351,6 +381,9 @@ def usage_record(envelope, *, complete):
     coaches = {role for role in roles if role.startswith("coach-")}
     if coaches != {f"coach-{index}" for index in range(len(coaches))}:
         raise ValueError("Stopping-review usage must retain every admitted coach session")
+    goal_reviews = {role for role in roles if role.startswith("goal-review-")}
+    if goal_reviews != {f"goal-review-{index}" for index in range(len(goal_reviews))}:
+        raise ValueError("Goal-review usage must retain every admitted coach session")
     if progress_reviews and envelope.config["coach"] and not len(coaches) <= research_prompts <= len(coaches) + 1:
         raise ValueError("Research prompts must alternate with their exact owned stopping reviews")
     return value
@@ -482,15 +515,16 @@ def append_usage(state, rows, limit, run_id, amount, reason, *, confirmation, es
     return value
 
 
-def run(project, *, resume=False, handoff=False):
+def run(project, *, resume=False, handoff=False, reviewed=None):
+    from labgoblin import supervisor
     root, state, record = project_record(project)
     with run_lock(root / ".labgoblin.lock"):
         ledger = bound_ledger(state)
         rows = ledger.runs(record["id"]) if ledger else []
         active = [row for row in rows if row["phase"] != "quiescent"]
         if active:
-            if handoff:
-                raise ValueError("Select --handoff when admitting a new execution, not while attaching to existing work")
+            if handoff or reviewed is not None:
+                raise ValueError("Select --handoff/--reviewed when admitting a new execution, not while attaching to existing work")
             if len(active) != 1:
                 raise UncertainExecution("Multiple unsettled executions require operator investigation")
             return wait_for(ledger, LaunchEnvelope.parse(json.loads(active[0]["envelope"])))
@@ -498,6 +532,7 @@ def run(project, *, resume=False, handoff=False):
             recover_project(state, record, ledger)
         if rows and not resume:
             raise ValueError("This project has prior executions; use run --resume explicitly, retaining cumulative spending")
+        review_confirmation = supervisor.continuation(rows, reviewed, resume=resume)
         config = Config.load(root)
         ledger = bound_ledger(state, config=config, bind=True)
         rows = ledger.runs(record["id"])
@@ -528,11 +563,17 @@ def run(project, *, resume=False, handoff=False):
             "\nFor scientific work, use the separate research environment explicitly authorized in the goal, "
             "if any; otherwise use this existing interpreter.")
         prompt = {"goal": goal, "instructions": instructions, "operator_ideas_version": IDEAS_VERSION,
+                  "research_checkins_version": 1,
                   "provider_command": capabilities["command"],
                   "goal_prompt": goal + "\n\nHarness interpreter (do not modify its environment): " + sys.executable +
                   environment_hint +
                   "\nContinue from retained research-notes.md and artifacts if present. "
                   "Do not rerun completed work merely because this is a new controller execution."}
+        if config.supervisor_review is not None:
+            prompt["supervisor_review"] = {
+                "version": supervisor.VERSION, "due_at": config.supervisor_review.next_after(time.time())}
+        if review_confirmation is not None:
+            prompt["supervisor_reviewed"] = review_confirmation
         if environment is not None:
             prompt["research_environment"] = environment
         if config.closure_critic:
@@ -545,21 +586,17 @@ def run(project, *, resume=False, handoff=False):
                                            research_environment=environment)
         publish_json(directory / "prompt.json", prompt)
         owner = {"kind": "research-run", "handle": launcher}
-        ledger.request(run_id, record["id"], run_id, "research-run", config.resources, owner, native=True)
+        grant = ledger.request(run_id, record["id"], run_id, "research-run", config, owner, native=True)
         armed = False
         try:
-            until = time.monotonic() + 30
-            grant = ledger.reserve(run_id)
-            while grant["state"] == "pending" and time.monotonic() < until:
-                time.sleep(0.5)
-                grant = ledger.reserve(run_id)
             if grant["state"] != "granted":
-                raise ValueError(f"Machine admission unavailable: {grant['reason']}")
+                raise ValueError(f"Execution admission unavailable: {grant['reason']}")
+            request = json.loads(grant["request"])
             command = (sys.executable, "-I", "-B", str(Path(frozen["root"]) / "bootstrap.py"),
                        "provider", str(directory / "envelope.json"))
             envelope = LaunchEnvelope(
                 run_id, record["id"], str(root), str(directory), str(ledger.path), ledger.id,
-                command, config.resources, tuple(json.loads(grant["native_cpus"])), config.to_dict(),
+                command, Resources.parse(request["resources"]), tuple(request["cpu_ids"]), config.to_dict(),
                 allowance, launcher, frozen, hash_file(directory / "prompt.json"))
             publish_json(directory / "envelope.json", asdict(envelope))
             verify_runtime(envelope)
@@ -624,8 +661,7 @@ def worker_main(path, *, inspection=False):
         raise ValueError("This one-use execution was already claimed or retired")
     outcome = payload.run_process({
         "argv": envelope.argv, "cwd": envelope.project, "root": str(root / "process"),
-        "token": envelope.id, "cpus": envelope.resources.cpus, "memory_mb": envelope.resources.memory_mb,
-        "gpus": list(envelope.resources.gpus), "cpu_ids": list(envelope.cpu_ids),
+        "token": envelope.id, **payload.resource_spec(envelope),
         "seconds": config.timeout_seconds, "log_bytes": 64 * 1024 * 1024,
         "cancel_path": str(root / "cancel"), "provider": "copilot", "shutdown_grace_seconds": provider.GRACE_SECONDS,
         "job_name": f"labgoblin-{envelope.id}",
@@ -683,4 +719,5 @@ def worker_main(path, *, inspection=False):
         result = automatic(envelope)
         if result is not None and result["status"] != "completed":
             print(f"Independent handoff {result['status']}: {result['reason']}", file=sys.stderr, flush=True)
-    return 0 if status == "completed" else 1
+    return (0 if status == "completed" or status == "checkpointed" and
+            metadata.get("provider", {}).get("checkpoint_reason") == "supervisor_review" else 1)

@@ -25,11 +25,15 @@ REQUESTS = 0
 ABORT = threading.Event()
 TOOL_DONE = threading.Event()
 TOOL_RESULT = None
+HOOK_DONE = threading.Event()
+HOOK_RESULT = None
 TOOLS = []
 ROLE = "researcher"
 COACH_INDEX = 0
 MODEL = None
 EFFORT = None
+MEETING_CHILD = None
+MEETING_DONE = threading.Event()
 
 
 def emit(value):
@@ -66,8 +70,102 @@ def invoke_tool(name, arguments):
     raise RuntimeError("Fixed external tool request never completed")
 
 
+def invoke_pre_tool():
+    global HOOK_RESULT
+    HOOK_RESULT = None
+    HOOK_DONE.clear()
+    emit({"jsonrpc": "2.0", "id": "fixture-hook", "method": "hooks.invoke", "params": {
+        "sessionId": SESSION, "hookType": "preToolUse", "input": {
+            "sessionId": SESSION, "timestamp": time.time() * 1000, "cwd": str(ROOT),
+            "toolName": "read_file", "toolArgs": {"path": "research-notes.md"}}}})
+    until = time.monotonic() + 60
+    while time.monotonic() < until:
+        if ABORT.is_set():
+            return None
+        if HOOK_DONE.wait(0.05):
+            return HOOK_RESULT
+    raise RuntimeError("Fixed pre-tool hook never completed")
+
+
 def exercise():
+    global MEETING_CHILD
     event("assistant.turn_start", {"turnId": str(uuid.uuid4())})
+    if ROLE == "researcher" and CONFIG.get("mode") == "supervisor_review":
+        mode = CONFIG["supervisor_mode"]
+        run = next((ROOT / ".labgoblin" / "runs").iterdir())
+        gate = (run / "supervisor-review" / "request.json" if mode == "foreground"
+                else run / "supervisor-review" / "drain.json" if mode == "native_child"
+                else ROOT / "fixture-drain-started")
+        source = (
+            "from pathlib import Path\nimport time\n"
+            f"gate = Path({str(gate)!r})\n"
+            "until = time.monotonic() + 40\n"
+            "while not gate.exists():\n"
+            "    if time.monotonic() > until: raise RuntimeError('No meeting drain gate')\n"
+            "    time.sleep(.02)\n"
+            "time.sleep(.4)\n"
+            f"Path({str(ROOT / 'fixture-experiment-complete')!r}).write_text('survived')\n")
+        event("tool.execution_start", {"toolCallId": "meeting-experiment", "toolName": "shell", "arguments": {}})
+        MEETING_CHILD = subprocess.Popen([sys.executable, "-c", source], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if mode == "foreground":
+            MEETING_CHILD.wait(timeout=45)
+        event("tool.execution_complete", {"toolCallId": "meeting-experiment", "success": True})
+        if invoke_pre_tool() is None:
+            return
+        event("assistant.message", {"messageId": str(uuid.uuid4()), "content": "Checkpoint; existing work is settling."})
+        event("session.idle", {})
+        MEETING_CHILD.wait(timeout=45)
+        if MEETING_CHILD.returncode:
+            raise RuntimeError("Meeting killed or failed the owned experiment")
+        if mode == "followup_turn":
+            event("assistant.turn_start", {"turnId": str(uuid.uuid4())})
+            time.sleep(.4)
+            (ROOT / "fixture-followup-complete").write_text("retained", encoding="utf-8")
+            event("assistant.message", {"messageId": str(uuid.uuid4()), "content": "Background result retained; ready for review."})
+            event("session.idle", {})
+        MEETING_DONE.set()
+        return
+    if ROLE == "researcher" and CONFIG.get("mode") == "checkin_quota":
+        event("session.info", {"infoType": "session_limits",
+                              "message": "Session limit reached. Increase or unset the session limit to continue."})
+        if CONFIG.get("late_hook"):
+            response = invoke_pre_tool()
+            if response is not None:
+                (ROOT / "fixture-exhausted-hook-released.json").write_text(
+                    json.dumps(response), encoding="utf-8")
+        else:
+            ABORT.wait(120)
+        return
+    if ROLE == "goal-review":
+        (ROOT / "fixture-goal-review-ready").write_text(SESSION, encoding="utf-8")
+        if CONFIG.get("checkin_failure") == "wait":
+            ABORT.wait(120)
+            return
+        if invoke_tool("labgoblin_read_trajectory", {}) is None:
+            return
+        if invoke_tool("labgoblin_read_evidence", {"path": "research-notes.md"}) is None:
+            return
+        event("assistant.message", {"messageId": str(uuid.uuid4()),
+                                   "content": "The original intended use remains the goal; the current controlled work is useful depth."})
+        event("session.idle", {})
+        return
+    if ROLE == "researcher" and CONFIG.get("mode") == "goal_checkins" and REQUESTS == 1:
+        (ROOT / "research-notes.md").write_text("A model-free experiment is running.", encoding="utf-8")
+        # A foreground child crosses the cadence without being aborted by a review.
+        completed = subprocess.run(
+            [sys.executable, "-c", "import time; time.sleep(2); print('experiment survived')"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        event("tool.execution_complete", {"toolCallId": "long-experiment", "success": completed.returncode == 0})
+        response = invoke_pre_tool()
+        if response is None:
+            return
+        feedback = response.get("additionalContext", "")
+        if "original intended use" not in feedback:
+            raise ValueError(f"Goal feedback did not return before the first answer: {response}")
+        (ROOT / "fixture-checkin-observed.json").write_text(json.dumps({
+            "experiment_returncode": completed.returncode,
+            "experiment_output": completed.stdout.strip(), "feedback": feedback}), encoding="utf-8")
     if ROLE == "inspector":
         if CONFIG.get("mode") == "inspection_wait":
             ABORT.wait(120)
@@ -336,6 +434,12 @@ while True:
     if size > 1024 * 1024 or sys.stdin.buffer.readline() != b"\r\n":
         raise ValueError("Invalid bounded RPC frame")
     request = json.loads(sys.stdin.buffer.read(size))
+    if request.get("id") == "fixture-hook" and "method" not in request:
+        if "error" in request:
+            raise ValueError(f"SDK hook dispatch failed: {request['error']}")
+        HOOK_RESULT = request["result"]["output"]
+        HOOK_DONE.set()
+        continue
     method, params = request["method"], request.get("params", {})
     with (ROOT / "fixture-rpc.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"method": method, "session_id": params.get("sessionId"),
@@ -354,6 +458,7 @@ while True:
         TOOLS = params.get("tools", [])
         names = {tool["name"] for tool in TOOLS}
         ROLE = ("inspector" if "labgoblin_inspect_read" in names else "coach" if "labgoblin_review_decision" in names
+                else "goal-review" if "labgoblin_read_trajectory" in names
                 else "adviser" if "labgoblin_read_evidence" in names else "researcher")
         if "FRESH closure adjudicator" in params.get("systemMessage", {}).get("content", ""):
             ROLE = "adjudicator"
@@ -379,11 +484,31 @@ while True:
         result = {"handled": True}
     elif method == "session.permissions.setMode":
         result = {"success": True, "mode": params["mode"]}
+    elif method == "session.tasks.list":
+        tasks = []
+        if (MEETING_CHILD is not None and MEETING_CHILD.poll() is None
+                and CONFIG.get("supervisor_mode") in ("tracked_task", "followup_turn")):
+            tasks.append({"id": "meeting-child", "type": "shell", "attachmentMode": "detached",
+                          "command": "model-free child", "description": "Owned synthetic experiment",
+                          "startedAt": datetime.now(timezone.utc).isoformat(), "status": "running",
+                          "pid": MEETING_CHILD.pid})
+        result = {"tasks": tasks}
+    elif method == "session.tasks.waitForPending":
+        (ROOT / "fixture-drain-started").write_text("requested", encoding="utf-8")
+        def finish_wait(request_id):
+            if CONFIG.get("supervisor_mode") in ("tracked_task", "followup_turn"):
+                MEETING_DONE.wait(45)
+            emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        threading.Thread(target=finish_wait, args=(request["id"],), daemon=True).start()
+        continue
     elif method in ("session.options.update", "session.detach", "session.abort", "runtime.shutdown"):
+        if method in ("session.detach", "runtime.shutdown"):
+            time.sleep(CONFIG.get("shutdown_delays", {}).get(ROLE, {}).get(method, 0))
         result = {"success": True}
     elif method == "session.usage.getMetrics":
         if REQUESTS and (CONFIG.get("mode") == "missing_usage" or
-                         ROLE == "adviser" and CONFIG.get("mode") == "consult_missing_usage"):
+                         ROLE == "adviser" and CONFIG.get("mode") == "consult_missing_usage" or
+                         ROLE == "goal-review" and CONFIG.get("checkin_failure") == "missing_usage"):
             emit({"jsonrpc": "2.0", "id": request["id"],
                   "error": {"code": -32000, "message": "Deliberate final usage failure"}})
             continue
@@ -396,7 +521,7 @@ while True:
         }
     elif method == "session.send":
         REQUESTS += 1
-        if ROLE == "inspector" or CONFIG.get("mode") in ("closing_challenge", "progress_reviews", "claim_review", "closure_critic", "operator_ideas"):
+        if ROLE == "inspector" or CONFIG.get("mode") in ("closing_challenge", "progress_reviews", "claim_review", "closure_critic", "operator_ideas", "supervisor_review"):
             (ROOT / f"fixture-prompt-{SESSION}-{REQUESTS}.txt").write_text(params["prompt"], encoding="utf-8")
         result = {"messageId": str(uuid.uuid4())}
     else:

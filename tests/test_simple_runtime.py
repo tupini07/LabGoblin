@@ -1,4 +1,5 @@
 from dataclasses import asdict, replace
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import sys
@@ -13,7 +14,7 @@ from labgoblin.cli import main
 from labgoblin.config import Config
 from labgoblin.processes import own_handle
 from labgoblin.protocol import LaunchReceipt, UncertainExecution
-from labgoblin.scheduler import ResourceLedger, _wire_envelope, _wire_receipt
+from labgoblin.scheduler import MachineSample, ResourceLedger, _wire_envelope, _wire_receipt
 from labgoblin.storage import digest, hash_file, publish_json, read_json
 from tests.conftest import arm
 
@@ -22,6 +23,134 @@ def fixture_provider(root, monkeypatch, mode="normal"):
     publish_json(root / "fixture-provider.json", {"model_free": True, "root": str(root), "mode": mode})
     command = [sys.executable, str(Path(__file__).with_name("fixed_copilot.py"))]
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: {"command": command, "sdk_controls": "model-free"})
+
+
+def test_local_admission_never_publishes_a_legacy_pending_reservation(project, ledger, monkeypatch):
+    _, config, record = project
+    token = uuid.uuid4().hex
+    owner = {"kind": "research-run", "handle": own_handle(record["id"])}
+    grant = ledger.request(token, record["id"], token, "research-run", config, owner, native=True)
+    assert grant["state"] == "granted" and grant["granted"] is not None
+    assert grant["cpus"] == grant["memory_mb"] == 0
+    assert json.loads(grant["gpus"]) == json.loads(grant["native_cpus"]) == []
+    ledger.release(token, owner_id=record["id"])
+    assert ledger.request(token, record["id"], token, "research-run", config, owner, native=True)["state"] == "released"
+    monkeypatch.setattr("labgoblin.processes.process_state", lambda _: "unknown")
+    other = uuid.uuid4().hex
+    with pytest.raises(ValueError, match="ownership is unknown"):
+        ledger.request(other, record["id"], other, "research-run", config, owner, native=True)
+    assert ledger.grant(other) is None
+
+
+def test_local_request_cannot_reinterpret_a_legacy_pending_claim(project, ledger):
+    _, config, record = project
+    token = uuid.uuid4().hex
+    owner = {"kind": "research-run", "handle": own_handle(record["id"])}
+    ledger.request(token, record["id"], token, "research-run", config, owner, native=True)
+    with ledger.write() as conn:
+        conn.execute("UPDATE grants SET state='pending',digest='',request='{}',cpus=1,memory_mb=1024 WHERE token=?",
+                     (token,))
+    before = ledger.grant(token)
+    with pytest.raises(ValueError, match="different request"):
+        ledger.request(token, record["id"], token, "research-run", config, owner, native=True)
+    assert ledger.grant(token) == before
+
+
+def test_concurrent_first_admission_creates_one_ledger_without_capacity(tmp_path):
+    path = tmp_path / "new" / "executions.db"
+    barrier = threading.Barrier(4)
+    def create(_):
+        barrier.wait(timeout=10)
+        return ResourceLedger.ensure(path).id
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        identities = list(executor.map(create, range(4)))
+    assert len(set(identities)) == 1
+    ledger = ResourceLedger(path)
+    assert ledger.capacity() is None and not ledger.rows()
+
+
+def test_lost_bound_ledger_cannot_be_recreated_or_replace_accounting(project):
+    root, config, record = project
+    missing = root.parent / "missing.db"
+    state = root / ".labgoblin"
+    publish_json(state / "ledger.json", {"path": str(missing), "id": "historical-ledger"})
+    with pytest.raises(FileNotFoundError):
+        runtime.bound_ledger(state, config=replace(config, ledger=str(missing)), bind=True)
+    assert not missing.exists()
+    assert read_json(state / "ledger.json")["id"] == "historical-ledger"
+
+
+def test_local_gpu_admission_ignores_legacy_capacity_and_busy_devices(project, ledger):
+    root, config, record = project
+    sample = MachineSample((0, 1), 32768, 1, frozenset({"GPU-test"}), frozenset({"GPU-test"}))
+    ledger.sampler = lambda *_: sample
+    config = replace(config, cpus=2, memory_mb=16384, gpus=("GPU-test",))
+    legacy = arm((root, config, record), ledger)
+    with ledger.write() as conn:
+        conn.execute("INSERT INTO capacity VALUES(1,7,1,1024,'[]',512,'[0]',1)")
+        conn.execute("UPDATE grants SET cpus=2,memory_mb=32768,gpus='[\"GPU-test\"]',native_cpus='[0,1]' "
+                     "WHERE token=?", (legacy.id,))
+    before_grant, before_consumer = ledger.grant(legacy.id), ledger.consumer_run(legacy.id)
+    capacity = ledger.capacity()
+    other = root.parent / "other"
+    other_record = runtime.initialize(other, config, goal="Use only synthetic data.", research_venv=False, git=False)
+    envelope = arm((other, config, other_record), ledger)
+    grant = ledger.grant(envelope.id)
+    assert grant["state"] == "granted" and grant["cpus"] == grant["memory_mb"] == 0
+    assert json.loads(grant["gpus"]) == json.loads(grant["native_cpus"]) == []
+    assert envelope.cpu_ids == legacy.cpu_ids == (0, 1)
+    assert envelope.resources.gpus == ("GPU-test",)
+    assert ledger.grant(legacy.id) == before_grant
+    assert ledger.consumer_run(legacy.id) == before_consumer
+    assert ledger.capacity() == capacity
+    with pytest.raises(ValueError, match="visible"):
+        ledger.request(uuid.uuid4().hex, record["id"], uuid.uuid4().hex, "research-run",
+                       replace(config, gpus=("GPU-missing",)),
+                       {"kind": "research-run", "handle": own_handle(record["id"])}, native=True)
+    with pytest.raises(ValueError, match="physical capacity"):
+        ledger.request(uuid.uuid4().hex, record["id"], uuid.uuid4().hex, "research-run",
+                       replace(config, cpus=3),
+                       {"kind": "research-run", "handle": own_handle(record["id"])}, native=True)
+
+
+def test_two_uncapped_owned_runs_overlap_without_machine_provisioning(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "machine.db"
+    roots = [tmp_path / name for name in ("first", "second")]
+    for root in roots:
+        runtime.initialize(root, Config(model="model-free", coach=False, consultant=False,
+                                        ledger=str(ledger_path), timeout_seconds=180, max_ai_credits=300),
+                           goal="Determine whether adding one increases the mean by one.",
+                           research_venv=False, git=False)
+        fixture_provider(root, monkeypatch, "wait_for_release")
+    assert not ledger_path.exists()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(runtime.run, root) for root in roots]
+        try:
+            until = time.monotonic() + 40
+            while not all((root / "fixture-rpc.jsonl").exists() and
+                          '"session.send"' in (root / "fixture-rpc.jsonl").read_text() for root in roots):
+                for future in futures:
+                    if future.done():
+                        pytest.fail(f"Run ended before overlap: {future.result()}")
+                assert time.monotonic() < until, "Both native researchers must be active"
+                time.sleep(.05)
+            ledger = ResourceLedger(ledger_path)
+            grants = ledger.rows()
+            assert len(grants) == 2 and all(row["state"] == "granted" for row in grants)
+            envelopes = [json.loads(ledger.consumer_run(row["token"])["envelope"]) for row in grants]
+            assert envelopes[0]["cpu_ids"] == envelopes[1]["cpu_ids"]
+            for envelope in envelopes:
+                from labgoblin.protocol import LaunchEnvelope
+                assert runtime.payload.resource_spec(LaunchEnvelope.parse(envelope)) == {
+                    "cpus": None, "memory_mb": None, "cpu_ids": None, "gpus": []}
+                assert runtime.payload.tree_state(Path(envelope["root"]) / "process", envelope["id"]) == "alive"
+        finally:
+            for root in roots:
+                (root / "finish-fixture").touch()
+        results = [future.result(timeout=40) for future in futures]
+    assert all(result["status"] == "completed" for result in results), results
+    assert not ledger.rows() and ledger.capacity() is None
+    assert all(runtime.status(root)["budget"]["remaining"] == 290 for root in roots)
 
 
 @pytest.mark.parametrize("archive", [False, True])
@@ -103,7 +232,8 @@ def test_cli_scaffold_can_be_replaced_with_a_freeform_brief(tmp_path, ledger, mo
     root = tmp_path / "research"
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
     assert main(["init", str(root), "--ledger", str(ledger.path), "--no-research-venv",
-                 "--cpus", "1", "--memory-mb", "1024", "--timeout", "180"]) == 0
+                 "--cpus", "1", "--memory-mb", "1024", "--timeout", "180",
+                 "--model", "model-free", "--no-coach", "--no-consultant"]) == 0
     capsys.readouterr()
     goal = b"Determine whether adding one increases the mean by one.\r\n"
     (root / "research_goal.md").write_bytes(goal)
@@ -117,6 +247,38 @@ def test_cli_scaffold_can_be_replaced_with_a_freeform_brief(tmp_path, ledger, mo
     assert not (directory / "snapshot").exists()
     assert (root / "research_goal.md").read_bytes() == goal
     assert ledger.grant(result["id"])["state"] == "released"
+    assert not ledger.rows()
+
+
+def test_default_init_runs_sol_research_and_astra_closure_with_one_pool(tmp_path, ledger, monkeypatch, capsys):
+    root = tmp_path / "default-research"
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Init must not call Copilot"))
+    assert main(["init", str(root), "--ledger", str(ledger.path), "--no-git", "--no-research-venv"]) == 0
+    capsys.readouterr()
+    (root / "research_goal.md").write_text("Determine whether x*x-x is nonnegative for all real x.")
+    fixture_provider(root, monkeypatch, "closure_critic")
+    (root / "fixture-provider.json").write_text(json.dumps({
+        "model_free": True, "root": str(root), "mode": "closure_critic",
+        "models": ["gpt-6.1-sol", "gpt-6-astra"],
+    }), encoding="utf-8")
+    assert main(["run", str(root)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "completed", result
+    sessions = result["usage"]["sessions"]
+    assert [item["model"] for item in sessions] == ["gpt-6.1-sol"] + ["gpt-6-astra"] * 4
+    assert [item["role"] for item in sessions] == [
+        "researcher", "coach-0", "coach-1", "consult-0", "adjudicator-1"]
+    assert [item["prompts"] for item in sessions] == [3, 1, 1, 1, 1]
+    directory = root / ".labgoblin" / "runs" / result["id"]
+    frozen = Config.parse(read_json(directory / "envelope.json")["config"], frozen=True)
+    assert frozen.coach and frozen.consultant and frozen.closure_critic
+    assert frozen.reasoning_effort == "high" and frozen.goal_review_interval_seconds == 10800
+    assert frozen.consultation_timeout_seconds == 3600 and frozen.goal_review_timeout_seconds == 1800
+    assert read_json(directory / "prompt.json")["research_checkins_version"] == 1
+    assert read_json(directory / "prompt.json")["closure_response_version"] == 1
+    assert read_json(root / "artifacts" / "closure-counterexample.json") == {"x": "1/2", "value": "-1/4"}
+    assert runtime.status(root)["budget"]["remaining"] == 930
+    assert result["metadata"]["archive"]["status"] == "disabled"
     assert not ledger.rows()
 
 
@@ -162,6 +324,7 @@ def test_recorded_environment_authority_is_frozen_without_overriding_restriction
     root = tmp_path / "authorized"
     goal = "Use only local synthetic inputs. Do not download pretrained models."
     record = runtime.initialize(root, Config(
+        model="model-free", coach=False, consultant=False,
         cpus=1, memory_mb=1024, timeout_seconds=180, ledger=str(ledger.path)), goal=goal)
     custom = "Do not install third-party packages; use the standard library."
     (root / ".github" / "copilot-instructions.md").write_text(custom, encoding="utf-8")

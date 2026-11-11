@@ -16,7 +16,8 @@ from labgoblin.storage import read_text
 
 
 def parser():
-    root = argparse.ArgumentParser(description="LabGoblin: an ordinary Copilot researcher with optional review and consultation")
+    defaults = Config()
+    root = argparse.ArgumentParser(description="LabGoblin: an ordinary Copilot researcher with opt-out coaching and consultation")
     commands = root.add_subparsers(dest="command", required=True)
     init = commands.add_parser(
         "init", help="Create a fresh research workspace; never starts a model",
@@ -34,31 +35,43 @@ def parser():
                       help="Initialize Git or reuse the containing repository; add local ignore rules, but never stage or commit")
     init.add_argument("--archive-workspace", action=argparse.BooleanOptionalAction, default=False,
                       help="Opt in to full workspace copies after executions; Git history and ordinary resume do not require them")
-    init.add_argument("--max-event-log-bytes", type=int, default=Config().max_event_log_bytes,
+    init.add_argument("--max-event-log-bytes", type=int, default=defaults.max_event_log_bytes,
                       help="Event and index retention per session, default 8 GiB; positive bytes up to 64 GiB")
-    init.add_argument("--model", default="auto")
-    init.add_argument("--reasoning-effort", default="medium")
+    init.add_argument("--model", default=defaults.model, help=f"Research model (default: {defaults.model})")
+    init.add_argument("--reasoning-effort", default=defaults.reasoning_effort,
+                      help=f"Common research/review effort (default: {defaults.reasoning_effort})")
     for role in ("coach", "closure-critic", "advice", "claim-review"):
-        init.add_argument(f"--{role}-model",
-                          help=f"Model for {role}; defaults to --model and does not enable the role")
+        model = getattr(defaults, role.replace("-", "_") + "_model")
+        init.add_argument(f"--{role}-model", default=model,
+                          help=f"Model for {role} (default: {model}); use inherit for --model; does not enable a disabled role")
     init.add_argument("--credits", default="1000")
     init.add_argument("--timeout", type=float, default=5400)
-    init.add_argument("--cpus", type=int, default=2)
-    init.add_argument("--memory-mb", type=int, default=4096)
-    init.add_argument("--gpu", action="append", default=[])
-    init.add_argument("--coach", action=argparse.BooleanOptionalAction, default=False)
+    init.add_argument("--consultation-timeout", type=float, default=defaults.consultation_timeout_seconds,
+                      help="Advice/claim-review ceiling in seconds, including shutdown (default: 3600); never extends the execution deadline")
+    init.add_argument("--goal-review-timeout", type=float, default=defaults.goal_review_timeout_seconds,
+                      help="Timed goal-review ceiling in seconds, including shutdown (default: 1800); never extends the execution deadline")
+    init.add_argument("--cpus", type=resource_limit, default="unlimited",
+                      help="Optional logical-CPU affinity limit; positive integer or unlimited (default)")
+    init.add_argument("--memory-mb", type=resource_limit, default="unlimited",
+                      help="Optional owned-tree RAM limit in MiB; positive integer or unlimited (default)")
+    init.add_argument("--gpu", action="append", default=[],
+                      help="Explicitly allow a visible GPU UUID; shared, not exclusively reserved")
+    init.add_argument("--coach", action=argparse.BooleanOptionalAction, default=defaults.coach,
+                      help="Stopping coaching and three-hour advisory goal reviews (enabled by default)")
     init.add_argument("--max-stalled-reviews", type=int, default=10,
                       help="Consecutive follow-up reviews without meaningful progress before an incomplete checkpoint")
-    init.add_argument("--consultant", action=argparse.BooleanOptionalAction, default=False,
-                      help="Allow bounded read-only adviser calls and public literature retrieval within the project pool")
-    init.add_argument("--closure-critic", action=argparse.BooleanOptionalAction, default=False,
-                      help="Require independent criticism, researcher response and fresh adjudication before final acceptance; requires coach and consultant")
+    init.add_argument("--consultant", action=argparse.BooleanOptionalAction, default=defaults.consultant,
+                      help="Allow read-only advice/claim review and public literature retrieval within the project pool (enabled by default)")
+    init.add_argument("--closure-critic", action=argparse.BooleanOptionalAction, default=None,
+                      help="Independent criticism, researcher response and fresh adjudication before final acceptance; defaults on when coach and consultant are enabled")
     init.add_argument("--ledger", type=Path)
     init.add_argument("--evaluation-spec", type=Path,
                       help="Opt-in reviewed external Python evaluation kit; captured only when admitting an execution")
     run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
     run.add_argument("project", nargs="?", default=".")
     run.add_argument("--resume", action="store_true", help="Explicitly continue from files, preserving all prior spending")
+    run.add_argument("--reviewed", metavar="RUN_ID",
+                     help="Confirm the exact pending supervisor review with --resume; starts a fresh conversation with the full configured timeout")
     run.add_argument("--handoff", action="store_true",
                      help="Authorize one automatic terminal report from the separately approved inspection pool")
     handoff = commands.add_parser("handoff", help="Create one independent report for an exact terminal run, using inspection credits")
@@ -109,17 +122,23 @@ def parser():
     publish.add_argument("--sha256", help="Require these exact primary-file bytes")
     publish.add_argument("--attachment", action="append", type=Path, default=[])
     publish.add_argument("--attribution", default="Explicit operator CLI publication")
-    machine = commands.add_parser("machine", help="Explicit shared native resource capacity")
+    machine = commands.add_parser("machine", help="Read shared execution/accounting records; no capacity configuration")
     machine_commands = machine.add_subparsers(dest="machine_command", required=True)
     show = machine_commands.add_parser("status")
     show.add_argument("--ledger", type=Path, default=machine_ledger_path())
-    configure = machine_commands.add_parser("configure")
-    configure.add_argument("--ledger", type=Path, default=machine_ledger_path())
-    configure.add_argument("--cpus", type=int, required=True)
-    configure.add_argument("--memory-mb", type=int, required=True)
-    configure.add_argument("--headroom-mb", type=int, default=2048)
-    configure.add_argument("--gpu", action="append", default=[])
     return root
+
+
+def resource_limit(value):
+    if value == "unlimited":
+        return value
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("Use a positive integer or 'unlimited'") from error
+    if result <= 0:
+        raise argparse.ArgumentTypeError("Use a positive integer or 'unlimited'")
+    return result
 
 
 def credit_value(value):
@@ -140,6 +159,8 @@ def main(arguments=None):
         if args.command == "init":
             config = Config(model=args.model, reasoning_effort=args.reasoning_effort,
                             max_ai_credits=credit_value(args.credits), timeout_seconds=args.timeout,
+                            consultation_timeout_seconds=args.consultation_timeout,
+                            goal_review_timeout_seconds=args.goal_review_timeout,
                             cpus=args.cpus, memory_mb=args.memory_mb, gpus=tuple(args.gpu),
                             coach=args.coach, max_stalled_reviews=args.max_stalled_reviews, consultant=args.consultant,
                             closure_critic=args.closure_critic,
@@ -152,7 +173,7 @@ def main(arguments=None):
                                         goal=read_text(args.goal_file) if args.goal_file else None,
                                         research_venv=args.research_venv, git=args.git)
         elif args.command == "run":
-            result = runtime.run(args.project, resume=args.resume, handoff=args.handoff)
+            result = runtime.run(args.project, resume=args.resume, handoff=args.handoff, reviewed=args.reviewed)
         elif args.command in ("handoff", "handoffs"):
             from labgoblin.inspector import Inspector
             from labgoblin import handoffs
@@ -204,15 +225,15 @@ def main(arguments=None):
             else:
                 result = {**inbox.status(), "entries": inbox.entries()}
         else:
-            if args.machine_command == "configure":
-                ledger = (ResourceLedger(args.ledger) if args.ledger.exists()
-                          else ResourceLedger.create(args.ledger))
-                ledger.configure(args.cpus, args.memory_mb, tuple(args.gpu), args.headroom_mb)
-            else:
-                ledger = ResourceLedger(args.ledger)
-            result = {"id": ledger.id, "path": str(ledger.path), "capacity": ledger.capacity(), "grants": ledger.rows()}
+            ledger = ResourceLedger(args.ledger)
+            result = {"id": ledger.id, "path": str(ledger.path), "legacy_capacity": ledger.capacity(),
+                      "grants": ledger.rows(),
+                      "note": "New runs share local hardware without resource reservations. "
+                              "Legacy capacity and grants belong to their original runtimes."}
         print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
-        if args.command == "run" and result["status"] != "completed":
+        if (args.command == "run" and result["status"] != "completed"
+                and not (result["status"] == "checkpointed"
+                         and result.get("metadata", {}).get("provider", {}).get("checkpoint_reason") == "supervisor_review")):
             return 1
         if args.command == "handoff" and result["status"] != "completed":
             return 1

@@ -24,6 +24,8 @@ from labgoblin.storage import read_json, read_text
     ("evaluation_spec", ""), ("evaluation_spec", "relative.json"), ("evaluation_spec", True),
     ("archive_workspace", "yes"), ("max_event_log_bytes", 0), ("max_event_log_bytes", True),
     ("max_event_log_bytes", "unlimited"), ("max_event_log_bytes", 65 * 1024 ** 3),
+    ("cpus", None), ("memory_mb", None), ("cpus", "2"), ("memory_mb", "unbounded"),
+    ("cpus", 1.5), ("memory_mb", True),
 ])
 def test_strict_restart_configuration(field, value):
     with pytest.raises(ValueError):
@@ -32,9 +34,80 @@ def test_strict_restart_configuration(field, value):
 
 @pytest.mark.parametrize("coach,credits", [(False, 30), (True, 90), (True, "unlimited")])
 def test_configuration_roundtrip(tmp_path, coach, credits):
-    config = Config(coach=coach, max_ai_credits=credits)
+    config = Config(coach=coach, consultant=False, max_ai_credits=credits)
     (tmp_path / "labgoblin.toml").write_text(config.toml(), encoding="utf-8")
     assert Config.load(tmp_path) == config
+
+
+@pytest.mark.parametrize("options,expected", [
+    ([], (3600, 1800)),
+    (["--consultation-timeout", "7200", "--goal-review-timeout", "2400"], (7200, 2400)),
+])
+def test_init_persists_review_timeouts_without_starting_models(tmp_path, monkeypatch, capsys, options, expected):
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
+    assert main(["init", str(tmp_path), "--no-git", "--no-research-venv", *options]) == 0
+    capsys.readouterr()
+    config = Config.load(tmp_path)
+    assert (config.consultation_timeout_seconds, config.goal_review_timeout_seconds) == expected
+    assert Config.parse(config.to_dict(), frozen=True) == config
+    assert config.timeout_seconds == 5400 and config.max_ai_credits == 1000
+
+
+@pytest.mark.parametrize("field,old,new", [
+    ("consultation_timeout_seconds", 1800, 3600),
+    ("goal_review_timeout_seconds", 900, 1800),
+])
+def test_review_timeout_omissions_keep_frozen_policy_but_new_candidates_get_longer_defaults(field, old, new):
+    value = Config().to_dict()
+    del value[field]
+    original = json.dumps(value, sort_keys=True)
+    assert getattr(Config.parse(value, frozen=True), field) == old
+    assert getattr(Config.parse(value), field) == new
+    assert json.dumps(value, sort_keys=True) == original
+    assert getattr(Config.parse({**value, field: 2400}, frozen=True), field) == 2400
+
+
+@pytest.mark.parametrize("field", ["consultation_timeout_seconds", "goal_review_timeout_seconds"])
+@pytest.mark.parametrize("value", [0, 59, True, None, float("inf"), float("nan"), "unlimited", "60 / 0"])
+def test_review_timeouts_require_finite_time_and_shutdown_headroom(field, value):
+    with pytest.raises(ValueError, match=field):
+        Config.parse({**Config().to_dict(), field: value})
+
+
+@pytest.mark.parametrize("field", ["consultation_timeout_seconds", "goal_review_timeout_seconds"])
+def test_review_timeout_expressions_freeze_numeric_seconds(tmp_path, field):
+    value = {**Config().to_dict(), field: "45 * 60"}
+    config = Config.parse(value)
+    (tmp_path / "labgoblin.toml").write_text(config.toml(), encoding="utf-8")
+    assert getattr(Config.load(tmp_path), field) == 2700
+    assert Config.parse(config.to_dict(), frozen=True) == config
+    assert value[field] == "45 * 60"
+
+
+@pytest.mark.parametrize("cpus,memory", [("unlimited", "unlimited"), ("1", "unlimited"), ("unlimited", "1024")])
+def test_optional_local_limits_roundtrip_without_provisioning(tmp_path, monkeypatch, capsys, cpus, memory):
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
+    root, ledger = tmp_path / "research", tmp_path / "absent-ledger.db"
+    assert main(["init", str(root), "--no-research-venv", "--no-git", "--ledger", str(ledger),
+                 "--cpus", cpus, "--memory-mb", memory]) == 0
+    capsys.readouterr()
+    config = Config.load(root)
+    assert str(config.cpus) == cpus and str(config.memory_mb) == memory
+    assert Config.parse(config.to_dict(), frozen=True) == config
+    assert main(["status", str(root)]) == 0
+    capsys.readouterr()
+    assert not ledger.exists() and not ledger.with_name(ledger.name + ".init.lock").exists()
+    assert not (root / ".labgoblin" / "ledger.json").exists()
+
+
+def test_missing_frozen_resource_fields_retain_historical_limits():
+    value = Config().to_dict()
+    value.pop("cpus")
+    value.pop("memory_mb")
+    frozen = Config.parse(value, frozen=True)
+    assert (frozen.cpus, frozen.memory_mb) == (2, 4096)
+    assert Config.parse(value).cpus == "unlimited"
+    assert Config.parse(value).memory_mb == "unlimited"
 
 
 @pytest.mark.parametrize("expression,seconds", [
@@ -124,7 +197,7 @@ def test_cli_rejects_bad_credit_values(value):
 
 def test_cli_init_never_starts_a_provider(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
-    assert main(["init", str(tmp_path / "new"), "--no-coach", "--credits", "30"]) == 0
+    assert main(["init", str(tmp_path / "new"), "--no-coach", "--no-consultant", "--credits", "30"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["version"] == 5
     assert main(["status", str(tmp_path / "new")]) == 0
@@ -181,13 +254,61 @@ def test_cli_goal_file_preserves_operator_scope_and_bytes(tmp_path, capsys, monk
     assert source.read_bytes() == body
 
 
-def test_coach_is_opt_in(tmp_path, capsys):
-    assert main(["init", str(tmp_path / "plain"), "--credits", "30"]) == 0
+@pytest.mark.parametrize("options,roles,minimum", [
+    ([], (True, True, True), 90),
+    (["--no-closure-critic"], (True, True, False), 90),
+    (["--no-coach"], (False, True, False), 60),
+    (["--no-consultant"], (True, False, False), 60),
+    (["--no-coach", "--no-consultant"], (False, False, False), 30),
+])
+def test_default_support_and_independent_opt_outs(tmp_path, capsys, monkeypatch, options, roles, minimum):
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
+    root = tmp_path / "research"
+    assert main(["init", str(root), "--no-git", "--no-research-venv",
+                 "--credits", str(minimum), *options]) == 0
     capsys.readouterr()
-    assert Config.load(tmp_path / "plain").coach is False
-    assert main(["init", str(tmp_path / "coached"), "--coach", "--credits", "60"]) == 0
-    capsys.readouterr()
-    assert Config.load(tmp_path / "coached").coach is True
+    config = Config.load(root)
+    assert (config.coach, config.consultant, config.closure_critic) == roles
+    assert Config.parse(config.to_dict(), frozen=True) == config
+    rejected = tmp_path / "insufficient"
+    assert main(["init", str(rejected), "--credits", str(minimum - 1), *options]) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["type"] == "ValueError"
+    assert not rejected.exists()
+
+
+@pytest.mark.parametrize("option", ["--no-coach", "--no-consultant"])
+def test_explicit_critic_requires_both_roles_before_publication(tmp_path, capsys, option):
+    root = tmp_path / "invalid"
+    assert main(["init", str(root), option, "--closure-critic"]) == 1
+    assert "requires both" in json.loads(capsys.readouterr().err)["error"]["message"]
+    assert not root.exists()
+
+
+def test_candidate_defaults_and_frozen_missing_fields_are_separate():
+    original = {"version": 5}
+    candidate = Config.parse(original)
+    assert candidate.coach and candidate.consultant and candidate.closure_critic
+    assert candidate.model == "gpt-6.1-sol" and candidate.reasoning_effort == "high"
+    assert candidate.model_for("coach") == candidate.model_for("advice") == "gpt-6-astra"
+    historical = Config.parse(original, frozen=True)
+    assert not historical.coach and not historical.consultant and not historical.closure_critic
+    assert historical.model == "auto" and historical.reasoning_effort == "medium"
+    assert historical.model_for("coach") == historical.model_for("advice") == "auto"
+    assert original == {"version": 5}
+    explicit = {**historical.to_dict(), "model": "retained-model", "reasoning_effort": "low"}
+    assert Config.parse(explicit) == Config.parse(explicit, frozen=True)
+    assert not Config.parse(explicit).coach
+    assert Config.parse(explicit).model_for("coach") == "retained-model"
+    with pytest.raises(ValueError, match="closure_critic"):
+        Config.parse({"version": 5, "closure_critic": None})
+
+
+@pytest.mark.parametrize("missing", ["coach", "consultant"])
+def test_omitted_critic_follows_prerequisites_but_explicit_true_is_strict(missing):
+    value = {"version": 5, missing: False}
+    assert not Config.parse(value).closure_critic
+    with pytest.raises(ValueError, match="requires both"):
+        Config.parse({**value, "closure_critic": True})
 
 
 def test_stalled_review_configuration_defaults_and_cli(tmp_path, capsys):

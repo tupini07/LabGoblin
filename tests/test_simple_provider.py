@@ -67,16 +67,24 @@ class FakeSession:
         self.options, self.script = options, script
         self.used, self.prompts, self.aborted, self.updates = 0, [], False, []
         self.tool_results = []
+        self.hook_results = []
         self.tool_worker = None
         self.rpc = SimpleNamespace(
             model=SimpleNamespace(get_current=self.current_model),
             permissions=SimpleNamespace(set_mode=self.permissions),
             usage=SimpleNamespace(get_metrics=self.metrics),
             options=SimpleNamespace(update=self.update),
+            tasks=SimpleNamespace(list=self.tasks, wait_for_pending=self.wait_for_tasks),
             tools=SimpleNamespace(initialize_and_validate=self.initialize_tools, get_current_metadata=self.metadata))
 
     async def initialize_tools(self):
         return Value({"success": True})
+
+    async def tasks(self):
+        return Value({"tasks": self.script.get("tasks", []) if self.prompts else []})
+
+    async def wait_for_tasks(self, **kwargs):
+        return Value({})
 
     async def current_model(self):
         return Value(self.script.get("applied_model", {
@@ -117,6 +125,27 @@ class FakeSession:
         if self.script.get("consult"):
             self.tool_worker = asyncio.create_task(self.consult_and_finish())
             return
+        if self.script.get("pre_tools"):
+            self.tool_worker = asyncio.create_task(self.hooks_and_finish())
+            return
+        for args in self.script.get("trajectory_reads", []):
+            tool = next(tool for tool in self.options["tools"] if tool.name == "labgoblin_read_trajectory")
+            self.tool_results.append(tool.handler(SimpleNamespace(arguments=args)))
+        await self.finish()
+
+    async def hooks_and_finish(self):
+        async def hook(name):
+            value = self.options["hooks"]["on_pre_tool_use"](
+                {"sessionId": self.options["session_id"], "toolName": name, "toolArgs": {}},
+                {"session_id": self.options["session_id"]})
+            if asyncio.iscoroutine(value):
+                value = await value
+            self.hook_results.append(value)
+        if self.script.get("parallel_hooks"):
+            await asyncio.gather(*(hook(name) for name in self.script["pre_tools"]))
+        else:
+            for name in self.script["pre_tools"]:
+                await hook(name)
         await self.finish()
 
     async def consult_and_finish(self):
@@ -263,6 +292,42 @@ def test_shutdown_identifies_idle_wait_timeout_without_promoting_partial_usage(p
     assert code == 1 and "wait for idle after abort: TimeoutError" in result["reason"]
     assert "timed out after" in result["reason"]
     assert not (Path(envelope.root) / "usage.json").exists() and clients[0].stopped
+
+
+@pytest.mark.parametrize("operation,stage", [("disconnect", "disconnect"), ("stop", "stop runtime")])
+def test_stalled_shutdown_respects_session_deadline_and_retains_failure(
+        project, ledger, monkeypatch, operation, stage):
+    envelope = arm(project, ledger)
+    client = FakeClient({})
+
+    async def check():
+        session = provider.Session(envelope, "goal-review-0", "stalled-shutdown",
+                                   30 * credits.NANO, client, time.monotonic() + 120, purpose="coach")
+        await session.start()
+        await session.ask("Check the retained evidence.", lambda: None)
+        forced = []
+
+        async def stall():
+            await asyncio.Event().wait()
+
+        async def force_stop():
+            forced.append(True)
+            client.stopped = True
+
+        monkeypatch.setattr(client.session if operation == "disconnect" else client, operation, stall)
+        monkeypatch.setattr(client, "force_stop", force_stop)
+        started = time.monotonic()
+        session.deadline = deadline = started + 0.05
+        with pytest.raises(RuntimeError, match=f"{stage}: TimeoutError"):
+            await session.close()
+        assert time.monotonic() - started < 2
+        assert session.deadline == deadline and forced == [True] and client.stopped
+        shutdown = read_json(session.directory / "shutdown.json")
+        assert shutdown["usage_complete"] and session.events.closed
+        assert [error["stage"] for error in shutdown["errors"]] == [stage]
+        assert read_json(session.directory / "usage.json")["complete"]
+
+    asyncio.run(check())
 
 
 def test_console_encoding_does_not_interrupt_original_unicode_retention(project, ledger, monkeypatch):
@@ -542,6 +607,26 @@ def test_quota_stop_never_buys_a_shrinking_retry(project, ledger):
     assert len(clients) == 1
     assert len(clients[0].session.prompts) == 1
     assert (Path(envelope.root) / "sessions" / "researcher" / "answer-1.txt").exists()
+
+
+@pytest.mark.parametrize("checkins", [False, True])
+def test_quota_without_idle_stops_before_deadline_and_retains_usage(project, ledger, monkeypatch, checkins):
+    envelope = arm(project, ledger, checkins=checkins)
+    send = FakeSession.send
+
+    async def exhaust_without_idle(session, prompt):
+        await send(session, prompt)
+        session.event("session.info", info_type="session_limits",
+                      message="Session limit reached. Increase or unset the session limit to continue.")
+
+    monkeypatch.setattr(FakeSession, "send", exhaust_without_idle)
+    result, clients, outcome = exercise(envelope, [{"wait": True}], seconds=provider.GRACE_SECONDS + 1)
+    assert result == 1 and outcome["status"] == "budget_exhausted", outcome
+    assert len(clients) == 1 and len(clients[0].session.prompts) == 1
+    assert clients[0].session.aborted and clients[0].stopped
+    assert not clients[0].session.updates and not outcome["finalization_errors"]
+    usage = read_json(Path(envelope.root) / "usage.json")
+    assert usage["complete"] and usage["totalNanoAiu"] == 10 * credits.NANO
 
 
 @pytest.mark.parametrize("pre", [False, True])

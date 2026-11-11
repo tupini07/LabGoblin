@@ -36,7 +36,10 @@ def assert_dead(handle):
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_flooding_cannot_disable_deadline_or_cancel(spec, cancel):
+@pytest.mark.parametrize("capped", [False, True])
+def test_flooding_cannot_disable_deadline_or_cancel(spec, cancel, capped):
+    if not capped:
+        spec.update(cpus=None, cpu_ids=None, memory_mb=None)
     spec["argv"] = [sys.executable, "-c", "import os\nwhile True: os.write(1,b'x'*10000)"]
     timer = None
     if cancel:
@@ -70,7 +73,11 @@ def test_missing_executable_is_not_started(spec):
     assert outcome["reason"]
 
 
-def test_payload_retires_descendants_and_preserves_assigned_cpus(spec):
+@pytest.mark.parametrize("capped", [False, True])
+def test_payload_retires_descendants_and_preserves_assigned_cpus(spec, capped):
+    expected_cpus = spec["cpu_ids"] if capped else psutil.Process().cpu_affinity()
+    if not capped:
+        spec.update(cpus=None, cpu_ids=None, memory_mb=None)
     child = ("import json,psutil,time;p=psutil.Process();"
              "print(json.dumps({'pid':p.pid,'created':p.create_time(),'cpus':p.cpu_affinity()}),flush=True);"
              "time.sleep(60)")
@@ -81,8 +88,41 @@ def test_payload_retires_descendants_and_preserves_assigned_cpus(spec):
     outcome = run_process(spec)
     assert outcome["status"] == "completed", outcome
     handle = json.loads((Path(spec["root"]) / "stdout.log").read_text())
-    assert handle["cpus"] == spec["cpu_ids"]
+    assert handle["cpus"] == expected_cpus
     assert_dead(handle)
+    assert tree_state(spec["root"], spec["token"]) == "dead"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Job Object flags and aggregate commit enforcement")
+@pytest.mark.parametrize("cpus", [None, 1])
+@pytest.mark.parametrize("memory_mb", [None, 256])
+def test_optional_windows_limits_keep_job_ownership_and_memory_enforcement(spec, monkeypatch, cpus, memory_mb):
+    import win32job
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.delenv("MKL_NUM_THREADS", raising=False)
+    spec.update(cpus=cpus, cpu_ids=spec["cpu_ids"] if cpus else None, memory_mb=memory_mb)
+    code = (
+        "import json,os,win32job,win32api\n"
+        f"job=win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY,False,{spec['job_name']!r})\n"
+        "assert win32job.IsProcessInJob(win32api.GetCurrentProcess(),job)\n"
+        "info=win32job.QueryInformationJobObject(job,win32job.JobObjectExtendedLimitInformation)\n"
+        "try:\n data=bytearray(320*1024*1024);allocated=True\n"
+        "except MemoryError:\n allocated=False\n"
+        "print(json.dumps({'flags':info['BasicLimitInformation']['LimitFlags'],"
+        "'memory':info['JobMemoryLimit'],'allocated':allocated,"
+        "'threads':[os.environ.get('OMP_NUM_THREADS'),os.environ.get('MKL_NUM_THREADS')],"
+        "'gpus':os.environ.get('CUDA_VISIBLE_DEVICES')}),flush=True)\n")
+    spec["argv"] = [sys.executable, "-c", code]
+    outcome = run_process(spec)
+    assert outcome["status"] == "completed", outcome
+    actual = read_json(Path(spec["root"]) / "stdout.log")
+    assert actual["flags"] & win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    assert bool(actual["flags"] & win32job.JOB_OBJECT_LIMIT_AFFINITY) is (cpus is not None)
+    assert bool(actual["flags"] & win32job.JOB_OBJECT_LIMIT_JOB_MEMORY) is (memory_mb is not None)
+    assert actual["memory"] == (memory_mb or 0) * 1024 * 1024
+    assert actual["allocated"] is (memory_mb is None)
+    assert actual["threads"] == ([str(cpus)] * 2 if cpus else [None, None])
+    assert actual["gpus"] == ""
     assert tree_state(spec["root"], spec["token"]) == "dead"
 
 

@@ -131,7 +131,7 @@ class WindowsPayload:
             info = win32job.QueryInformationJobObject(
                 self.job, win32job.JobObjectExtendedLimitInformation)
             info["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            if "memory_mb" in spec:
+            if spec.get("memory_mb") is not None:
                 info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_JOB_MEMORY
                 info["JobMemoryLimit"] = spec["memory_mb"] * 1024 * 1024
             if cpu_ids is not None:
@@ -224,16 +224,31 @@ def process_environment(spec):
     env.update(spec.get("environment", {}))
     env.update({
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1",
-        "OMP_NUM_THREADS": str(spec["cpus"]), "MKL_NUM_THREADS": str(spec["cpus"]),
         "CUDA_VISIBLE_DEVICES": ",".join(spec.get("gpus", [])),
     })
+    if spec["cpus"] is not None:
+        env.update(OMP_NUM_THREADS=str(spec["cpus"]), MKL_NUM_THREADS=str(spec["cpus"]))
     return env
+
+
+def resource_spec(envelope):
+    from labgoblin.config import Config
+    config = Config.parse(envelope.config, frozen=True)
+    return {
+        "cpus": None if config.cpus == "unlimited" else envelope.resources.cpus,
+        "cpu_ids": None if config.cpus == "unlimited" else list(envelope.cpu_ids),
+        "memory_mb": None if config.memory_mb == "unlimited" else envelope.resources.memory_mb,
+        "gpus": list(envelope.resources.gpus),
+    }
 
 
 def run_process(spec):
     command = validate_command(spec["argv"])
-    integer(spec["cpus"], "cpus")
-    integer(spec["memory_mb"], "memory_mb")
+    for name in ("cpus", "memory_mb"):
+        if spec[name] is not None:
+            integer(spec[name], name)
+    if spec["cpus"] is None and spec.get("cpu_ids") is not None:
+        raise ValueError("Unlimited CPUs cannot specify an affinity restriction")
     number(spec["seconds"], "seconds")
     integer(spec["log_bytes"], "log_bytes")
     root = Path(spec["root"])
@@ -265,7 +280,7 @@ def run_process(spec):
             if os.name != "nt":
                 if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
                     raise PreExecutionError("Owned Linux execution requires pidfd support")
-                if hasattr(os, "sched_setaffinity"):
+                if spec["cpus"] is not None and hasattr(os, "sched_setaffinity"):
                     previous_affinity = os.sched_getaffinity(0)
                     selected = spec.get("cpu_ids")
                     if selected is None:
@@ -310,7 +325,7 @@ def run_process(spec):
                 if time.monotonic() >= deadline:
                     status, reason = "timed_out", "Operation deadline exceeded"
                     break
-                if os.name != "nt" and memory > spec["memory_mb"]:
+                if os.name != "nt" and spec["memory_mb"] is not None and memory > spec["memory_mb"]:
                     status, reason = "failed", "Monitored process-session RAM limit exceeded"
                     break
                 if any(stream.error for stream in streams):
@@ -387,6 +402,27 @@ def tree_state(root, token):
         return "dead" if count == 0 else "alive"
     finally:
         job.Close()
+
+
+def tree_members(root, token):
+    """Inspect exact identities in an existing owned tree, without stopping it."""
+    handle = read_json(Path(root) / "process-handle.json", 16384)
+    current = identity(handle["pid"])
+    if handle.get("token") != token or any(handle.get(key) != value for key, value in current.items()):
+        raise UncertainExecution("Supervisor checkpoint cannot verify its owned process tree")
+    if os.name != "nt":
+        return [identity(pid) for pid, _ in _members(handle["pid"])]
+    import pywintypes
+    import win32job
+    try:
+        job = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, f"labgoblin-{token}")
+        try:
+            return [identity(pid) for pid in win32job.QueryInformationJobObject(
+                job, win32job.JobObjectBasicProcessIdList)]
+        finally:
+            job.Close()
+    except pywintypes.error as error:
+        raise UncertainExecution(f"Cannot enumerate the owned checkpoint tree: {error}") from error
 
 
 def probe(arguments, *, timeout=30, limit=65536, memory_mb=256):

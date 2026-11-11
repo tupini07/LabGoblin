@@ -54,9 +54,10 @@ than treating the resulting negative report alone as sufficient reason to stop.
 Normal provider context management remains provider behavior and belongs in its
 usage totals; LabGoblin schedules no separate compaction or summarizing agent.
 
-Optional `coach_model`, `closure_critic_model`, `advice_model` and
+Research defaults to Sol/high, with coaching, consultations and closing criticism
+enabled. `coach_model`, `closure_critic_model`, `advice_model` and
 `claim_review_model` can provide different perspectives in fresh review sessions.
-Each defaults independently to the campaign model, not the requesting model.
+Each defaults to Astra; explicit `"inherit"` follows the campaign model, not the requesting model.
 They do not rotate or replace the persistent researcher; closure adjudication
 uses a fresh session with the configured coach model. All retain the common reasoning
 effort, original permissions, time limits and single spending pool. Model diversity
@@ -196,9 +197,10 @@ expand the goal, permissions, deadline, budget or stalled-review allowance.
 
 ## What this does not guarantee
 
-An optional **adversarial closure critic** changes the objective of a fresh
+The default-enabled **adversarial closure critic** changes the objective of a fresh
 reviewer: find a substantiated case against stopping, rather than collaborate
-on defending the report. Enable `closure_critic` with coaching and consultation.
+on defending the report. Disable it with `closure_critic = false`; it requires
+coaching and consultation.
 It is host-triggered before discretionary final acceptance, not every experiment
 or ordinary continuation. The preliminary coach approval is withheld from it.
 The critique first returns to the persistent researcher for one investigation,
@@ -247,3 +249,7 @@ scientific judgment. Paid behavioral comparisons require separate authorization.
 Across separate explicit `run --resume` executions, continuity comes from retained
 files and notes; there is no promise to resume an interrupted provider session.
 The prior execution's snapshots, receipts, reviews and event logs remain intact.
+Opt-in calendar supervisor meetings use this same fresh-conversation continuation
+after `run --resume --reviewed RUN_ID`: retained files, cumulative credits and the
+full configured execution timeout. They do not automatically restart research or
+invoke the separately funded read-only inspector.

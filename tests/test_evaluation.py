@@ -87,6 +87,25 @@ def test_frozen_selection_reality_discrepancy_and_regression(project, ledger, ki
         evaluator.evaluate("development", {"stage": "development", "candidate": "."})
 
 
+@pytest.mark.parametrize("cpus,memory_mb", [
+    ("unlimited", 1024), (1, "unlimited"), ("unlimited", "unlimited"),
+])
+def test_paired_evaluation_preserves_optional_parent_limits(project, ledger, kit, monkeypatch, cpus, memory_mb):
+    root, config, record = project
+    envelope, evaluator = admitted((root, replace(config, cpus=cpus, memory_mb=memory_mb), record), ledger, kit)
+    original, calls = evaluation.payload.run_process, []
+    def run(spec):
+        assert spec["cpus"] == (None if cpus == "unlimited" else cpus)
+        assert spec["memory_mb"] == (None if memory_mb == "unlimited" else memory_mb)
+        assert spec["cpu_ids"] == (None if cpus == "unlimited" else list(envelope.cpu_ids))
+        calls.append(spec["token"])
+        return original(spec)
+    monkeypatch.setattr(evaluation.payload, "run_process", run)
+    result = develop(evaluator)
+    assert calls and result["status"] == "completed"
+    assert result["summary"]["candidate_passed"] == 2
+
+
 def test_external_edits_do_not_change_admitted_kit(project, ledger, kit):
     envelope, evaluator = admitted(project, ledger, kit)
     (kit / "evaluator" / "check.py").write_text("raise RuntimeError('not admitted')", encoding="utf-8")

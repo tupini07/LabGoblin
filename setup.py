@@ -10,6 +10,7 @@ setup(
         'tomli_w',
         'psutil>=5.9',
         'github-copilot-sdk==1.0.15',
+        'tzdata>=2025.2; sys_platform == "win32"',
         'pywin32>=306; sys_platform == "win32"',
     ],
     data_files=[('share/labgoblin/examples/local-synthetic', [

@@ -155,6 +155,29 @@ def test_inspection_requires_external_history_and_explicit_finite_allowance(obse
         observer.approve(100, model="auto")
 
 
+def test_first_inspection_approval_creates_an_unbound_ledger_only_after_validation(observer, ledger):
+    ledger.path.rename(ledger.path.with_name("unused-fixture-ledger.db"))
+    with pytest.raises(ValueError):
+        observer.approve(1, model="model-free")
+    assert not ledger.path.exists()
+    observer.approve(30, model="model-free")
+    profile = observer.profile()
+    assert not profile.coach and not profile.consultant and not profile.closure_critic
+    assert profile.model == "model-free" and profile.reasoning_effort == "medium"
+    assert observer.ledger().capacity() is None
+    assert not (observer.project / ".labgoblin" / "ledger.json").exists()
+
+
+def test_inspection_approval_never_recreates_its_missing_bound_ledger(observer, ledger):
+    observer.approve(100, model="model-free")
+    binding = read_json(observer.state / "ledger.json")
+    ledger.path.rename(ledger.path.with_name("preserved-ledger.db"))
+    with pytest.raises(FileNotFoundError):
+        observer.approve(100, model="model-free")
+    assert not ledger.path.exists()
+    assert read_json(observer.state / "ledger.json") == binding
+
+
 def test_owned_sdk_chat_is_read_only_separately_billed_and_remembers_context(observer, project, ledger):
     observer.approve(100, model="model-free", timeout=60)
     argv = command(observer, image="comparison.png")

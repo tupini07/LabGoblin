@@ -1,7 +1,7 @@
 # LabGoblin
 
-**An ordinary Copilot researcher, with a small execution harness and optional
-stopping review.**
+**An ordinary Copilot researcher, with a small execution harness and opt-out
+coaching and scientific review.**
 
 LabGoblin gives one persistent Copilot SDK session a research question, short
 instructions and a normal workspace. The researcher chooses a useful investigation,
@@ -20,7 +20,7 @@ without asking whether to continue or ending with a future-work list. This is
 continuation within the authorized execution, not indefinite spending or an
 automatic restart.
 
-An optional read-only coach reviews the proposed stopping point. Useful feedback
+A read-only coach, enabled by default, reviews the proposed stopping point. Useful feedback
 returns to the **same researcher conversation**. By default, ten consecutive
 follow-up reviews without meaningful progress end in an unfinished checkpoint;
 evidence-grounded progress resets that counter, not time or spending limits.
@@ -38,7 +38,25 @@ exhausted ideas are not proof of impossibility.
 The harness owns resources, cumulative spending, cancellation and retained
 execution evidence; it does not decide what constitutes scientific truth.
 
-An optional `labgoblin_consult` tool lets the researcher or coach ask a fresh,
+On longer coached runs, a fresh coach also checks goal alignment about every
+three hours (`goal_review_interval_seconds = 10800`; `0` disables this).
+It reads actual researcher activity and evidence, then returns one or two
+nonbinding observations to the same conversation. Staying the course is valid.
+Reviews wait for a tool boundary, share the research credit pool and do not
+interrupt experiments or count as stopping reviews. Long tools or reasoning can
+delay delivery past the deadline. A separate once-only advance reminder encourages
+saving partial work and resume pointers; neither it nor ordinary checkpoint
+guidance guarantees a saved checkpoint.
+
+Opt-in [scheduled supervisor meetings](docs/local-research.md#scheduled-supervisor-meetings)
+request a cooperative checkpoint at a local calendar time, then leave research
+stopped for human review. They wait for owned experiments and background follow-up
+turns rather than killing work to meet the appointment. The existing read-only
+inspector supports the discussion; scheduling itself buys no review call.
+Continuation is explicit, starts a fresh conversation from retained files, keeps
+cumulative spending and uses the full configured execution timeout.
+
+The default-enabled `labgoblin_consult` tool lets the researcher or coach ask a fresh,
 read-only scientific adviser about related work, assumptions or alternative
 approaches. It returns a cited brief, not a new plan or experiment. The researcher
 still owns the notes and scientific choices; there is no continuous sidecar.
@@ -48,9 +66,8 @@ The adviser challenges assumptions and looks for counterexamples; objections
 return to the same researcher. This is not a compulsory reviewer at every stop,
 an independent experimental reproduction, or scientific certification.
 
-For an independently framed challenge to **ending the investigation**, enable
-`closure_critic = true` alongside coaching and consultation (or initialize with
-`--coach --consultant --closure-critic`). Before final acceptance, a fresh
+Independent criticism of **ending the investigation** is also enabled by default
+(`closure_critic = true`), alongside coaching and consultation. Before final acceptance, a fresh
 adversarial critic searches for the strongest evidence-backed reason to continue,
 without being told the coach approved stopping. Its critique goes directly to
 the persistent researcher for one response/investigation, then a **fresh read-only
@@ -69,11 +86,12 @@ Only the researcher can run checks; reviewers and the inspector read retained
 results. It adds no agents, progress-writing requirement or automatic promotion.
 See [the evaluation example and protocol](examples/evaluation/README.md).
 
-Review roles can use different Copilot models without switching the researcher:
-set optional `coach_model`, `closure_critic_model`, `advice_model` and
+New campaigns use **GPT-6.1 Sol for research and GPT-6 Astra for reviews**, all at
+**high** reasoning effort. Override `coach_model`, `closure_critic_model`, `advice_model` and
 `claim_review_model` in TOML, or the corresponding `init --coach-model`,
 `--closure-critic-model`, `--advice-model` and `--claim-review-model` options.
-Each unset override inherits the campaign `model`, never the caller's model.
+Each omitted override defaults to Astra; use `"inherit"` to follow the campaign
+`model`, never the caller's model.
 All roles retain the shared `reasoning_effort`, credit pool and deadlines;
 model overrides do not enable otherwise disabled roles. Named models are checked
 for availability and compatible effort/image support before research starts.
@@ -96,8 +114,7 @@ not assume a published PyPI release:
 
 ```powershell
 python -m pip install -e .
-labgoblin init .\my-research --goal-file .\question.md --model auto --credits 1000
-labgoblin machine configure --cpus 2 --memory-mb 4096 --headroom-mb 2048
+labgoblin init .\my-research --goal-file .\question.md --credits 1000
 labgoblin run .\my-research
 ```
 
@@ -111,7 +128,11 @@ are preserved, and conflicting goals are refused. Init does not generate or
 semantically review a scientific plan. Review `labgoblin.toml` and
 `.github\copilot-instructions.md`;
 starting `run` authorizes the configured research execution and its credit pool.
-The machine example is a capacity choice, not a recommendation for every host.
+No machine-capacity setup is needed. Runs share local hardware under normal OS
+scheduling. CPU/RAM limits default to `"unlimited"`; set `--cpus` and `--memory-mb`
+at init (or edit TOML before running) for optional per-run safeguards. GPU access
+still requires an explicit `--gpu` device UUID; it is nonexclusive and has no
+VRAM quota. Process ownership, cancellation, deadlines and credit caps remain.
 
 New projects also prepare/reuse an isolated `.venv`, separate from LabGoblin's
 own installation. The researcher may manage its scientific dependencies, download
@@ -128,9 +149,16 @@ local ignore rules without staging, committing or changing Git identity. Use
 selected-file rollback and artifact organization; there is no commit schedule.
 Git does not protect ignored/untracked evidence or replace an independent backup.
 
-The researcher runs alone by default. Add `--coach` during initialization, or set
-`coach = true` before a new run, to enable stopping review. The default execution
-deadline is 90 minutes, including shutdown and any stopping reviews. A controller
+Coaching, on-demand consultations/claim review and closing criticism are enabled
+by default. Use `init --no-coach --no-consultant` for a researcher alone, or
+`--no-closure-critic` to retain coaching and advice without the closing critic.
+At initialization, disabling either prerequisite also disables the default critic;
+explicitly requesting a critic without both prerequisites is an error. When editing
+an existing TOML, set `closure_critic = false` alongside any disabled prerequisite.
+Explicit settings and already-frozen executions remain unchanged; omitted candidate
+settings use the new defaults at the next execution. No configuration is rewritten.
+The default execution deadline remains 90 minutes, including shutdown and stopping
+reviews; three-hour advisory check-ins become relevant for longer configured runs. A controller
 restart does not reset spending or extend already-admitted work.
 `max_stalled_reviews = 10` controls the consecutive no-progress ceiling, not
 the total number of reviews; set it in TOML or with `init --max-stalled-reviews`.
@@ -152,7 +180,7 @@ the harness does not duplicate them into result snapshots.
 | `stop PROJECT` | Request bounded cancellation of exactly this project's owned execution. |
 | `reconcile PROJECT` | Retire only proven-dead owned executions; never replay research. |
 | `record-usage PROJECT ...` | Append explicitly confirmed final usage or a separately labeled operator estimate. |
-| `machine status` | Inspect shared resource capacity and reservations. |
+| `machine status` | Inspect execution claims and retained legacy capacity. |
 
 Commands produce JSON and return nonzero on failure or an incomplete run.
 Ctrl+C requests cancellation; abrupt controller death instead leaves the
@@ -214,8 +242,8 @@ from **observed spending**, including an in-place update of the idle researcher'
 cumulative session ceiling before any continuation. There are no task-cost
 forecasts or per-role credit settings.
 
-Consultations are separately opt-in: use `init --consultant` or set
-`consultant = true` before a new execution. This authorizes workspace evidence
+Consultations are available by default but called only when useful; disable them
+with `init --no-consultant`. The capability authorizes workspace evidence
 reads and public literature retrieval, not uploads or arbitrary agent spawning.
 Researcher, coach and advisers all share the same project pool, with no separate
 consultation quota. At an owned consultation tool boundary, the harness first
@@ -229,7 +257,14 @@ The critic may use the unspent pool except protected coach/researcher allowance;
 it has no separate credit or evidence-operation cap. After settled criticism,
 unused allowance funds the researcher response and fresh adjudicator;
 no session's previous spending is reset.
-Ordinary advice and claim reviews have at most 30 minutes including shutdown.
+The default combination needs at least 90 credits; coaching-only or
+consultation-only needs 60, and a researcher alone needs 30. Defaults do not
+increase the project's allowance. Reviews can consume a substantial share of it
+and do not certify scientific validity.
+Ordinary advice and claim reviews default to at most 60 minutes including shutdown
+(`consultation_timeout_seconds = 3600`); periodic goal reviews default to 30 minutes
+(`goal_review_timeout_seconds = 1800`). Both are configurable ceilings, not target
+durations, and cannot extend the campaign deadline.
 The critic has at most two hours, bounded by the campaign deadline with ten
 minutes retained for the researcher response and another ten for adjudication.
 The response can use more available time but must leave the adjudication reserve.

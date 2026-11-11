@@ -30,6 +30,7 @@ with zipfile.ZipFile(wheels[0]) as archive:
     metadata = archive.read(next(name for name in names if name.endswith(".dist-info/METADATA"))).decode()
     assert "Version: 3.0.0" in metadata
     assert "Requires-Dist: github-copilot-sdk==1.0.15" in metadata
+    assert 'Requires-Dist: tzdata>=2025.2; sys_platform == "win32"' in metadata
     assert not any(f"Requires-Dist: {name}" in metadata for name in ("docker", "rich", "markdown-it-py"))
     for name in ("experiment.py", "research_goal.md", "README.md"):
         assert any(item.endswith(f"/examples/local-synthetic/{name}") for item in names)

@@ -7,7 +7,7 @@ import pytest
 
 from labgoblin import credits, provider, runtime
 from labgoblin.cli import main
-from labgoblin.config import Config
+from labgoblin.config import Config, ROLE_MODELS
 from labgoblin.storage import read_json
 from tests.conftest import arm
 from tests.test_closure_critic import closing
@@ -42,9 +42,9 @@ def test_model_overrides_reject_invalid_ids(field, value):
 
 
 def test_optional_models_roundtrip_without_enabling_roles(tmp_path):
-    original = Config.parse({"version": 5, "model": "campaign"})
+    original = Config.parse({"version": 5, "model": "campaign"}, frozen=True)
     assert all(getattr(original, field) is None for field in OVERRIDES)
-    assert not set(OVERRIDES).intersection(original.to_dict())
+    assert all(original.to_dict()[field] == "inherit" for field in OVERRIDES)
     assert all(original.model_for(purpose) == "campaign" for purpose in
                ("researcher", "coach", "closure_critique", "advice", "claim_review"))
     config = replace(original, **OVERRIDES)
@@ -58,7 +58,7 @@ def test_optional_models_roundtrip_without_enabling_roles(tmp_path):
 
 def test_init_exposes_all_role_models_without_provider_calls(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Init must not contact Copilot"))
-    arguments = ["init", str(tmp_path), "--model", "research-model"]
+    arguments = ["init", str(tmp_path), "--model", "research-model", "--no-coach", "--no-consultant"]
     for field, model in OVERRIDES.items():
         arguments.extend(["--" + field.replace("_", "-"), model])
     assert main(arguments) == 0
@@ -66,6 +66,29 @@ def test_init_exposes_all_role_models_without_provider_calls(tmp_path, monkeypat
     config = Config.load(tmp_path)
     assert {field: getattr(config, field) for field in OVERRIDES} == OVERRIDES
     assert not config.coach and not config.consultant
+
+
+@pytest.mark.parametrize("inherit", [False, True])
+def test_init_model_defaults_and_explicit_inheritance_roundtrip(tmp_path, monkeypatch, capsys, inherit):
+    monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Init must not contact Copilot"))
+    arguments = ["init", str(tmp_path), "--no-git", "--no-research-venv"]
+    if inherit:
+        arguments += ["--model", "chosen-researcher"]
+        for field in ROLE_MODELS:
+            arguments += ["--" + field.replace("_", "-"), "inherit"]
+    assert main(arguments) == 0
+    capsys.readouterr()
+    config = Config.load(tmp_path)
+    assert config == (Config(model="chosen-researcher", **dict.fromkeys(ROLE_MODELS))
+                      if inherit else Config())
+    assert config.reasoning_effort == "high"
+    expected = "chosen-researcher" if inherit else "gpt-6-astra"
+    assert [config.model_for(purpose) for purpose in ("coach", "advice", "claim_review", "closure_critique")] == [expected] * 4
+    assert Config.parse(config.to_dict(), frozen=True) == config
+    if inherit:
+        changed = replace(config, model="next-researcher")
+        (tmp_path / "labgoblin.toml").write_text(changed.toml(), encoding="utf-8")
+        assert Config.load(tmp_path).model_for("coach") == "next-researcher"
 
 
 @pytest.mark.parametrize("unset", [None, "all", *OVERRIDES])

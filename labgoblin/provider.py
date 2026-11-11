@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 
-from labgoblin import consultation, credits, guidance
+from labgoblin import checkins, consultation, credits, guidance
 from labgoblin.config import Config
 from labgoblin.protocol import LaunchEnvelope, table, text
 from labgoblin.session_log import EventLog
@@ -51,12 +51,17 @@ def capabilities():
 
 def client_for(envelope, *, coach=False):
     from copilot import CopilotClient, RuntimeConnection
+    from labgoblin.supervisor import TASK_WAIT_SECONDS
     prompt = read_json(Path(envelope.root) / "prompt.json")
     command = prompt["provider_command"]
+    environment = None
+    if not coach and prompt.get("supervisor_review") is not None:
+        environment = {**os.environ, "COPILOT_TASK_WAIT_TIMEOUT_SECONDS": str(TASK_WAIT_SECONDS)}
     return CopilotClient(
         connection=RuntimeConnection.for_stdio(path=command[0], args=[*command[1:], *FLAGS]),
         working_directory=envelope.project, mode="empty" if coach else "copilot-cli",
         log_level="error", session_idle_timeout_seconds=0, enable_remote_sessions=False,
+        env=environment,
         base_directory=os.environ.get("COPILOT_HOME", str(Path.home() / ".copilot")),
     )
 
@@ -107,6 +112,8 @@ class Session:
         self.waiting = False
         self.observed_turn = False
         self.aborting = False
+        self.checkins = None
+        self.supervisor = None
         self.failure = ""
         self.failure_is_limit = False
         self.limit_reached = False
@@ -147,12 +154,23 @@ class Session:
     def event(self, event):
         kind, data = event.type.value, event.data
         self.last_event, self.last_progress = kind, time.time()
+        if self.supervisor:
+            try:
+                self.supervisor.event(kind, data)
+            except (ValueError, TypeError) as error:
+                if not self.failure or self.failure_is_limit:
+                    self.failure = f"Invalid supervisor activity evidence: {error}"
+                    self.failure_is_limit = False
         if kind in ("assistant.turn_start", "assistant.message"):
             self.observed_turn = True
         if kind == "assistant.message" and data.content:
             self.answer = data.content
         if kind == "session.idle" and (self.observed_turn or self.aborting):
             self.idle.set()
+        if (self.checkins and self.checkins.active_hook_id and not self.aborting
+                and kind in ("assistant.turn_start", "session.idle")):
+            self.failure = "Researcher resumed or ended before its owned check-in returned"
+            self.failure_is_limit = False
         error = getattr(data, "error", None)
         code = error.get("code") if isinstance(error, dict) else getattr(error, "code", None)
         coded_limit = (code == "session_limits_exhausted"
@@ -205,7 +223,7 @@ class Session:
             "mcp_servers": {}, "plugin_directories": [], "memory": {"enabled": False},
             "excluded_tools": ToolSet().add_builtin(["task", "run_subagent", "run_dynamic_workflow", "fleet"]),
             "system_message": {"mode": "replace" if restricted else "append", "content": system},
-            "hooks": {"on_pre_tool_use": research_guard},
+            "hooks": {"on_pre_tool_use": self.checkins.before_tool if self.checkins else research_guard},
         }
         permission_mode = "manual" if restricted else "allow-all"
         if tools is not None:
@@ -311,6 +329,10 @@ class Session:
         self.failure, self.answer, self.failure_is_limit = "", "", False
         self.waiting, self.sent, self.complete = True, True, False
         self.turns += 1
+        if self.supervisor:
+            notice = self.supervisor.notice("researcher_prompt")
+            if notice:
+                prompt += "\n\n" + notice
         publish_bytes(self.directory / f"prompt-{self.turns}.txt", prompt.encode("utf-8"))
         await self.bounded(self.session.send(prompt))
         if idea_delivery is not None:
@@ -318,13 +340,18 @@ class Session:
         if closure_delivery is not None:
             closure_delivery.submitted(self.turns, prompt)
         last_metrics = 0
-        while not self.idle.is_set():
+        while not self.idle.is_set() or self.supervisor:
             if (Path(self.envelope.root) / "cancel").exists():
                 raise StopRequested("cancelled", "Operator cancellation requested")
             if time.monotonic() >= self.deadline - GRACE_SECONDS:
                 raise StopRequested("timed_out", f"{self.role} session deadline approaching; retaining shutdown time")
-            if self.failure:
-                raise StopRequested("budget_exhausted" if self.failure_is_limit else "failed", self.failure)
+            if self.failure or self.limit_reached:
+                raise StopRequested("budget_exhausted" if (self.failure_is_limit or not self.failure) else "failed",
+                                    self.failure or "Provider session credit limit reached")
+            if self.supervisor:
+                due = self.supervisor.request_due()
+                if self.idle.is_set() and (not due or await self.supervisor.drained()):
+                    break
             if time.monotonic() - last_metrics >= 10:
                 try:
                     await self.metrics()
@@ -335,7 +362,8 @@ class Session:
                 last_metrics = time.monotonic()
             await asyncio.sleep(0.2)
         self.waiting = False
-        publish_bytes(self.directory / f"answer-{self.turns}.txt", self.answer.encode("utf-8"))
+        answer = self.answer
+        publish_bytes(self.directory / f"answer-{self.turns}.txt", answer.encode("utf-8"))
         await self.metrics()
         self.complete = True
         publish_json(self.directory / f"settled-prompt-{self.turns}.json", self.record())
@@ -347,23 +375,26 @@ class Session:
         if self.failure or self.limit_reached:
             raise StopRequested("budget_exhausted" if (self.failure_is_limit or not self.failure) else "failed",
                                 self.failure or "Provider session credit limit reached")
-        if not self.answer.strip() and self.role == "researcher":
+        if not answer.strip() and self.role == "researcher":
             raise RuntimeError("Copilot ended without a final response")
-        return self.answer
+        return answer
 
     async def set_allowance(self, allowance):
         if self.waiting or not self.idle.is_set() or self.limit_reached:
             raise ValueError("Only an idle, unexhausted session may receive its remaining project allowance")
         await self._apply_allowance(allowance, reason="Reallocate the remaining project pool at a settled idle boundary")
 
-    async def set_consultation_allowance(self, allowance, call_id):
+    async def set_consultation_allowance(self, allowance, call_id, *, hook=False):
         if (self.consultation_call_id != call_id or not call_id or not self.waiting or self.idle.is_set()
                 or self.aborting or self.limit_reached or self.failure):
             raise ValueError("Consultation allocation requires the exact blocked, unexhausted caller")
-        await self._apply_allowance(allowance, reason="Transfer shared allowance while the owned consultation blocks its caller",
-                                    tool_call_id=call_id)
+        if hook and (self.checkins is None or self.checkins.active_hook_id != call_id
+                     or not self.checkins.lock.locked()):
+            raise ValueError("Timed review allowance requires the exact held researcher hook")
+        await self._apply_allowance(allowance, reason="Transfer shared allowance while the owned callback blocks its caller",
+                                    tool_call_id=None if hook else call_id, hook_id=call_id if hook else None)
 
-    async def _apply_allowance(self, allowance, *, reason, tool_call_id=None):
+    async def _apply_allowance(self, allowance, *, reason, tool_call_id=None, hook_id=None):
         from copilot.generated.rpc import SessionLimitsConfig, SessionUpdateOptionsParams
         used = credits.usage_nano(self.usage)
         if (self.allowance is None or type(allowance) is not int
@@ -378,6 +409,7 @@ class Session:
             "run_id": self.envelope.id, "session_id": self.id, "previous_nano": previous,
             "new_nano": allowance, "reported_session_nano": used,
             "reason": reason, "tool_call_id": tool_call_id,
+            **({"hook_id": hook_id} if hook_id is not None else {}),
         })
         self.allowance_revisions += 1
 
@@ -386,6 +418,10 @@ class Session:
         primary = None
         stage = "settlement"
         try:
+            if self.supervisor:
+                stage = "settle supervisor task wait"
+                self.complete = False
+                await self.supervisor.close()
             if self.session is not None:
                 if self.sent and not self.idle.is_set():
                     self.aborting = True
@@ -412,9 +448,10 @@ class Session:
             try:
                 if self.session is not None:
                     stage = "disconnect"
-                    await self.bounded(self.session.disconnect(), 3)
+                    await self.bounded(self.session.disconnect(), 10)
                 stage = "stop runtime"
-                await self.bounded(self.client.stop(), 5)
+                # The SDK allows ten seconds for shutdown before transport/process cleanup.
+                await self.bounded(self.client.stop(), 15)
             except (OSError, ValueError, RuntimeError, ExceptionGroup) as error:
                 primary = primary if primary is not None else error
                 failures.append(error_details(stage, error))
@@ -617,9 +654,13 @@ class Consultations:
                         "required": ["question"], "additionalProperties": False},
                     skip_permission=True, defer="never")
 
-    async def consult(self, caller, call_id, args, previews, protected):
+    async def consult(self, caller, call_id, args, previews, protected, *, hook=False, deadline=None):
         if caller.consultation_call_id is not None:
             raise ValueError("The caller already has a blocked consultation")
+        if hook and (caller.role != "researcher" or caller.checkins is None
+                     or caller.checkins.active_hook_id != call_id or not caller.checkins.lock.locked()
+                     or args.get("purpose") != "goal_review"):
+            raise ValueError("Timed review allocation requires its held researcher hook")
         caller.consultation_call_id = call_id
         try:
             if any(session is not caller and (session.waiting or not session.complete or session.usage is None)
@@ -631,8 +672,9 @@ class Consultations:
                 if self.envelope.allowance_nano - spent - protected < 2 * credits.MIN_SESSION:
                     return consultation.failure(ValueError(
                         "Remaining campaign allowance cannot fund an adviser and caller response; no adviser started"))
-                await caller.set_consultation_allowance(credits.usage_nano(caller.usage) + credits.MIN_SESSION, call_id)
-            result = await self.perform(caller, call_id, args, previews, protected)
+                await caller.set_consultation_allowance(
+                    credits.usage_nano(caller.usage) + credits.MIN_SESSION, call_id, **({"hook": True} if hook else {}))
+            result = await self.perform(caller, call_id, args, previews, protected, deadline=deadline)
             self.raise_if_failed()
             if self.envelope.allowance_nano is not None:
                 await caller.metrics()
@@ -640,7 +682,8 @@ class Consultations:
                 remaining = self.envelope.allowance_nano - spent - protected
                 if remaining < credits.MIN_SESSION:
                     raise StopRequested("budget_exhausted", "Adviser spending left insufficient shared campaign allowance for the caller")
-                await caller.set_consultation_allowance(credits.usage_nano(caller.usage) + remaining, call_id)
+                await caller.set_consultation_allowance(
+                    credits.usage_nano(caller.usage) + remaining, call_id, **({"hook": True} if hook else {}))
             return result
         except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup) as error:
             if self.fatal is None:
@@ -706,6 +749,7 @@ class Consultations:
         from copilot import ToolResult
         purpose = args.get("purpose", "advice")
         critic = purpose == "closure_critique"
+        goal_review = purpose == "goal_review"
         await caller.metrics()
         allowance = None
         if self.envelope.allowance_nano is not None:
@@ -714,21 +758,30 @@ class Consultations:
             allowance = self.envelope.allowance_nano - spent - committed - protected
         if allowance is not None and allowance < credits.MIN_SESSION:
             return consultation.failure(ValueError("Remaining consultation allowance is below the provider minimum; no adviser started"))
-        role = f"consult-{len(self.advisers())}"
+        role = (f"goal-review-{sum(session.role.startswith('goal-review-') for session in self.sessions)}"
+                if goal_review else f"consult-{len(self.advisers())}")
+        review_seconds = (CLOSURE_CRITIC_SECONDS if critic else
+                          caller.config.goal_review_timeout_seconds if goal_review else
+                          caller.config.consultation_timeout_seconds)
         adviser = Session(self.envelope, role, str(uuid.uuid5(uuid.UUID(self.envelope.id), role)), allowance,
                           self.client_factory(self.envelope, coach=True),
-                          min(self.deadline, time.monotonic() + (CLOSURE_CRITIC_SECONDS if critic else consultation.CONSULT_SECONDS),
-                              deadline if deadline is not None else self.deadline), purpose=purpose)
+                          min(self.deadline, time.monotonic() + review_seconds,
+                              deadline if deadline is not None else self.deadline),
+                          purpose="coach" if goal_review else purpose)
         self.sessions.append(adviser)
         audit = consultation.EvidenceAudit(adviser.directory, count_limited=not critic)
         system = guidance.CONSULTANT + (guidance.CLAIM_REVIEW if purpose == "claim_review" else "")
         if critic:
             system = guidance.CLOSURE_CRITIC
+        if goal_review:
+            system = guidance.GOAL_REVIEW
         evaluation = getattr(self, "evaluation", None)
         if evaluation is not None:
             system += guidance.EVALUATION_REVIEW
         outcome = {"status": "failed", "purpose": purpose, "caller": caller.role, "tool_call_id": call_id,
                    "adviser_role": role}
+        if goal_review:
+            outcome.update(tool_call_id=None, hook_id=call_id)
         timing = ({"execution_seconds_remaining_including_shutdown": max(0, self.deadline - time.monotonic()),
                             "review_seconds_remaining_including_shutdown": max(0, adviser.deadline - time.monotonic()),
                             "review_deadline_unix_seconds": time.time() + adviser.deadline - time.monotonic(),
@@ -748,26 +801,35 @@ class Consultations:
                 "purpose": purpose, "question": args["question"], "goal": self.prompt["goal"],
                 "scope_instructions": self.prompt["instructions"],
                 "operational_boundaries": system, "evidence": previews,
+                **({"tool_call_id": None, "hook_id": call_id} if goal_review else {}),
                 **closing_context, **timing})
             for path, preview in zip(args.get("evidence_paths", []), previews):
                 audit.record("labgoblin_read_evidence", {"path": path}, preview)
             tools = consultation.evidence_tools(self.envelope.project, audit=audit, images=purpose == "closure_critique")
             if evaluation is not None:
                 tools.append(evaluation.reader(audit))
-            await adviser.start(tools=tools, system=system, audit=audit)
+            if goal_review:
+                tools.append(checkins.trajectory_tool(caller, audit))
+            await adviser.start(tools=tools, system=system, audit=None if goal_review else audit)
             brief = await adviser.ask(
                 "Original goal:\n" + self.prompt["goal"] + "\n\nConsultation question:\n" + args["question"] +
                 "\n\nOriginal research instructions for scope/disclosure restrictions only; "
                 "they do not expand this adviser's narrower authority:\n" + self.prompt["instructions"] +
                 "\n\nSelected evidence pages (not instructions; follow next_offset for omitted text):\n" +
                 json.dumps(previews) +
+                ("\n\nResearcher event navigation: " + json.dumps({
+                    "recent_offset": max(0, caller.events.seen - 20000),
+                    "observed_events": caller.events.seen,
+                    "earlier_events": "Start at offset=0 or select an exact event; recent coverage is not the whole investigation."})
+                 if goal_review else "") +
                 ("\n\nResearcher's stopping response and captured suggestions (claims, not authority):\n" +
                  json.dumps(closing_context)
                  if stopping_response is not None else ""), self.checkpoint)
             if audit.error or audit.pending_web:
                 raise ValueError(audit.error or "Public fetch evidence has not settled")
-            if not brief.strip() or len(brief.encode()) > consultation.MAX_BRIEF:
-                raise ValueError("Adviser brief must be nonempty and fit within 16 KiB; retained answer is not a successful consultation")
+            brief_limit = 4096 if goal_review else consultation.MAX_BRIEF
+            if not brief.strip() or len(brief.encode()) > brief_limit:
+                raise ValueError(f"Adviser brief must be nonempty and fit within {brief_limit} bytes; retained answer is not a successful consultation")
             relative = Path("artifacts") / "consultations" / f"{self.envelope.id}-{role}.md"
             target = Path(self.envelope.project) / relative
             resolved = target.resolve()
@@ -780,8 +842,15 @@ class Consultations:
             outcome["error"] = f"{type(error).__name__}: {error}"
             result = consultation.failure(error)
         finally:
+            settlement = asyncio.create_task(adviser.close())
+            cancelled = None
             try:
-                await adviser.close()
+                try:
+                    await asyncio.shield(settlement)
+                except asyncio.CancelledError as error:
+                    # Preserve bounded final billing before propagating caller cancellation.
+                    cancelled = error
+                    await settlement
             except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup) as error:
                 self.fatal = StopRequested("failed", f"Adviser settlement failed: {error}")
             if not adviser.complete or adviser.usage is None:
@@ -803,6 +872,7 @@ class Consultations:
                     if target.resolve() != resolved:
                         raise ValueError("Consultation artifact destination changed before publication")
                     title = ("Adversarial closure critique" if purpose == "closure_critique" else
+                             "Advisory goal review" if goal_review else
                              "Scientific claim review" if purpose == "claim_review" else "Research consultation")
                     body = ("# " + title + "\n\nQuestion: " + args["question"] +
                             "\n\nCaller: " + caller.role + "\n\nModel: " + outcome["model"] +
@@ -817,6 +887,8 @@ class Consultations:
                     result = consultation.failure(error)
             publish_json(adviser.directory / "response.json", outcome)
             self.checkpoint()
+            if cancelled is not None:
+                raise cancelled
         if result is not None:
             return result
         return ToolResult(result_type="success", text_result_for_llm=json.dumps(outcome))
@@ -832,10 +904,12 @@ class Consultations:
 
 
 async def drive(envelope, deadline, *, client_factory=client_for):
-    from labgoblin import closing
+    from labgoblin import closing, supervisor
     from labgoblin.ideas import RunInbox, VERSION
     config, root = Config.parse(envelope.config, frozen=True), Path(envelope.root)
     prompt = read_json(root / "prompt.json")
+    timed_checkins = checkins.enabled(prompt)
+    appointment = supervisor.binding(envelope, prompt)
     inbox = RunInbox(envelope) if prompt.get("operator_ideas_version") == VERSION else None
     sessions, reviews, errors = [], [], []
     status, reason = "failed", "Research execution did not complete"
@@ -848,16 +922,25 @@ async def drive(envelope, deadline, *, client_factory=client_for):
         atomic_json(root / "usage-progress.json", value)
 
     allowance = envelope.allowance_nano
-    consultations = Consultations(envelope, prompt, sessions, deadline, client_factory, checkpoint) if config.consultant else None
+    consultations = (Consultations(envelope, prompt, sessions, deadline, client_factory, checkpoint)
+                     if config.consultant or timed_checkins else None)
     if consultations:
         consultations.operator_ideas = inbox
     research_allowance = None if allowance is None else allowance - (credits.COACH_RESERVE if config.coach else 0)
     researcher = Session(envelope, "researcher", str(uuid.UUID(envelope.id)), research_allowance,
                          client_factory(envelope), deadline)
     sessions.append(researcher)
+    if appointment:
+        researcher.supervisor = supervisor.Meeting(researcher, appointment)
+    if timed_checkins or appointment:
+        researcher.checkins = checkins.Checkins(researcher, consultations, deadline)
     evaluation = None
 
     async def ask_researcher(message, *, extra=False, closure_delivery=None):
+        if researcher.supervisor and researcher.turns:
+            await researcher.supervisor.checkpoint()
+        if researcher.checkins:
+            researcher.checkins.reviews_allowed = closure_delivery is None
         if extra and researcher.allowance is not None:
             if researcher.allowance - credits.usage_nano(researcher.usage) < credits.MIN_SESSION:
                 raise StopRequested("budget_exhausted", "Operator ideas remain pending; the allocated researcher pool cannot fund another response")
@@ -873,10 +956,14 @@ async def drive(envelope, deadline, *, client_factory=client_for):
             evaluation.raise_if_failed()
             if evaluation.active is not None:
                 raise RuntimeError("Researcher ended while its owned evaluation was unsettled")
+        if consultations and consultations.active is not None:
+            raise RuntimeError("Researcher ended while its owned consultation or check-in was unsettled")
         if delivery:
             delivery.responded(answer)
         if closure_delivery:
             closure_delivery.responded(answer)
+        if researcher.supervisor:
+            await researcher.supervisor.checkpoint()
         return answer
 
     idea_follow_up = ("New operator ideas are available. Read their captured files and assess them against "
@@ -887,7 +974,8 @@ async def drive(envelope, deadline, *, client_factory=client_for):
     try:
         if not closing.enabled(prompt) and config.closure_critic:
             raise ValueError("Closure criticism requires the frozen researcher-response capability")
-        research_tools = [consultations.tool(researcher, protected=credits.COACH_RESERVE if config.coach else 0)] if consultations else []
+        research_tools = ([consultations.tool(researcher, protected=credits.COACH_RESERVE if config.coach else 0)]
+                          if config.consultant else [])
         if "evaluation" in prompt:
             from labgoblin.evaluation import Evaluator
             evaluation = Evaluator(envelope, lambda: researcher.deadline)
@@ -895,9 +983,11 @@ async def drive(envelope, deadline, *, client_factory=client_for):
             if consultations:
                 consultations.evaluation = evaluation
         await researcher.start(tools=research_tools or None, system=prompt["instructions"] +
-                               (guidance.CONSULT_CALLER if consultations else "") +
+                               (guidance.CONSULT_CALLER if config.consultant else "") +
                                (guidance.EVALUATION if evaluation else "") +
                                ("\nEvaluation purpose: " + evaluation.definition["purpose"] if evaluation else ""))
+        if researcher.supervisor:
+            await researcher.supervisor.start()
         answer = await ask_researcher(prompt["goal_prompt"])
         if consultations:
             consultations.raise_if_failed()
@@ -905,6 +995,8 @@ async def drive(envelope, deadline, *, client_factory=client_for):
         if config.coach:
             index, stalled_reviews = 0, 0
             while True:
+                if researcher.supervisor:
+                    await researcher.supervisor.checkpoint()
                 if inbox and inbox.pending():
                     answer = await ask_researcher(idea_follow_up, extra=True)
                     if consultations:
@@ -930,12 +1022,12 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                     tools = coach_tools(envelope.project, decision, follow_up=index > 0,
                                         stalled_reviews=stalled_reviews, deadline=deadline, consultations=consultations,
                                         closure=closure, audit=audit)
-                    if consultations:
+                    if config.consultant:
                         tools.append(consultations.tool(coach, protected=lambda: protected, decision=decision))
                     if evaluation:
                         tools.append(evaluation.reader(audit))
                     await coach.start(tools=tools, system=guidance.COACH +
-                                      (guidance.CONSULT_CALLER + guidance.COACH_CLAIM_REVIEW if consultations else "") +
+                                      (guidance.CONSULT_CALLER + guidance.COACH_CLAIM_REVIEW if config.consultant else "") +
                                       (guidance.COACH_CLOSURE if config.closure_critic else "") +
                                       (guidance.EVALUATION_REVIEW if evaluation else ""))
                     phase = ("Initial stopping review (provisional)." if index == 0 else
@@ -959,7 +1051,8 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                         consultations.raise_if_failed()
                     if not decision:
                         raise ValueError("Coach ended without recording a stopping decision")
-                    if config.closure_critic and index > 0 and decision["decision"] == "accept":
+                    if (config.closure_critic and index > 0 and decision["decision"] == "accept"
+                            and not (researcher.supervisor and researcher.supervisor.request_due())):
                         publish_json(root / f"review-{index}-proposal.json", decision)
                         decision.clear()
                         critique = await consultations.challenge(coach, answer)
@@ -967,6 +1060,8 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                                        adviser_role=critique["adviser_role"])
                 finally:
                     await coach.close()
+                if researcher.supervisor:
+                    await researcher.supervisor.checkpoint()
                 if critique is not None:
                     stopping_answer = answer
                     remaining = None if allowance is None else allowance - sum(
@@ -1031,6 +1126,8 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                                                         "adjudicator": judge_role}
                     finally:
                         await judge.close()
+                    if researcher.supervisor:
+                        await researcher.supervisor.checkpoint()
                 if index:
                     stalled_reviews = 0 if decision["progress"] == "meaningful" else stalled_reviews + 1
                 decision["stalled_reviews"] = stalled_reviews
@@ -1096,6 +1193,8 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                     consultations.raise_if_failed()
     except StopRequested as error:
         status, reason = error.status, str(error)
+        if status == "checkpointed" and researcher.supervisor and researcher.supervisor.ready:
+            checkpoint_reason = "supervisor_review"
     except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup) as error:
         status = "review_unavailable" if status == "review_unavailable" else "failed"
         reason = f"{type(error).__name__}: {error}"
@@ -1138,10 +1237,13 @@ async def drive(envelope, deadline, *, client_factory=client_for):
             reason = "; ".join(dict.fromkeys(filter(None, [reason, *errors])))
         publish_json(root / "result.json", {"run_id": envelope.id, "envelope_digest": envelope.digest,
                                           "status": status, "reason": reason, "checkpoint_reason": checkpoint_reason,
+                                          "supervisor_checkpoint_sha256": (
+                                              researcher.supervisor.checkpoint_sha256 if researcher.supervisor else None),
                                           "primary_outcome": primary_outcome, "finalization_errors": errors,
                                           "reviews": reviews,
                                           "sessions": [session.record() for session in sessions]})
-    return 0 if status == "completed" else 130 if status == "cancelled" else 124 if status == "timed_out" else 1
+    return (0 if status == "completed" or status == "checkpointed" and checkpoint_reason == "supervisor_review"
+            else 130 if status == "cancelled" else 124 if status == "timed_out" else 1)
 
 
 def owned_envelope(path, *, inspection=False):

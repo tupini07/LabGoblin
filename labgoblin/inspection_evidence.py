@@ -19,7 +19,7 @@ from labgoblin.storage import canonical, digest, excluded_name, publish_json, re
 PAGE_BYTES = 16384
 FILE_BYTES = 8 * 1024 * 1024
 IMAGE_BYTES = 4 * 1024 * 1024
-ROLE = re.compile(r"researcher|coach-(0|[1-9][0-9]{0,5})|consult-(0|[1-9][0-9]{0,5})|adjudicator-([1-9][0-9]{0,5})")
+ROLE = re.compile(r"researcher|(?:coach|consult|goal-review)-(0|[1-9][0-9]{0,5})|adjudicator-([1-9][0-9]{0,5})")
 
 
 def safe_path(root, relative):
