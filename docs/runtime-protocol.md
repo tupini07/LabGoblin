@@ -10,6 +10,7 @@ generic exchange shape remain 3. These are separately checked, not migrated.
 |---|---|
 | `config.py`, `protocol.py` | Strict configuration and small execution records, not scientific schemas. |
 | `runtime.py` | Explicit initialization, one controller, frozen launch, recovery and retained evidence. |
+| `operator_profile.py` | Creation-only external Copilot operator guidance and exact project/CLI bindings; no agent execution. |
 | `research_environment.py` | Explicit project-local scientific environment and recorded research authorization, not a package manager or agent. |
 | `provider.py`, `guidance.py` | One ordinary SDK researcher, bounded read-only stopping review and short instructions. |
 | `consultation.py` | Shared bounded evidence readers and retained public-literature retrieval for optional advisers. |
@@ -26,6 +27,23 @@ There is no hypothesis/publication/reflection/handoff/final-analysis service hid
 behind these modules. Normal research files remain the researcher's working
 medium. The module must not start another scientific turn because a JSON form is
 missing or a report was not published through an API.
+
+CLI `init PROJECT` uses `runtime.initialize_campaign` to create `research` and
+`operator` subdirectories. The low-level `runtime.initialize` still prepares an
+exact research root. Only research owns a project identity, configuration, lock
+and scientific environment. The default operator profile and handoff are
+outside that instruction tree; `--no-operator` suppresses them without changing
+the research location. An explicit external operator destination is supported.
+Generation is model-free and supplies no lifecycle or spending authorization.
+
+`paths.research_root` resolves command inputs read-only: a marked direct root or
+its marked `research` child. Markers at both levels are ambiguous and fail;
+incomplete state is not bypassed, automatic child aliases are refused, and
+`project_record` still validates the exact persisted identity/root/lock.
+Existing direct-root projects and companions are never moved or rewritten.
+Operator publication preserves matching files, refuses conflicting or aliased
+outputs, and rolls back only unchanged files owned by its attempt. Project
+identity is published last; partial initialization never becomes ready.
 
 ## Admission and ownership
 

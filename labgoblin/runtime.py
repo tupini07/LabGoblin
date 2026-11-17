@@ -13,6 +13,7 @@ import uuid
 
 from labgoblin import closing, credits, guidance, payload, provider, research_environment
 from labgoblin.config import Config
+from labgoblin.paths import PROJECT_MARKERS, research_root
 from labgoblin.processes import background_options, bound_diagnostics, own_handle, process_state
 from labgoblin.protocol import (
     CONFIG_VERSION, LaunchEnvelope, LaunchReceipt, Resources, UncertainExecution, boolean, identifier, integer,
@@ -112,9 +113,34 @@ def prepare_git(root):
             os.fsync(stream.fileno())
 
 
-def initialize(project, config, *, goal=None, research_venv=True, git=True):
+def initialize_campaign(directory, config, *, goal=None, research_venv=True, git=True,
+                        operator=True, operator_dir=None, operator_cli=None):
+    boolean(operator, "operator")
+    if not operator and (operator_dir is not None or operator_cli is not None):
+        raise ValueError("--no-operator cannot be combined with --operator-dir or --operator-cli")
+    base = Path(directory).resolve()
+    if any((base / name).exists() or (base / name).is_symlink() for name in PROJECT_MARKERS):
+        raise ValueError("Project files already exist here; init never nests a new campaign inside an existing project")
+    if (base / "research_goal.md").exists() and goal is None:
+        raise ValueError("Place existing research files in the research subdirectory or use --goal-file; init never moves files")
+    root = base / "research"
+    if root.is_symlink() or root.resolve() != root:
+        raise ValueError("The campaign's research directory cannot be an alias")
+    if operator and operator_dir is None:
+        operator_dir = base / "operator"
+        if operator_dir.is_symlink() or operator_dir.resolve() != operator_dir:
+            raise ValueError("The default operator directory cannot be an alias; choose --operator-dir explicitly")
+    return initialize(root, config, goal=goal, research_venv=research_venv, git=git,
+                      operator_dir=operator_dir, operator_cli=operator_cli)
+
+
+def initialize(project, config, *, goal=None, research_venv=True, git=True,
+               operator_dir=None, operator_cli=None):
+    """Prepare an exact research root; CLI init uses initialize_campaign."""
     boolean(research_venv, "research_venv")
     boolean(git, "git")
+    if operator_cli is not None and operator_dir is None:
+        raise ValueError("--operator-cli requires an operator directory")
     root = Path(project).resolve()
     root.mkdir(parents=True, exist_ok=True)
     state = root / ".labgoblin"
@@ -132,15 +158,22 @@ def initialize(project, config, *, goal=None, research_venv=True, git=True):
     instructions = root / ".github" / "copilot-instructions.md"
     if not instructions.exists():
         files[instructions] = guidance.RESEARCH.encode()
+    value = {"version": CONFIG_VERSION, "id": identifier(), "root": str(root), "created": time.time()}
+    operator_info = None
+    if operator_dir is not None:
+        from labgoblin import operator_profile
+        operator_files, operator_info = operator_profile.prepare(root, value["id"], operator_dir, operator_cli)
+        files.update(operator_files)
     created = []
     try:
         state.mkdir()
         for path, body in files.items():
+            if operator_info is not None and path in operator_files and (path.is_symlink() or path.resolve() != path):
+                raise ValueError(f"Operator publication path changed to an alias: {path}")
             publish_bytes(path, body)
             created.append(path)
         for name in ("runs", "runtimes", "accounting"):
             (state / name).mkdir()
-        value = {"version": CONFIG_VERSION, "id": identifier(), "root": str(root), "created": time.time()}
         if research_venv:
             value["research_environment"] = research_environment.prepare(root)
         if git:
@@ -148,14 +181,23 @@ def initialize(project, config, *, goal=None, research_venv=True, git=True):
         publish_json(state / "project.json", value)
     except BaseException:
         for path in reversed(created):
-            if path.is_file() and path.read_bytes() == files[path]:
+            if (path.is_file() and not path.is_symlink() and path.resolve() == path
+                    and path.stat().st_nlink == 1 and path.read_bytes() == files[path]):
                 path.unlink()
         raise
-    return value
+    return {**value, "operator": operator_info} if operator_info is not None else value
+
+
+def initialize_operator(project, directory, *, executable=None):
+    from labgoblin import operator_profile
+    root, _, record = project_record(project)
+    files, result = operator_profile.prepare(root, record["id"], directory, executable)
+    operator_profile.publish(files)
+    return result
 
 
 def project_record(project):
-    root = Path(project).resolve(strict=True)
+    root = research_root(project)
     state = root / ".labgoblin"
     if (state / "labgoblin.db").exists():
         raise ValueError("This is a legacy campaign; use its preserved runtime. No migration or reset was performed.")

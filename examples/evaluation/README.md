@@ -14,8 +14,8 @@ restricted. LabGoblin itself downloads no packages. Initialization alone does no
 run research:
 
 ```powershell
-labgoblin init .\research --goal-file .\question.md --evaluation-spec (Resolve-Path .\examples\evaluation\spec.json).Path
-Copy-Item .\examples\evaluation\candidate .\research\candidate -Recurse
+labgoblin init .\campaign --goal-file .\question.md --evaluation-spec (Resolve-Path .\examples\evaluation\spec.json).Path
+Copy-Item .\examples\evaluation\candidate .\campaign\research\candidate -Recurse
 ```
 
 For an existing project, set an absolute `evaluation_spec` path in TOML before
@@ -60,8 +60,8 @@ Only the researcher executes checks. Other research roles get
 Humans can browse **Paired evaluation checks** or run:
 
 ```powershell
-labgoblin evaluations .\research --run EXACT_RUN_ID
-labgoblin evaluations .\research --run EXACT_RUN_ID --check EXACT_CHECK_ID --offset 0
+labgoblin evaluations .\campaign --run EXACT_RUN_ID
+labgoblin evaluations .\campaign --run EXACT_RUN_ID --check EXACT_CHECK_ID --offset 0
 ```
 
 These commands never execute an evaluator or call a model. Follow `next_offset`

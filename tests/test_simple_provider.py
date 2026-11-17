@@ -389,7 +389,7 @@ def test_client_disables_sync_without_removed_remote_flag(project, ledger, monke
     ("consult-1", "claim_review"), ("consult-2", "closure_critique"),
     ("adjudicator-1", "coach"),
 ])
-def test_every_role_explicitly_disables_remote_session(project, ledger, role, purpose):
+def test_every_role_explicitly_disables_remote_session_and_operator_discovery(project, ledger, role, purpose):
     from copilot.client import RemoteSessionMode
     envelope = arm(project, ledger)
     client = FakeClient({})
@@ -399,7 +399,15 @@ def test_every_role_explicitly_disables_remote_session(project, ledger, role, pu
     async def check():
         try:
             await session.start()
-            assert client.session.options["remote_session"] is RemoteSessionMode.OFF
+            options = client.session.options
+            assert options["remote_session"] is RemoteSessionMode.OFF
+            assert options["enable_managed_settings"] is True
+            assert options["enable_config_discovery"] is False
+            assert options["skip_custom_instructions"] is True
+            assert options["enable_on_demand_instruction_discovery"] is False
+            assert options["custom_agents"] == []
+            assert options["enable_skills"] is False
+            assert options["plugin_directories"] == []
             assert not client.session.prompts
         finally:
             await session.close()

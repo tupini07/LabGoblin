@@ -102,6 +102,15 @@ execution/spending status. The research inspector can also prepare idea drafts;
 only your explicit Publish action sends captured files to the operator inbox.
 It cannot edit research, attach to the researcher or change execution controls.
 Browsing/publication are model-free; messages use a separate approved allowance.
+This integrated Inspector is optional: a
+[normal Copilot CLI operator session](docs/local-research.md#operating-through-a-normal-copilot-cli-session)
+can inspect evidence and manage explicitly authorized starts, stops and reviewed
+continuations without becoming a second researcher.
+Normal `init PROJECT` creates `PROJECT\research` and `PROJECT\operator`, with a
+selectable `labgoblin-operator` profile outside research. Use `--operator-dir DIR`
+to choose another external location, or `--no-operator` to opt out.
+`operator-init PROJECT --operator-dir DIR` prepares a companion for an existing project.
+Neither starts a model or grants launch authority.
 
 Python 3.11+, native Windows and native Linux are supported. Copilot CLI must be
 installed and authenticated separately. Native execution is trusted, **not a
@@ -118,15 +127,23 @@ labgoblin init .\my-research --goal-file .\question.md --credits 1000
 labgoblin run .\my-research
 ```
 
-`init` is deterministic and never calls a model. Without a supplied or existing
+`init` is deterministic and never calls a model. All scientific files, configuration,
+Git and the scientific environment live in `my-research\research`; operator
+guidance and notes live in `my-research\operator`. Campaign commands accept either
+`my-research` or `my-research\research`. Existing direct-root campaigns still work
+without moving files or changing their identities.
+
+Without a supplied or existing
 goal, it writes an editable `research_goal.md` brief with optional prompts for the
 objective/intended use, context/inputs and genuine permissions/boundaries. Replace
 those prompts before running; a free-form question is also valid. The evolving
 research plan belongs to the researcher in `research-notes.md`, not to setup.
 `--goal-file` copies your brief unchanged; existing goal and instruction files
-are preserved, and conflicting goals are refused. Init does not generate or
+in the research subdirectory are preserved, and conflicting goals are refused.
+Place existing scientific files there before initialization; init does not move
+files from the outer folder. Init does not generate or
 semantically review a scientific plan. Review `labgoblin.toml` and
-`.github\copilot-instructions.md`;
+`.github\copilot-instructions.md` inside research;
 starting `run` authorizes the configured research execution and its credit pool.
 No machine-capacity setup is needed. Runs share local hardware under normal OS
 scheduling. CPU/RAM limits default to `"unlimited"`; set `--cpus` and `--memory-mb`
@@ -148,6 +165,17 @@ local ignore rules without staging, committing or changing Git identity. Use
 `init --no-git` to opt out. Researchers choose meaningful checkpoints, safe
 selected-file rollback and artifact organization; there is no commit schedule.
 Git does not protect ignored/untracked evidence or replace an independent backup.
+
+For example, `init .\my-research` creates `.\my-research\operator`.
+To manage the campaign through normal Copilot CLI, start a fresh session there:
+
+```powershell
+Set-Location .\my-research\operator
+copilot --agent labgoblin-operator
+```
+
+The generated handoff contains exact project/CLI bindings. Existing campaigns
+are not moved or changed, and the companion does not start research or monitoring.
 
 Coaching, on-demand consultations/claim review and closing criticism are enabled
 by default. Use `init --no-coach --no-consultant` for a researcher alone, or
@@ -171,7 +199,7 @@ the harness does not duplicate them into result snapshots.
 
 | Command | Meaning |
 |---|---|
-| `init PROJECT` | Create a fresh project without inference or overwriting existing state. |
+| `init PROJECT` | Create research and operator subdirectories without inference or overwriting existing state. |
 | `run PROJECT` | Start the first execution, or adopt its still-running independent supervisor. |
 | `run PROJECT --resume` | Explicitly start another conversation from retained files, using the remaining cumulative allowance. |
 | `status PROJECT` | Read execution state, loaded configuration and accounting; never reconcile or start work. |

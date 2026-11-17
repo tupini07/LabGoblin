@@ -29,8 +29,9 @@ root = args.root.resolve()
 root.mkdir()
 example = Path(sys.prefix) / "share" / "labgoblin" / "examples" / "local-synthetic"
 assert (example / "experiment.py").is_file(), example
-project = root / "project"
-project.mkdir()
+campaign = root / "project"
+project = campaign / "research"
+project.mkdir(parents=True)
 for name in ("experiment.py", "research_goal.md"):
     shutil.copyfile(example / name, project / name)
 metrics = root / "standalone-metrics.json"
@@ -39,14 +40,23 @@ assert read_json(metrics)["mean"] == 5
 ledger_path = root / "machine.db"
 plain = Config(model="auto", reasoning_effort="medium", coach=False, consultant=False, closure_critic=False,
                coach_model=None, closure_critic_model=None, advice_model=None, claim_review_model=None)
-record = runtime.initialize(project, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=60,
-                                           coach=False, max_ai_credits=300, ledger=str(ledger_path),
-                                           archive_workspace=True))
+cli = Path(sys.executable).parent / ("labgoblin.exe" if sys.platform == "win32" else "labgoblin")
+record = json.loads(payload.probe([
+    str(cli), "init", str(campaign), "--model", "auto", "--reasoning-effort", "medium",
+    "--no-coach", "--no-consultant", "--cpus", "1", "--memory-mb", "1024",
+    "--timeout", "60", "--credits", "300", "--ledger", str(ledger_path), "--archive-workspace"]))
+assert record["root"] == str(project)
+assert record["operator"]["project_id"] == record["id"]
+assert record["operator"]["cli"] == str(cli)
+assert Path(record["operator"]["profile"]).is_relative_to(campaign / "operator")
+assert Path(record["operator"]["handoff"]).is_file()
+assert not (project / ".github" / "agents").exists()
+assert runtime.project_record(campaign) == runtime.project_record(project)
 provider = root / "fixed-copilot.py"
 shutil.copyfile(Path(__file__).with_name("fixed_copilot.py"), provider)
 publish_json(project / "fixture-provider.json", {"model_free": True, "root": str(project)})
 runtime.provider.capabilities = lambda: {"command": [sys.executable, str(provider)]}
-result = runtime.run(project)
+result = runtime.run(campaign)
 ledger = ResourceLedger(ledger_path)
 assert ledger.capacity() is None
 assert result["status"] == "completed", result
@@ -55,7 +65,7 @@ snapshot = project / ".labgoblin" / "runs" / result["id"] / "snapshot"
 assert read_json(snapshot / "artifacts" / "metrics.json")["means"] == [4, 4, 5]
 assert read_json(snapshot / "artifacts" / "metrics.json")["python_executable"] == record["research_environment"]["python"]
 assert not (snapshot / ".venv").exists()
-assert runtime.status(project)["budget"]["remaining"] == 290
+assert runtime.status(campaign)["budget"]["remaining"] == 290
 assert not ledger.rows()
 checkin_project = root / "checkins"
 runtime.initialize(checkin_project, replace(plain,

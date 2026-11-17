@@ -8,7 +8,7 @@ from pathlib import Path
 import tomllib
 
 from labgoblin import credits
-from labgoblin.paths import machine_ledger_path
+from labgoblin.paths import machine_ledger_path, research_root
 from labgoblin.protocol import CONFIG_VERSION, Resources, boolean, integer, number, require_version, table, text
 from labgoblin.session_log import DEFAULT_LOG_BYTES, MAX_LOG_BYTES
 from labgoblin.storage import read_text
@@ -184,7 +184,7 @@ class Config:
 
     @classmethod
     def load(cls, project):
-        return cls.parse(tomllib.loads(read_text(Path(project) / "labgoblin.toml")))
+        return cls.parse(tomllib.loads(read_text(research_root(project) / "labgoblin.toml")))
 
     def toml(self):
         import tomli_w

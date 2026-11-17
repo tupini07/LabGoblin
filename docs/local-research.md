@@ -56,12 +56,28 @@ The recorded authority and interpreter are frozen for each newly admitted
 execution; historical prompts, receipts and running installations are unchanged.
 
 ```powershell
-labgoblin init .\research --goal-file .\question.md --credits 1000
-labgoblin run .\research
+labgoblin init .\campaign --goal-file .\question.md --credits 1000
+labgoblin run .\campaign
 ```
 
-Initialization makes `labgoblin.toml`, a goal if absent, short instructions if
-absent, a separate `.venv` by default, and `.labgoblin` state. It preserves existing
+Initialization creates one campaign folder with two separate subdirectories:
+
+```text
+campaign\
+  research\   Scientific files, labgoblin.toml, .venv, Git and .labgoblin
+  operator\   Selectable Copilot operator profile, handoff and operational notes
+```
+
+Commands accept either the outer campaign folder or its exact research path.
+Existing direct-root projects remain supported without relocation. The outer
+folder has no second project identity. Conflicting project markers at both levels,
+incomplete initialization and automatic child aliases are refused, not silently
+redirected to another project.
+
+Inside research, initialization makes `labgoblin.toml`, a goal if absent, short
+instructions if absent, a separate `.venv` by default, and `.labgoblin` state.
+Place any existing scientific files in that subdirectory first; init never moves
+files from the outer folder. It preserves existing
 goal/instruction content and refuses existing configuration/state. An incomplete initialization is not a valid
 project. A failed environment preparation leaves its partial files for explicit
 operator inspection, never overwrites an existing environment or publishes a ready
@@ -297,7 +313,8 @@ Notice delivery and useful scientific checkpoint contents are not guaranteed.
 
 `status` and the inspector distinguish a scheduled appointment, pending request,
 wrap-up/waiting work, settled `awaiting_review`, and interrupted wrap-up. No research
-continues while the human is absent. Use the existing inspector to examine results,
+continues after the settled hold while the human is absent. Use the existing inspector or
+an external operator session to examine results,
 limitations and next questions; chat still needs its separate approved allowance.
 With full archival disabled, explicitly select **Current workspace** to read
 mutable files rather than treating them as a historical snapshot. Discussion does
@@ -317,6 +334,98 @@ restart semantics remain: a fresh conversation uses retained files, cumulative
 credits do not reset, and the full configured execution timeout applies. The
 schedule neither starts research nor grants permission for additional spending,
 automatic continuation or a paid review.
+
+### Operating through a normal Copilot CLI session
+
+The integrated **Inspector** is optional. A normal Copilot CLI session can serve
+as your external operator: read status and retained evidence, discuss results,
+and execute specifically authorized lifecycle commands. LabGoblin still owns
+the managed researcher, process tree, deadlines and cumulative research accounting.
+The operator session's own usage is not charged to LabGoblin's research pool.
+
+New initialization creates an external operator companion by default:
+
+```powershell
+labgoblin init .\my-research
+Set-Location .\my-research\operator
+copilot --agent labgoblin-operator
+```
+
+The default companion is the outer campaign folder's `operator` subdirectory,
+beside `research`. `init .` creates both inside the current directory.
+Use `--no-operator` to create only the research subdirectory; it cannot be
+combined with `--operator-dir` or `--operator-cli`.
+
+Use `--operator-dir` to select another external location, including the parent
+in an existing campaign/research layout. For an already initialized project,
+`operator-init PROJECT` requires an explicit destination and never reinitializes
+research:
+
+```powershell
+labgoblin operator-init .\campaign --operator-dir .\campaign\operator
+Set-Location .\campaign\operator
+copilot --agent labgoblin-operator
+```
+
+Both commands create `.github\agents\labgoblin-operator.agent.md` and
+`labgoblin-operator.md` in the companion directory, never in
+the research workspace. The handoff binds the absolute project, identity and
+installed CLI; `--operator-cli PATH` overrides the console script from the
+generator's Python environment. Use the campaign's dedicated executable when
+it differs. If that executable is missing, generation fails explicitly; supply
+its exact path or opt out at init. Generation does not initialize a ledger,
+spend credits or start research. Existing companions are not relocated or
+automatically regenerated.
+
+Existing byte-identical generated files are reusable. Different content,
+including customized profiles or a binding to another project, fails before
+publication rather than being overwritten; retain/review it or select another
+operator directory. Aliased output paths and hardlinked destination files
+are refused. A publication failure removes only unchanged files created by
+that attempt; concurrent edits remain. Cross-file creation is not atomic.
+For a companion failure during init, no ready project identity is published.
+
+Start a **fresh** CLI session in that directory after generating the profile, or
+select it through `/agent` in a fresh session there. The profile is user-invocable
+and disables automatic model invocation; it pins neither model nor permissions.
+This is an ordinary shell-capable CLI role, not the Inspector's enforced
+read-only tool boundary. Personal profiles with the same ID can override it.
+Direct selection still loads applicable user/repository instructions: check
+`/instructions`, especially if the operator directory is in another repository.
+Managed LabGoblin sessions disable custom-agent/config discovery and consume
+only their explicit frozen research/review guidance; they do not load this profile.
+
+Open the operator session in the companion directory, not the research
+workspace. The workspace's
+`.github\copilot-instructions.md` is a scientist charter, not operator guidance;
+check the session's loaded instructions and state its operator role explicitly.
+Keep operator handoff notes/logs outside research. Do not overwrite that charter
+or run a second scientist against the same working files.
+
+Give the new session the absolute project and installed CLI paths, project ID,
+goal/input boundaries, selected models/limits/review schedule, latest retained
+operational evidence and the exact actions you authorize. Begin with
+`status PROJECT`; a saved handoff is not a current liveness or accounting check.
+Distinguish pending tools/experiments from idle work and partial usage from final
+billing. Do not infer death from quiet logs or permission to restart from unused
+credits. Use supported commands, never direct edits to ledger rows, receipts,
+frozen runtimes or active scientific files. Publish chosen feedback explicitly
+through `ideas publish`, not by silently editing research.
+
+After explicit launch approval, start one controller using the selected CLI's
+`run PROJECT`, with durable external logs and a detached lifetime when it must
+outlive the operator session. Verify the exact execution/owner and actual
+researcher activity, not merely a live wrapper. If execution already exists,
+inspect ownership before any recovery/adoption action; never launch blindly.
+After a scheduled hold, review the evidence and obtain continuation approval
+before `run PROJECT --resume --reviewed RUN_ID`. Each continuation preserves
+spending and gets a fresh conversation/full configured timeout.
+
+Monitoring and notifications depend on the operator session or a separately
+arranged watcher; a detached controller is not an OS-restart service. No automatic
+retry, top-up, accounting estimate, paid inspector/report or recurring monitoring
+is implied. If separately authorized remote jobs exist, retain/reconcile exact
+remote IDs: local shutdown or a review hold does not prove remote quiescence.
 
 ### Local resources and retention
 

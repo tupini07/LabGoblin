@@ -17,16 +17,18 @@ from labgoblin.storage import read_text
 
 def parser():
     defaults = Config()
-    root = argparse.ArgumentParser(description="LabGoblin: an ordinary Copilot researcher with opt-out coaching and consultation")
+    root = argparse.ArgumentParser(
+        description="LabGoblin: an ordinary Copilot researcher with opt-out coaching and consultation",
+        epilog="Project commands accept a campaign folder or its research subdirectory. Existing direct research roots still work.")
     commands = root.add_subparsers(dest="command", required=True)
     init = commands.add_parser(
-        "init", help="Create a fresh research workspace; never starts a model",
-        description="Create a fresh project without model calls. Preserve a supplied or existing research "
-                    "brief; otherwise write an editable research_goal.md scaffold.",
+        "init", help="Create a fresh research workspace and external operator companion; never starts a model",
+        description="Create research and operator subdirectories under PROJECT without model calls. Preserve a supplied brief or "
+                    "existing files in research; otherwise write an editable research_goal.md scaffold there.",
         epilog="Describe the high-level goal, intended use, relevant context and genuine boundaries. "
                "The researcher owns the evolving plan, methods and experiments; no fixed phases or "
                "method checklist is required.")
-    init.add_argument("project", nargs="?", default=".")
+    init.add_argument("project", nargs="?", default=".", help="Outer campaign directory (default: current directory)")
     init.add_argument("--goal-file", type=Path,
                       help="Copy a UTF-8 research brief unchanged; refuse conflicts with an existing research_goal.md")
     init.add_argument("--research-venv", action=argparse.BooleanOptionalAction, default=True,
@@ -67,6 +69,16 @@ def parser():
     init.add_argument("--ledger", type=Path)
     init.add_argument("--evaluation-spec", type=Path,
                       help="Opt-in reviewed external Python evaluation kit; captured only when admitting an execution")
+    init.add_argument("--operator", action=argparse.BooleanOptionalAction, default=True,
+                      help="Create a selectable external Copilot operator profile (enabled by default); never starts a session")
+    operator = commands.add_parser(
+        "operator-init", help="Prepare an external Copilot operator profile for an existing project; no model or research call")
+    operator.add_argument("project", nargs="?", default=".")
+    for command in (init, operator):
+        command.add_argument("--operator-dir", type=Path, required=command is operator,
+                             help="External profile/handoff directory; init defaults to the operator subdirectory, operator-init requires an explicit path")
+        command.add_argument("--operator-cli", type=Path,
+                             help="Exact installed LabGoblin executable for the handoff; defaults to this Python environment's console script")
     run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
     run.add_argument("project", nargs="?", default=".")
     run.add_argument("--resume", action="store_true", help="Explicitly continue from files, preserving all prior spending")
@@ -169,9 +181,12 @@ def main(arguments=None):
                             evaluation_spec=str(args.evaluation_spec.absolute()) if args.evaluation_spec else None,
                             archive_workspace=args.archive_workspace, max_event_log_bytes=args.max_event_log_bytes,
                             ledger=str(args.ledger.resolve()) if args.ledger else "")
-            result = runtime.initialize(args.project, config,
+            result = runtime.initialize_campaign(args.project, config,
                                         goal=read_text(args.goal_file) if args.goal_file else None,
-                                        research_venv=args.research_venv, git=args.git)
+                                        research_venv=args.research_venv, git=args.git,
+                                        operator=args.operator, operator_dir=args.operator_dir, operator_cli=args.operator_cli)
+        elif args.command == "operator-init":
+            result = runtime.initialize_operator(args.project, args.operator_dir, executable=args.operator_cli)
         elif args.command == "run":
             result = runtime.run(args.project, resume=args.resume, handoff=args.handoff, reviewed=args.reviewed)
         elif args.command in ("handoff", "handoffs"):

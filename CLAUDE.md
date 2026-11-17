@@ -63,6 +63,12 @@ and a persisted allowance outside the evaluated research project.
 - One controller freezes configuration, goal, instructions and helpers per
   execution, after recovery. TOML changes require a new execution. Explicit
   resumes preserve all prior spending and retained evidence.
+- CLI init creates `PROJECT\research` and `PROJECT\operator` by default, with
+  an explicit external operator override and opt-out. Campaign commands accept
+  the outer folder or exact research root without migrating existing projects. Never
+  add its guidance to the scientist charter or managed sessions. Generation is
+  model-free, preserves existing files and supplies no launch, continuation,
+  funding or monitoring authority. Existing campaign layouts stay unchanged.
 - New initialization records broad local-research authorization and a separate
   project `.venv`, without package downloads. Scientific techniques are examples,
   not a whitelist; explicit operator restrictions prevail. Missing authorization

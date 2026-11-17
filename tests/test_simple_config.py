@@ -97,7 +97,7 @@ def test_optional_local_limits_roundtrip_without_provisioning(tmp_path, monkeypa
     assert main(["status", str(root)]) == 0
     capsys.readouterr()
     assert not ledger.exists() and not ledger.with_name(ledger.name + ".init.lock").exists()
-    assert not (root / ".labgoblin" / "ledger.json").exists()
+    assert not (root / "research" / ".labgoblin" / "ledger.json").exists()
 
 
 def test_missing_frozen_resource_fields_retain_historical_limits():
@@ -211,6 +211,7 @@ def test_unfilled_init_brief_never_admits_research(tmp_path, ledger, capsys, mon
     root = tmp_path / "new"
     assert main(["init", str(root), "--ledger", str(ledger.path), "--no-research-venv"]) == 0
     record = json.loads(capsys.readouterr().out)
+    root = Path(record["root"])
     goal = root / "research_goal.md"
     body = goal.read_bytes()
     if previous:
@@ -232,7 +233,8 @@ def test_cli_goal_file_preserves_operator_scope_and_bytes(tmp_path, capsys, monk
     source = tmp_path / "question.md"
     body = b"Only compare prototypes; do not train models.\r\nKeep the original inputs unchanged.\r\n"
     source.write_bytes(body)
-    root = tmp_path / "research"
+    base = tmp_path / "campaign"
+    root = base / "research"
     instructions = root / ".github" / "copilot-instructions.md"
     instructions.parent.mkdir(parents=True)
     instructions.write_bytes(b"Use only local synthetic data.\r\n")
@@ -240,7 +242,7 @@ def test_cli_goal_file_preserves_operator_scope_and_bytes(tmp_path, capsys, monk
     if existing != "absent":
         goal.write_bytes(body if existing == "matching" else b"A different operator goal.\r\n")
     before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    result = main(["init", str(root), "--goal-file", str(source), "--no-research-venv"])
+    result = main(["init", str(base), "--goal-file", str(source), "--no-research-venv"])
     output = capsys.readouterr()
     if existing == "conflicting":
         assert result == 1
@@ -421,7 +423,7 @@ def git(root, *arguments, check=True):
 def test_init_prepares_git_without_commits_and_supports_selected_rollback(tmp_path, capsys):
     root = tmp_path / "research"
     assert main(["init", str(root), "--no-research-venv", "--max-event-log-bytes", "2048"]) == 0
-    capsys.readouterr()
+    root = Path(json.loads(capsys.readouterr().out)["root"])
     assert Path(git(root, "rev-parse", "--show-toplevel").stdout.strip()) == root
     assert git(root, "rev-parse", "--verify", "HEAD", check=False).returncode != 0
     assert not git(root, "diff", "--cached", "--name-only").stdout.strip()
@@ -474,7 +476,7 @@ def test_missing_git_is_explicit_and_opt_out_is_model_free(tmp_path, monkeypatch
     assert not (failed / "labgoblin.toml").exists()
     root = tmp_path / "opt-out"
     assert main(["init", str(root), "--no-git", "--no-research-venv"]) == 0
-    assert not (root / ".git").exists() and not (root / ".gitignore").exists()
+    assert not (root / "research" / ".git").exists() and not (root / "research" / ".gitignore").exists()
     assert runtime.status(root)["state"] == "initialized"
 
 

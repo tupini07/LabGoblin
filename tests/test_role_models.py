@@ -77,7 +77,7 @@ def test_init_model_defaults_and_explicit_inheritance_roundtrip(tmp_path, monkey
         for field in ROLE_MODELS:
             arguments += ["--" + field.replace("_", "-"), "inherit"]
     assert main(arguments) == 0
-    capsys.readouterr()
+    record = json.loads(capsys.readouterr().out)
     config = Config.load(tmp_path)
     assert config == (Config(model="chosen-researcher", **dict.fromkeys(ROLE_MODELS))
                       if inherit else Config())
@@ -87,7 +87,7 @@ def test_init_model_defaults_and_explicit_inheritance_roundtrip(tmp_path, monkey
     assert Config.parse(config.to_dict(), frozen=True) == config
     if inherit:
         changed = replace(config, model="next-researcher")
-        (tmp_path / "labgoblin.toml").write_text(changed.toml(), encoding="utf-8")
+        (Path(record["root"]) / "labgoblin.toml").write_text(changed.toml(), encoding="utf-8")
         assert Config.load(tmp_path).model_for("coach") == "next-researcher"
 
 
