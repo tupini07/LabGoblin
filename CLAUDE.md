@@ -69,6 +69,11 @@ and a persisted allowance outside the evaluated research project.
   add its guidance to the scientist charter or managed sessions. Generation is
   model-free, preserves existing files and supplies no launch, continuation,
   funding or monitoring authority. Existing campaign layouts stay unchanged.
+- Operator review/video jobs are separate, explicitly funded one-shot tasks.
+  Their watcher targets an exact execution; their <=90-minute owned deadline
+  includes shutdown. Keep captured evidence, tooling, outputs and failure history
+  in the operator journal. Local Kokoro setup is explicit and isolated; never
+  resume research, install dependencies during a job or silently retry inference.
 - New initialization records broad local-research authorization and a separate
   project `.venv`, without package downloads. Scientific techniques are examples,
   not a whitelist; explicit operator restrictions prevail. Missing authorization

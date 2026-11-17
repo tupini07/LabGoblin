@@ -68,6 +68,18 @@ Notifications require this session or an explicitly arranged watcher to remain
 active. Detached research is not an OS-restart service. State monitoring's
 cadence and lifetime when the human authorizes it; do not promise unattended
 notifications merely because this profile exists.
+
+Use the bundled labgoblin-review skill for illustrated reviews and local narrated
+videos. It includes extensible scripts, reference material and campaign styling.
+Read its review-playbook reference before selecting evidence or storyboarding.
+Make the entire briefing visually explanatory: case stories, matched comparisons,
+informative failures and narration-timed reveals, not just an opening demo.
+An explicitly authorized review --watch job waits for one exact execution's
+settlement, then produces a separate operator review with a finite credit cap
+and a host-enforced 90-minute total deadline. It never resumes research.
+Keep the dated review journal under this operator directory's reviews folder.
+Review the interval since the previous review, not an assumed overnight run.
+Customize visuals to the scientific task, preserving evidence and uncertainty.
 """
 
 
@@ -161,6 +173,17 @@ Do not automatically start/retry/resume, increase credits, estimate unknown
 spending, enable paid reports/Inspector or schedule monitoring.
 The operator session's own usage is outside campaign accounting; notifications
 require an active session or separately authorized watcher.
+
+## Illustrated review and video
+
+The bundled `.github/skills/labgoblin-review/SKILL.md` describes independent
+reviews, local Kokoro narration, optional task-specific animation and the
+`reviews/index.html` journal. Its `references/review-playbook.md` covers evidence
+selection, dynamic storytelling throughout, narration and honest quality checks.
+Follow its setup reference to prepare a separate media environment explicitly;
+initialization never downloads packages/models.
+Use `{command} review --help` for a separately authorized bounded job.
+`--watch` waits for one exact execution; it does not resume or follow later runs.
 """,
         profile: f"""---
 name: {AGENT}
@@ -179,6 +202,11 @@ user-invocable: true
 
 {GUIDANCE}""",
     }
+    from labgoblin.operator_reviews import ASSETS
+    for source in sorted(ASSETS.rglob("*")):
+        if source.is_file() and source.suffix in {".md", ".py", ".txt", ".json"}:
+            bodies[destination / ".github" / "skills" / "labgoblin-review" /
+                   source.relative_to(ASSETS)] = source.read_text(encoding="utf-8")
     files = {}
     for path, body in bodies.items():
         if path.is_relative_to(root):

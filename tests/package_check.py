@@ -11,6 +11,10 @@ dist = Path(sys.argv[1])
 wheels, sources = list(dist.glob("*.whl")), list(dist.glob("*.tar.gz"))
 assert len(wheels) == len(sources) == 1, (wheels, sources)
 expected = {f"labgoblin/{path.name}": path.read_bytes() for path in (root / "labgoblin").glob("*.py")}
+skill = {path.relative_to(root).as_posix(): path.read_bytes()
+         for path in (root / "labgoblin" / "operator_skill").rglob("*")
+         if path.is_file() and path.suffix in {".md", ".py", ".txt", ".json"}}
+expected.update({name: body for name, body in skill.items() if name.endswith(".py")})
 assets = {f"labgoblin/inspection_assets/{path.name}": path.read_bytes()
           for path in (root / "labgoblin" / "inspection_assets").iterdir() if path.is_file()}
 evaluation = {path.relative_to(root).as_posix(): path.read_bytes()
@@ -24,6 +28,8 @@ with zipfile.ZipFile(wheels[0]) as archive:
         assert archive.read(name) == body, name
     assert {name for name in names if name.startswith("labgoblin/inspection_assets/")} == set(assets)
     for name, body in assets.items():
+        assert archive.read(name) == body, name
+    for name, body in skill.items():
         assert archive.read(name) == body, name
     assert not any("/static/" in name or name.startswith("tests/") or "auto-cleanrl-report" in name
                    or "auto-craftax-report" in name for name in names)
@@ -40,7 +46,7 @@ with zipfile.ZipFile(wheels[0]) as archive:
     assert any(name.endswith("/LICENSE") for name in names)
 with tarfile.open(sources[0]) as archive:
     names = archive.getnames()
-    for name, body in {**expected, **assets, **evaluation}.items():
+    for name, body in {**expected, **assets, **evaluation, **skill}.items():
         member = next(item for item in names if item.endswith("/" + name))
         assert archive.extractfile(member).read() == body, name
     assert any(name.endswith("/tests/fixed_copilot.py") for name in names)

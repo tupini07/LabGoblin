@@ -112,6 +112,14 @@ to choose another external location, or `--no-operator` to opt out.
 `operator-init PROJECT --operator-dir DIR` prepares a companion for an existing project.
 Neither starts a model or grants launch authority.
 
+The companion includes an extensible **illustrated-review and narrated-video
+skill**. An explicitly armed `review --watch` waits for one exact execution to
+settle, then creates a journal entry under `operator\reviews` with the written
+review, cited evidence, local Kokoro narration, captions and video. Its separate
+credit cap and maximum 90-minute owned deadline never authorize research to
+resume. Local media setup is explicit; nothing is installed at initialization.
+See [operator reviews](docs/local-research.md#illustrated-operator-reviews-and-narrated-videos).
+
 Python 3.11+, native Windows and native Linux are supported. Copilot CLI must be
 installed and authenticated separately. Native execution is trusted, **not a
 hostile-code sandbox**.

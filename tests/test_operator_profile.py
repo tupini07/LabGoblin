@@ -124,8 +124,18 @@ def test_existing_operator_init_preserves_research_and_user_files(project, tmp_p
     assert first["project_id"] == record["id"]
     after = contents(tmp_path)
     assert all(after[name] == body for name, body in before.items())
-    assert set(after) - set(before) == {
-        Path(first["profile"]).relative_to(tmp_path), Path(first["handoff"]).relative_to(tmp_path)}
+    created = set(after) - set(before)
+    assert {Path(first["profile"]).relative_to(tmp_path),
+            Path(first["handoff"]).relative_to(tmp_path)} <= created
+    skill = directory / ".github" / "skills" / "labgoblin-review"
+    assets = Path(operator_profile.__file__).with_name("operator_skill")
+    expected = {path.relative_to(assets): path.read_text(encoding="utf-8")
+                for path in assets.rglob("*")
+                if path.is_file() and path.suffix in {".md", ".py", ".txt", ".json"}}
+    assert {path.relative_to(skill): path.read_text(encoding="utf-8")
+            for path in skill.rglob("*") if path.is_file()} == expected
+    assert all(path in {Path(first["profile"]).relative_to(tmp_path), Path(first["handoff"]).relative_to(tmp_path)}
+               or (tmp_path / path).is_relative_to(skill) for path in created)
     assert main(args) == 0
     assert json.loads(capsys.readouterr().out) == first
     assert contents(tmp_path) == after

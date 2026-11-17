@@ -5,7 +5,9 @@ setup(
     version='3.0.0',
     packages=find_packages(include=['labgoblin', 'labgoblin.*']),
     include_package_data=False,
-    package_data={'labgoblin': ['inspection_assets/*.html', 'inspection_assets/*.css', 'inspection_assets/*.js']},
+    package_data={'labgoblin': ['inspection_assets/*.html', 'inspection_assets/*.css', 'inspection_assets/*.js',
+                              'operator_skill/*.md', 'operator_skill/*.txt', 'operator_skill/scripts/*.py',
+                              'operator_skill/references/*.md', 'operator_skill/assets/*.json']},
     install_requires=[
         'tomli_w',
         'psutil>=5.9',

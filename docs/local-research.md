@@ -427,6 +427,54 @@ retry, top-up, accounting estimate, paid inspector/report or recurring monitorin
 is implied. If separately authorized remote jobs exist, retain/reconcile exact
 remote IDs: local shutdown or a review hold does not prove remote quiescence.
 
+### Illustrated operator reviews and narrated videos
+
+Operator generation also supplies `.github\skills\labgoblin-review`, containing
+review instructions, scripts, references and a basic theme. The operator may
+extend these locally for its campaign's scientific task and stable visual style.
+Review the period since the previous review, not an assumed overnight run.
+
+The optional video environment is separate from both the harness and scientific
+environment. Follow the skill's `references\setup.md` to explicitly install pinned
+media packages and download the public Kokoro ONNX model/voices. Speech synthesis
+then runs locally; no Azure account or speech-service credential is needed.
+Initialization and review jobs never install packages or download models.
+
+```powershell
+labgoblin review .\campaign --operator-dir .\campaign\operator --run EXACT_RUN_ID --credits 300 --media-python .\campaign\operator\.media\Scripts\python.exe --models .\campaign\operator\models\kokoro
+labgoblin reviews --operator-dir .\campaign\operator
+```
+
+The credit amount is an explicitly authorized per-job Copilot soft cap, separate
+from research accounting. The worker uses the ordinary configured CLI model.
+Add `--watch` to arm one automatic review for an executing run: it waits for that
+exact run's settlement, not a calendar time, and then exits after one attempt.
+Arrange the watcher's detached lifetime explicitly; it is not an OS-restart
+service and never follows later executions. Neither command resumes research.
+
+One host-owned process tree has a maximum **90-minute total production deadline**,
+including capture, analysis, narration, rendering and shutdown. Waiting for the
+campaign is outside that production clock. The host, not a sub-agent instruction,
+enforces cancellation. Each run/revision is attempted once; another invocation
+of the same revision returns its retained outcome rather than buying inference
+again. A new `--revision` needs separate approval.
+
+The journal is `operator\reviews\index.html`. Each attempt retains its authorization,
+exact execution coverage, selected captured evidence and explicit omissions,
+written review, storyboard, original CLI usage, captions, video, tooling hashes
+and outcome. A failed/timed-out video leaves completed written material available;
+partial video is never linked as ready. Missing usage remains unknown, not zero.
+Use `--previous-review` plus `--since-run` to seed a journal from an older review;
+later jobs automatically reference the latest ready entry.
+
+The basic renderer supports PNG/JPEG figures, explanatory frame sequences,
+bounded samples of local video clips, timed highlights, chapter navigation and
+local narration. It verifies decoding before publishing the finished video.
+The reviewer checks evidence; rendering itself does not validate scientific claims.
+The worker is a trusted shell-capable operator, not a filesystem sandbox.
+It reads captured sources, never receives permission to run new experiments or
+edit research, and captured-source integrity is checked before and after rendering.
+
 ### Local resources and retention
 
 `cpus` and `memory_mb` accept a positive integer or `"unlimited"` independently.

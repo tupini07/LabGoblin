@@ -92,6 +92,20 @@ def parser():
     handoffs = commands.add_parser("handoffs", help="Read dated handoff history without a model call")
     handoffs.add_argument("project", nargs="?", default=".")
     handoffs.add_argument("--offset", type=int, default=0)
+    review = commands.add_parser("review", help="One separately funded operator review/video; never resumes research")
+    review.add_argument("project")
+    review.add_argument("--operator-dir", type=Path, required=True)
+    review.add_argument("--run", required=True, help="Exact research execution to review")
+    review.add_argument("--credits", required=True, help="Explicit separate per-job Copilot soft cap, minimum 30")
+    review.add_argument("--media-python", type=Path, required=True)
+    review.add_argument("--models", type=Path, required=True, help="Prepared local Kokoro model directory")
+    review.add_argument("--timeout", type=float, default=5400, help="Total production seconds, including cleanup; maximum 5400")
+    review.add_argument("--watch", action="store_true", help="Wait for this exact execution to settle, then produce one review")
+    review.add_argument("--revision", type=int, default=1, help="Explicit new attempt; existing revisions are never replayed")
+    review.add_argument("--previous-review", type=Path, help="Existing HTML review to seed the first comparison")
+    review.add_argument("--since-run", help="Exact earlier settled execution covered by the imported review")
+    reviews = commands.add_parser("reviews", help="Read the operator review journal without model calls")
+    reviews.add_argument("--operator-dir", type=Path, required=True)
     evaluations = commands.add_parser("evaluations", help="Read retained paired evaluation checks; never executes a check or model")
     evaluations.add_argument("project", nargs="?", default=".")
     evaluations.add_argument("--run", required=True)
@@ -197,6 +211,15 @@ def main(arguments=None):
                       else handoffs.history(inspector, offset=args.offset))
         elif args.command == "status":
             result = runtime.status(args.project)
+        elif args.command == "review":
+            from labgoblin.operator_reviews import review
+            result = review(args.project, args.operator_dir, args.run,
+                            max_credits=credit_value(args.credits), media_python=args.media_python,
+                            models=args.models, seconds=args.timeout, watch=args.watch,
+                            revision=args.revision, previous_review=args.previous_review, since_run=args.since_run)
+        elif args.command == "reviews":
+            from labgoblin.operator_reviews import history
+            result = {"reviews": history(args.operator_dir)}
         elif args.command == "evaluations":
             from labgoblin.inspection_evidence import Evidence
             project, _, record = runtime.project_record(args.project)
@@ -251,6 +274,8 @@ def main(arguments=None):
                          and result.get("metadata", {}).get("provider", {}).get("checkpoint_reason") == "supervisor_review")):
             return 1
         if args.command == "handoff" and result["status"] != "completed":
+            return 1
+        if args.command == "review" and result["status"] != "ready":
             return 1
         return 0
     except KeyboardInterrupt:
