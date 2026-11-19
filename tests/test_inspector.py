@@ -202,13 +202,13 @@ def test_owned_sdk_chat_is_read_only_separately_billed_and_remembers_context(obs
     session = first["usage"]["sessions"][0]
     options = read_json(observer.root / f"fixture-session-{session['session_id']}.json")
     assert options["enableConfigDiscovery"] is False
-    assert options["enableOnDemandInstructionDiscovery"] is False
-    assert options["enableSkills"] is False and options["requestExtensions"] is False
-    assert {name.removeprefix("custom:") for name in options["availableTools"]} == {
+    assert options["instructions"]["onDemandDiscovery"] is False
+    assert options["skills"]["enabled"] is False and options["extensions"]["enabled"] is False
+    assert {name.removeprefix("custom:") for name in options["tools"]["availableTools"]} == {
         "labgoblin_inspect_status", "labgoblin_inspect_read", "labgoblin_inspect_listing",
         "labgoblin_inspect_search", "labgoblin_inspect_session", "labgoblin_inspect_execution",
         "labgoblin_inspect_ideas", "labgoblin_inspect_evaluations", "labgoblin_prepare_idea"}
-    assert not options.get("mcpServers")
+    assert not options["mcp"].get("servers")
     (observer.project / "report.md").write_text("A new control succeeded; global impossibility remains unproved.")
     second = observer.ask("What about the new control?", command=argv)
     assert second["status"] == "completed", second
@@ -424,7 +424,7 @@ def test_restricted_driver_verifies_tools_and_denies_unregistered_actions(observ
     assert asyncio.run(inspector.drive(envelope, time.monotonic() + 90,
                                       client_factory=lambda *a, **k: client)) == 0
     options = client.session.options
-    guard = options["hooks"]["on_pre_tool_use"]
+    guard = options["hooks"]["handlers"]["on_pre_tool_use"]
     for name in ("powershell", "web_fetch", "labgoblin_review_decision", "task", "edit_file"):
         assert guard({"toolName": name}, None)["permissionDecision"] == "deny"
     assert options["system_message"]["mode"] == "replace"

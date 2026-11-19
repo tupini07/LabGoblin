@@ -56,12 +56,28 @@ The recorded authority and interpreter are frozen for each newly admitted
 execution; historical prompts, receipts and running installations are unchanged.
 
 ```powershell
-labgoblin init .\research --goal-file .\question.md --credits 1000
-labgoblin run .\research
+labgoblin init .\campaign --goal-file .\question.md --credits 1000
+labgoblin run .\campaign
 ```
 
-Initialization makes `labgoblin.toml`, a goal if absent, short instructions if
-absent, a separate `.venv` by default, and `.labgoblin` state. It preserves existing
+Initialization creates one campaign folder with two separate subdirectories:
+
+```text
+campaign\
+  research\   Scientific files, labgoblin.toml, .venv, Git and .labgoblin
+  operator\   Selectable Copilot operator profile, handoff and operational notes
+```
+
+Commands accept either the outer campaign folder or its exact research path.
+Existing direct-root projects remain supported without relocation. The outer
+folder has no second project identity. Conflicting project markers at both levels,
+incomplete initialization and automatic child aliases are refused, not silently
+redirected to another project.
+
+Inside research, initialization makes `labgoblin.toml`, a goal if absent, short
+instructions if absent, a separate `.venv` by default, and `.labgoblin` state.
+Place any existing scientific files in that subdirectory first; init never moves
+files from the outer folder. It preserves existing
 goal/instruction content and refuses existing configuration/state. An incomplete initialization is not a valid
 project. A failed environment preparation leaves its partial files for explicit
 operator inspection, never overwrites an existing environment or publishes a ready
@@ -99,7 +115,7 @@ version = 5
 model = "gpt-6.1-sol"
 reasoning_effort = "high"
 max_ai_credits = 1000
-timeout_seconds = 5400
+timeout_seconds = 86400
 cpus = "unlimited"
 memory_mb = "unlimited"
 gpus = []
@@ -132,9 +148,70 @@ upgrading never rewrites configuration or changes an active execution.
 
 `model` and `reasoning_effort` are passed to Copilot; the default research profile
 is `gpt-6.1-sol` / `high`. The SDK transport and ordinary researcher tools remain the
-same with coaching on or off. Skills, extensions, MCP servers, automatic custom
+same with coaching on or off. Automatic skill discovery, extensions, MCP servers, automatic custom
 instruction discovery, memory, scheduled prompts and unrestricted nested agents are disabled;
 the reviewed project instructions are supplied explicitly.
+
+### Campaign-local procedural skills
+
+Set `extract_skills = true` (or `init --extract-skills`) to propose useful
+procedures after scheduled human-review pauses. The default is off. Extraction
+uses `advice_model` and the shared reasoning effort, with 3600 seconds for work
+plus up to 300 seconds for cleanup. Its cost draws from the cumulative campaign
+pool, not the inspector allowance; `status --json` exposes research and extraction
+subtotals under `budget.by_purpose`. A valid outcome can be no useful skill.
+
+The extractor reads retained research and works in the campaign root, writing
+only proposal folders and dedicated test scratch under `.labgoblin\skills`.
+It can test supporting scripts there, but cannot install packages or alter
+research, environments, goals or permissions. Native same-user execution is not
+an adversarial filesystem sandbox. Evidence coverage and extractor-reported
+validation remain distinct from host integrity checks.
+
+```powershell
+labgoblin skills extract PROJECT --run RUN_ID --request-id REQUEST_ID
+labgoblin skills list PROJECT
+labgoblin skills show PROJECT --batch BATCH_ID
+labgoblin skills review PROJECT --batch BATCH_ID --name SKILL --decision reject --expected none
+labgoblin run PROJECT --resume --reviewed RUN_ID --skills-batch BATCH_ID
+```
+
+IDs are exact 32-character hexadecimal execution/request identities. A manual
+request names a settled research execution; reuse its request ID to retrieve the
+same attempt, never to purchase a retry. An explicit new ID requests a new attempt.
+These commands emit JSON directly. The first review decision uses `--expected none`.
+`reconcile` can retain missing scheduled intent but does not dispatch it; explicitly
+invoke `skills extract --request-id ID` to dispatch an unlaunched pending request.
+Read-only status/list/show never launch extraction.
+
+At daily review, the external operator agent performs the technical review:
+inspect the exact batch, skill text, supporting files and diffs, source evidence,
+validation, coverage and cost. It assesses correctness and likely reuse against
+context/maintenance cost, then recommends keeping eligible, rejecting,
+challenging or deferring each change with reasons and concrete corrections.
+The human screens that assessment and decides; manual inspection of raw skill
+files is not expected. Preserve the agent's exact-batch/revision assessment in
+operator notes, separate from authorized decisions. Reading a proposal does not
+authorize executing its scripts, and a recommendation does not activate it.
+
+Decisions are `eligible` (the initial default), `reject`,
+`challenge`, or `defer`. Challenge requires `--feedback`; it does not buy another
+extraction. Subsequent decisions require `--expected REVISION` from the last
+review result. Published bytes and past decisions cannot be edited in place.
+
+Nothing activates merely because extraction or review finished. Explicit
+`--skills-batch` binds that exact batch and decision revision at admission;
+concurrent changes invalidate preparation. Rejected/challenged/deferred replacements
+retain their old active versions. Alternatively `--defer-skills` continues with
+the current active set and explicitly defers pending attempts. A scheduled hold
+still separately requires its exact `--reviewed RUN_ID`; manual extraction does
+not invent or acknowledge such a hold. Failed attempts never activate.
+
+Each later researcher gets a frozen skill index and bounded `labgoblin_skill`
+reads of instructions/supporting files. Global, operator-local and arbitrary
+workspace discovery stays disabled. Loading a script never runs it; deliberate
+use retains ordinary research permissions. Skills are optional procedural help,
+not scientific evidence, operator authority or proof of improved research.
 
 Optional `evaluation_spec` is an absolute path to an operator-reviewed external
 JSON evaluation kit. `init --evaluation-spec PATH` resolves it without executing
@@ -214,7 +291,10 @@ Missing role flags in historical frozen format-5 records remain disabled, and
 missing model presets there still inherit the historical campaign model.
 
 `timeout_seconds` is the finite deadline for the entire owned execution, including
-the persistent researcher, optional reviews, consultations, continuation and shutdown. It must
+the persistent researcher, optional reviews, consultations, continuation and shutdown.
+New configurations default to 86400 seconds (24 hours); `init --timeout SECONDS`
+overrides it. Existing explicit durations are unchanged, and an omitted duration
+in a historical frozen record retains 5400 seconds (90 minutes). It must
 be at least 60 seconds. The final 30 seconds are reserved for bounded settlement.
 Normal progress and output flooding never renew the deadline.
 TOML also accepts a quoted arithmetic expression, for example
@@ -297,7 +377,8 @@ Notice delivery and useful scientific checkpoint contents are not guaranteed.
 
 `status` and the inspector distinguish a scheduled appointment, pending request,
 wrap-up/waiting work, settled `awaiting_review`, and interrupted wrap-up. No research
-continues while the human is absent. Use the existing inspector to examine results,
+continues after the settled hold while the human is absent. Use the existing inspector or
+an external operator session to examine results,
 limitations and next questions; chat still needs its separate approved allowance.
 With full archival disabled, explicitly select **Current workspace** to read
 mutable files rather than treating them as a historical snapshot. Discussion does
@@ -317,6 +398,98 @@ restart semantics remain: a fresh conversation uses retained files, cumulative
 credits do not reset, and the full configured execution timeout applies. The
 schedule neither starts research nor grants permission for additional spending,
 automatic continuation or a paid review.
+
+### Operating through a normal Copilot CLI session
+
+The integrated **Inspector** is optional. A normal Copilot CLI session can serve
+as your external operator: read status and retained evidence, discuss results,
+and execute specifically authorized lifecycle commands. LabGoblin still owns
+the managed researcher, process tree, deadlines and cumulative research accounting.
+The operator session's own usage is not charged to LabGoblin's research pool.
+
+New initialization creates an external operator companion by default:
+
+```powershell
+labgoblin init .\my-research
+Set-Location .\my-research\operator
+copilot --agent labgoblin-operator
+```
+
+The default companion is the outer campaign folder's `operator` subdirectory,
+beside `research`. `init .` creates both inside the current directory.
+Use `--no-operator` to create only the research subdirectory; it cannot be
+combined with `--operator-dir` or `--operator-cli`.
+
+Use `--operator-dir` to select another external location, including the parent
+in an existing campaign/research layout. For an already initialized project,
+`operator-init PROJECT` requires an explicit destination and never reinitializes
+research:
+
+```powershell
+labgoblin operator-init .\campaign --operator-dir .\campaign\operator
+Set-Location .\campaign\operator
+copilot --agent labgoblin-operator
+```
+
+Both commands create `.github\agents\labgoblin-operator.agent.md` and
+`labgoblin-operator.md` in the companion directory, never in
+the research workspace. The handoff binds the absolute project, identity and
+installed CLI; `--operator-cli PATH` overrides the console script from the
+generator's Python environment. Use the campaign's dedicated executable when
+it differs. If that executable is missing, generation fails explicitly; supply
+its exact path or opt out at init. Generation does not initialize a ledger,
+spend credits or start research. Existing companions are not relocated or
+automatically regenerated.
+
+Existing byte-identical generated files are reusable. Different content,
+including customized profiles or a binding to another project, fails before
+publication rather than being overwritten; retain/review it or select another
+operator directory. Aliased output paths and hardlinked destination files
+are refused. A publication failure removes only unchanged files created by
+that attempt; concurrent edits remain. Cross-file creation is not atomic.
+For a companion failure during init, no ready project identity is published.
+
+Start a **fresh** CLI session in that directory after generating the profile, or
+select it through `/agent` in a fresh session there. The profile is user-invocable
+and disables automatic model invocation; it pins neither model nor permissions.
+This is an ordinary shell-capable CLI role, not the Inspector's enforced
+read-only tool boundary. Personal profiles with the same ID can override it.
+Direct selection still loads applicable user/repository instructions: check
+`/instructions`, especially if the operator directory is in another repository.
+Managed LabGoblin sessions disable custom-agent/config discovery and consume
+only their explicit frozen research/review guidance; they do not load this profile.
+
+Open the operator session in the companion directory, not the research
+workspace. The workspace's
+`.github\copilot-instructions.md` is a scientist charter, not operator guidance;
+check the session's loaded instructions and state its operator role explicitly.
+Keep operator handoff notes/logs outside research. Do not overwrite that charter
+or run a second scientist against the same working files.
+
+Give the new session the absolute project and installed CLI paths, project ID,
+goal/input boundaries, selected models/limits/review schedule, latest retained
+operational evidence and the exact actions you authorize. Begin with
+`status PROJECT`; a saved handoff is not a current liveness or accounting check.
+Distinguish pending tools/experiments from idle work and partial usage from final
+billing. Do not infer death from quiet logs or permission to restart from unused
+credits. Use supported commands, never direct edits to ledger rows, receipts,
+frozen runtimes or active scientific files. Publish chosen feedback explicitly
+through `ideas publish`, not by silently editing research.
+
+After explicit launch approval, start one controller using the selected CLI's
+`run PROJECT`, with durable external logs and a detached lifetime when it must
+outlive the operator session. Verify the exact execution/owner and actual
+researcher activity, not merely a live wrapper. If execution already exists,
+inspect ownership before any recovery/adoption action; never launch blindly.
+After a scheduled hold, review the evidence and obtain continuation approval
+before `run PROJECT --resume --reviewed RUN_ID`. Each continuation preserves
+spending and gets a fresh conversation/full configured timeout.
+
+Monitoring and notifications depend on the operator session or a separately
+arranged watcher; a detached controller is not an OS-restart service. No automatic
+retry, top-up, accounting estimate, paid inspector/report or recurring monitoring
+is implied. If separately authorized remote jobs exist, retain/reconcile exact
+remote IDs: local shutdown or a review hold does not prove remote quiescence.
 
 ### Local resources and retention
 

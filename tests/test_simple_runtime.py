@@ -25,6 +25,26 @@ def fixture_provider(root, monkeypatch, mode="normal"):
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: {"command": command, "sdk_controls": "model-free"})
 
 
+def test_native_terminal_bill_settles_network_failure_without_retry(project, ledger, monkeypatch):
+    root, config, _ = project
+    (root / "labgoblin.toml").write_text(replace(config, model="model-free", timeout_seconds=120).toml(), encoding="utf-8")
+    fixture_provider(root, monkeypatch, mode="terminal_usage_recovery")
+    result = runtime.run(root)
+    assert result["status"] == "failed" and result["quiescent"], result
+    assert "Connection timed out after five retries" in result["reason"]
+    assert "wait for idle after abort" in result["reason"]
+    assert result["usage"]["complete"] and result["usage"]["totalNanoAiu"] == 12_000_000_000
+    directory = root / ".labgoblin" / "runs" / result["id"]
+    assert runtime.payload.tree_state(directory / "process", result["id"]) == "dead"
+    budget = runtime.status(root)["budget"]
+    assert budget["used"] == 12 and budget["remaining"] == 288
+    assert not budget["unknown"] and not ledger.rows()
+    assert len(ledger.runs(project[2]["id"])) == 1
+    calls = [json.loads(line) for line in (root / "fixture-rpc.jsonl").read_text().splitlines()]
+    assert sum(call["method"] == "session.send" for call in calls) == 1
+    assert not (directory / "sessions" / "researcher" / "settled-prompt-1.json").exists()
+
+
 def test_local_admission_never_publishes_a_legacy_pending_reservation(project, ledger, monkeypatch):
     _, config, record = project
     token = uuid.uuid4().hex
@@ -229,16 +249,17 @@ def test_resume_without_archival_keeps_working_files_and_history(project, ledger
 
 
 def test_cli_scaffold_can_be_replaced_with_a_freeform_brief(tmp_path, ledger, monkeypatch, capsys):
-    root = tmp_path / "research"
+    campaign = tmp_path / "campaign"
+    root = campaign / "research"
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Unexpected provider call"))
-    assert main(["init", str(root), "--ledger", str(ledger.path), "--no-research-venv",
+    assert main(["init", str(campaign), "--ledger", str(ledger.path), "--no-research-venv",
                  "--cpus", "1", "--memory-mb", "1024", "--timeout", "180",
                  "--model", "model-free", "--no-coach", "--no-consultant"]) == 0
     capsys.readouterr()
     goal = b"Determine whether adding one increases the mean by one.\r\n"
     (root / "research_goal.md").write_bytes(goal)
     fixture_provider(root, monkeypatch)
-    assert main(["run", str(root)]) == 0
+    assert main(["run", str(campaign)]) == 0
     result = json.loads(capsys.readouterr().out)
     directory = root / ".labgoblin" / "runs" / result["id"]
     assert read_json(directory / "prompt.json")["goal"] == goal.decode("utf-8")
@@ -251,9 +272,10 @@ def test_cli_scaffold_can_be_replaced_with_a_freeform_brief(tmp_path, ledger, mo
 
 
 def test_default_init_runs_sol_research_and_astra_closure_with_one_pool(tmp_path, ledger, monkeypatch, capsys):
-    root = tmp_path / "default-research"
+    campaign = tmp_path / "default-campaign"
+    root = campaign / "research"
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Init must not call Copilot"))
-    assert main(["init", str(root), "--ledger", str(ledger.path), "--no-git", "--no-research-venv"]) == 0
+    assert main(["init", str(campaign), "--ledger", str(ledger.path), "--no-git", "--no-research-venv"]) == 0
     capsys.readouterr()
     (root / "research_goal.md").write_text("Determine whether x*x-x is nonnegative for all real x.")
     fixture_provider(root, monkeypatch, "closure_critic")
@@ -261,7 +283,7 @@ def test_default_init_runs_sol_research_and_astra_closure_with_one_pool(tmp_path
         "model_free": True, "root": str(root), "mode": "closure_critic",
         "models": ["gpt-6.1-sol", "gpt-6-astra"],
     }), encoding="utf-8")
-    assert main(["run", str(root)]) == 0
+    assert main(["run", str(campaign)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "completed", result
     sessions = result["usage"]["sessions"]
@@ -284,6 +306,9 @@ def test_default_init_runs_sol_research_and_astra_closure_with_one_pool(tmp_path
 
 def test_real_sdk_stdio_owned_execution_and_cumulative_resume(project, ledger, monkeypatch):
     root, config, record = project
+    operator = runtime.initialize_operator(root, root.parent, executable=sys.executable)
+    with Path(operator["profile"]).open("a", encoding="utf-8") as stream:
+        stream.write("\nOPERATOR-ONLY-SENTINEL: do not become a scientist.\n")
     fixture_provider(root, monkeypatch)
     result = runtime.run(root)
     assert result["status"] == "completed", result
@@ -297,6 +322,7 @@ def test_real_sdk_stdio_owned_execution_and_cumulative_resume(project, ledger, m
     prompt_path = directory / "prompt.json"
     first_prompt = prompt_path.read_bytes()
     assert read_json(prompt_path)["instructions"] == guidance.RESEARCH
+    assert "OPERATOR-ONLY-SENTINEL" not in first_prompt.decode()
     assert "research_environment" not in read_json(prompt_path)
     assert not (root / ".venv").exists()
     frozen = Path(read_json(directory / "envelope.json")["runtime"]["root"])
@@ -315,6 +341,7 @@ def test_real_sdk_stdio_owned_execution_and_cumulative_resume(project, ledger, m
     second_prompt = read_json(root / ".labgoblin" / "runs" / second["id"] / "prompt.json")
     assert second_prompt["instructions"] == (
         guidance.RESEARCH + "\n\nProject-specific research guidance:\n" + project_guidance)
+    assert "OPERATOR-ONLY-SENTINEL" not in json.dumps(second_prompt)
     assert not ledger.rows()
 
 
@@ -412,7 +439,7 @@ def test_real_sdk_consultation_tool_in_owned_run(project, ledger, monkeypatch, c
     assert len(list((directory / "snapshot" / "artifacts" / "consultations").glob("*.md"))) == consultations
     researcher = next(s for s in usage["sessions"] if s["role"] == "researcher")
     options = read_json(root / f"fixture-session-{researcher['session_id']}.json")
-    assert "availableTools" not in options
+    assert "availableTools" not in options["tools"]
     assert researcher["prompts"] == (1 if caller == "researcher" else 2)
     assert not ledger.rows()
 

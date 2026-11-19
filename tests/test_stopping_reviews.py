@@ -47,7 +47,7 @@ def test_meaningful_progress_can_exceed_ten_total_reviews_with_unlimited_credits
     assert result == 0 and len(outcome["reviews"]) == 14
     assert all(review["stalled_reviews"] == 0 for review in outcome["reviews"][:-1])
     assert len(clients[0].session.prompts) == 14 and clients[0].session.updates == []
-    assert all(client.session.options["session_limits"] is None for client in clients)
+    assert all(client.session.options["execution"]["limits"] is None for client in clients)
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 280 * credits.NANO
 
 

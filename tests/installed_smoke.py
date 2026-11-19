@@ -11,7 +11,7 @@ import time
 from urllib.request import Request, urlopen
 
 import labgoblin
-from labgoblin import handoffs, ideas, inspector, payload, runtime, supervisor
+from labgoblin import handoffs, ideas, inspector, payload, runtime, skills, supervisor
 from labgoblin.inspection_evidence import Evidence
 from labgoblin.inspection_server import InspectionServer
 from labgoblin.config import Config
@@ -29,8 +29,9 @@ root = args.root.resolve()
 root.mkdir()
 example = Path(sys.prefix) / "share" / "labgoblin" / "examples" / "local-synthetic"
 assert (example / "experiment.py").is_file(), example
-project = root / "project"
-project.mkdir()
+campaign = root / "project"
+project = campaign / "research"
+project.mkdir(parents=True)
 for name in ("experiment.py", "research_goal.md"):
     shutil.copyfile(example / name, project / name)
 metrics = root / "standalone-metrics.json"
@@ -39,14 +40,23 @@ assert read_json(metrics)["mean"] == 5
 ledger_path = root / "machine.db"
 plain = Config(model="auto", reasoning_effort="medium", coach=False, consultant=False, closure_critic=False,
                coach_model=None, closure_critic_model=None, advice_model=None, claim_review_model=None)
-record = runtime.initialize(project, replace(plain, cpus=1, memory_mb=1024, timeout_seconds=60,
-                                           coach=False, max_ai_credits=300, ledger=str(ledger_path),
-                                           archive_workspace=True))
+cli = Path(sys.executable).parent / ("labgoblin.exe" if sys.platform == "win32" else "labgoblin")
+record = json.loads(payload.probe([
+    str(cli), "init", str(campaign), "--model", "auto", "--reasoning-effort", "medium",
+    "--no-coach", "--no-consultant", "--cpus", "1", "--memory-mb", "1024",
+    "--timeout", "60", "--credits", "300", "--ledger", str(ledger_path), "--archive-workspace"]))
+assert record["root"] == str(project)
+assert record["operator"]["project_id"] == record["id"]
+assert record["operator"]["cli"] == str(cli)
+assert Path(record["operator"]["profile"]).is_relative_to(campaign / "operator")
+assert Path(record["operator"]["handoff"]).is_file()
+assert not (project / ".github" / "agents").exists()
+assert runtime.project_record(campaign) == runtime.project_record(project)
 provider = root / "fixed-copilot.py"
 shutil.copyfile(Path(__file__).with_name("fixed_copilot.py"), provider)
 publish_json(project / "fixture-provider.json", {"model_free": True, "root": str(project)})
 runtime.provider.capabilities = lambda: {"command": [sys.executable, str(provider)]}
-result = runtime.run(project)
+result = runtime.run(campaign)
 ledger = ResourceLedger(ledger_path)
 assert ledger.capacity() is None
 assert result["status"] == "completed", result
@@ -55,7 +65,7 @@ snapshot = project / ".labgoblin" / "runs" / result["id"] / "snapshot"
 assert read_json(snapshot / "artifacts" / "metrics.json")["means"] == [4, 4, 5]
 assert read_json(snapshot / "artifacts" / "metrics.json")["python_executable"] == record["research_environment"]["python"]
 assert not (snapshot / ".venv").exists()
-assert runtime.status(project)["budget"]["remaining"] == 290
+assert runtime.status(campaign)["budget"]["remaining"] == 290
 assert not ledger.rows()
 checkin_project = root / "checkins"
 runtime.initialize(checkin_project, replace(plain,
@@ -83,6 +93,7 @@ assert not ledger.rows()
 meeting_project = root / "supervisor-review"
 runtime.initialize(meeting_project, replace(plain,
     cpus=1, memory_mb=1024, timeout_seconds=180, max_ai_credits=300, ledger=str(ledger.path),
+    extract_skills=True,
     supervisor_review=supervisor.Schedule("09:00", "UTC", "2026-01-01")),
     goal="Retain an experiment and wait for an explicitly reviewed continuation.")
 publish_json(meeting_project / "fixture-provider.json", {
@@ -96,6 +107,13 @@ finally:
     supervisor.Schedule.next_after = next_appointment
 assert paused["status"] == "checkpointed" and paused["usage"]["complete"], paused
 assert runtime.status(meeting_project)["supervisor_review"]["state"] == "awaiting_review"
+skill_store = skills.Store(meeting_project)
+proposals = skill_store.listing()
+assert len(proposals["attempts"]) == 1, proposals
+skill_batch = proposals["attempts"][0]["id"]
+assert proposals["attempts"][0]["status"] == "proposed", proposals
+assert proposals["active"] == {}
+assert {item["path"] for item in skill_store.show(skill_batch)["changes"]} == {"SKILL.md", "check.py"}
 assert (meeting_project / "fixture-experiment-complete").read_text() == "survived"
 meeting_directory = meeting_project / ".labgoblin" / "runs" / paused["id"]
 assert payload.tree_state(meeting_directory / "process", paused["id"]) == "dead"
@@ -110,9 +128,16 @@ except ValueError as error:
     assert "--reviewed" in str(error), error
 else:
     raise AssertionError("Removing the schedule bypassed its persistent review hold")
-atomic_json(meeting_project / "fixture-provider.json", {"model_free": True, "root": str(meeting_project)})
-continued = runtime.run(meeting_project, resume=True, reviewed=paused["id"])
+atomic_json(meeting_project / "fixture-provider.json", {
+    "model_free": True, "root": str(meeting_project), "read_skill": True})
+continued = runtime.run(meeting_project, resume=True, reviewed=paused["id"], skills_batch=skill_batch)
 assert continued["status"] == "completed", continued
+assert list(skill_store.listing()["active"]) == ["verify-total"]
+skill_calls = [json.loads(line) for path in meeting_project.glob("fixture-tools-*.jsonl")
+               for line in path.read_text().splitlines()]
+assert sum(call["name"] == "labgoblin_skill" for call in skill_calls) == 3
+assert (meeting_project / ".labgoblin" / "runs" / continued["id"] /
+        "skills" / "verify-total" / "check.py").is_file()
 meeting_status = runtime.status(meeting_project)
 assert meeting_status["budget"]["used_nano"] > spent_before
 assert meeting_status["supervisor_review"] is None

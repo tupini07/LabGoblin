@@ -100,9 +100,9 @@ def test_runtime_wait_timeout_is_scoped_to_the_owned_meeting_client(project, led
     monkeypatch.setenv("COPILOT_TASK_WAIT_TIMEOUT_SECONDS", "1")
     envelope = meeting_envelope(project, ledger)
     options = provider.client_for(envelope)
-    assert options["env"]["COPILOT_TASK_WAIT_TIMEOUT_SECONDS"] == str(supervisor.TASK_WAIT_SECONDS)
-    assert options["env"]["PATH"] == os.environ["PATH"]
-    assert provider.client_for(envelope, coach=True)["env"] is None
+    assert options["runtime"].env["COPILOT_TASK_WAIT_TIMEOUT_SECONDS"] == str(supervisor.TASK_WAIT_SECONDS)
+    assert options["runtime"].env["PATH"] == os.environ["PATH"]
+    assert provider.client_for(envelope, coach=True)["runtime"].env is None
     assert os.environ["COPILOT_TASK_WAIT_TIMEOUT_SECONDS"] == "1"
 
 
@@ -389,7 +389,8 @@ def test_cli_routes_exact_reviewed_continuation_and_only_planned_hold_exits_zero
         return {"status": "checkpointed", "metadata": {"provider": {"checkpoint_reason": reason}}}
     monkeypatch.setattr(runtime, "run", run)
     assert cli.main(["run", "fixture-project", "--resume", "--reviewed", "exact-run"]) == code
-    assert received == {"project": "fixture-project", "resume": True, "handoff": False, "reviewed": "exact-run"}
+    assert received == {"project": "fixture-project", "resume": True, "handoff": False, "reviewed": "exact-run",
+                        "skills_batch": None, "defer_skills": False}
     assert json.loads(capsys.readouterr().out)["status"] == "checkpointed"
 
 

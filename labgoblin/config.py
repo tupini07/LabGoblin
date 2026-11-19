@@ -8,7 +8,7 @@ from pathlib import Path
 import tomllib
 
 from labgoblin import credits
-from labgoblin.paths import machine_ledger_path
+from labgoblin.paths import machine_ledger_path, research_root
 from labgoblin.protocol import CONFIG_VERSION, Resources, boolean, integer, number, require_version, table, text
 from labgoblin.session_log import DEFAULT_LOG_BYTES, MAX_LOG_BYTES
 from labgoblin.storage import read_text
@@ -57,7 +57,7 @@ class Config:
     model: str = "gpt-6.1-sol"
     reasoning_effort: str = "high"
     max_ai_credits: int | float | str = 1000
-    timeout_seconds: int | float = 5400
+    timeout_seconds: int | float = 24 * 60 * 60
     cpus: int | str = "unlimited"
     memory_mb: int | str = "unlimited"
     gpus: tuple[str, ...] = ()
@@ -78,6 +78,8 @@ class Config:
     max_event_log_bytes: int = DEFAULT_LOG_BYTES
     evaluation_spec: str | None = None
     supervisor_review: Schedule | None = None
+    extract_skills: bool = False
+    execution_purpose: str = "research"
 
     def __post_init__(self):
         require_version(self.version, CONFIG_VERSION, "configuration")
@@ -102,6 +104,13 @@ class Config:
         Resources(1 if self.cpus == "unlimited" else self.cpus,
                   1 if self.memory_mb == "unlimited" else self.memory_mb, self.gpus)
         boolean(self.coach, "coach")
+        boolean(self.extract_skills, "extract_skills")
+        if self.execution_purpose not in ("research", "skill-extraction"):
+            raise ValueError("Unsupported execution purpose")
+        if self.execution_purpose == "skill-extraction" and (
+                self.coach or self.consultant or self.closure_critic or self.supervisor_review
+                or self.timeout_seconds != 3900 or self.archive_workspace or self.evaluation_spec):
+            raise ValueError("Skill extraction requires its isolated role and 3600+300 second deadline")
         if self.supervisor_review is not None and not isinstance(self.supervisor_review, Schedule):
             raise ValueError("supervisor_review must be a validated calendar schedule")
         integer(self.goal_review_interval_seconds, "goal_review_interval_seconds", zero=True)
@@ -140,12 +149,12 @@ class Config:
         # TOML has no null; explicit inheritance must survive default-on presets.
         values.update({field: "inherit" for field in ROLE_MODELS if values[field] is None})
         return {key: value for key, value in values.items()
-                if value is not None}
+                if value is not None and not (key == "execution_purpose" and value == "research")}
 
     def model_for(self, purpose):
         overrides = {"researcher": None, "inspector": None, "coach": self.coach_model,
                      "closure_critique": self.closure_critic_model, "advice": self.advice_model,
-                     "claim_review": self.claim_review_model}
+                     "claim_review": self.claim_review_model, "skill-extraction": self.advice_model}
         if purpose not in overrides:
             raise ValueError(f"Unknown model purpose: {purpose}")
         return overrides[purpose] or self.model
@@ -153,6 +162,8 @@ class Config:
     @classmethod
     def parse(cls, value, *, frozen=False):
         value = dict(table(value, "configuration", cls.__dataclass_fields__))
+        if not frozen and value.get("execution_purpose", "research") != "research":
+            raise ValueError("execution_purpose belongs only to host-owned frozen admissions")
         require_version(value.get("version"), CONFIG_VERSION, "configuration")
         if "closure_critic" in value:
             boolean(value["closure_critic"], "closure_critic")
@@ -160,6 +171,7 @@ class Config:
             # Missing options in admitted records retain their historical policy.
             value.setdefault("model", "auto")
             value.setdefault("reasoning_effort", "medium")
+            value.setdefault("timeout_seconds", 5400)
             for field in ("coach", "consultant", "closure_critic"):
                 value.setdefault(field, False)
             for field in ROLE_MODELS:
@@ -184,7 +196,10 @@ class Config:
 
     @classmethod
     def load(cls, project):
-        return cls.parse(tomllib.loads(read_text(Path(project) / "labgoblin.toml")))
+        config = cls.parse(tomllib.loads(read_text(research_root(project) / "labgoblin.toml")))
+        if config.execution_purpose != "research":
+            raise ValueError("execution_purpose is host-owned frozen metadata, not a campaign setting")
+        return config
 
     def toml(self):
         import tomli_w

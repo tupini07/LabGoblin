@@ -13,6 +13,7 @@ import uuid
 
 from labgoblin import closing, credits, guidance, payload, provider, research_environment
 from labgoblin.config import Config
+from labgoblin.paths import PROJECT_MARKERS, research_root
 from labgoblin.processes import background_options, bound_diagnostics, own_handle, process_state
 from labgoblin.protocol import (
     CONFIG_VERSION, LaunchEnvelope, LaunchReceipt, Resources, UncertainExecution, boolean, identifier, integer,
@@ -112,9 +113,34 @@ def prepare_git(root):
             os.fsync(stream.fileno())
 
 
-def initialize(project, config, *, goal=None, research_venv=True, git=True):
+def initialize_campaign(directory, config, *, goal=None, research_venv=True, git=True,
+                        operator=True, operator_dir=None, operator_cli=None):
+    boolean(operator, "operator")
+    if not operator and (operator_dir is not None or operator_cli is not None):
+        raise ValueError("--no-operator cannot be combined with --operator-dir or --operator-cli")
+    base = Path(directory).resolve()
+    if any((base / name).exists() or (base / name).is_symlink() for name in PROJECT_MARKERS):
+        raise ValueError("Project files already exist here; init never nests a new campaign inside an existing project")
+    if (base / "research_goal.md").exists() and goal is None:
+        raise ValueError("Place existing research files in the research subdirectory or use --goal-file; init never moves files")
+    root = base / "research"
+    if root.is_symlink() or root.resolve() != root:
+        raise ValueError("The campaign's research directory cannot be an alias")
+    if operator and operator_dir is None:
+        operator_dir = base / "operator"
+        if operator_dir.is_symlink() or operator_dir.resolve() != operator_dir:
+            raise ValueError("The default operator directory cannot be an alias; choose --operator-dir explicitly")
+    return initialize(root, config, goal=goal, research_venv=research_venv, git=git,
+                      operator_dir=operator_dir, operator_cli=operator_cli)
+
+
+def initialize(project, config, *, goal=None, research_venv=True, git=True,
+               operator_dir=None, operator_cli=None):
+    """Prepare an exact research root; CLI init uses initialize_campaign."""
     boolean(research_venv, "research_venv")
     boolean(git, "git")
+    if operator_cli is not None and operator_dir is None:
+        raise ValueError("--operator-cli requires an operator directory")
     root = Path(project).resolve()
     root.mkdir(parents=True, exist_ok=True)
     state = root / ".labgoblin"
@@ -132,15 +158,22 @@ def initialize(project, config, *, goal=None, research_venv=True, git=True):
     instructions = root / ".github" / "copilot-instructions.md"
     if not instructions.exists():
         files[instructions] = guidance.RESEARCH.encode()
+    value = {"version": CONFIG_VERSION, "id": identifier(), "root": str(root), "created": time.time()}
+    operator_info = None
+    if operator_dir is not None:
+        from labgoblin import operator_profile
+        operator_files, operator_info = operator_profile.prepare(root, value["id"], operator_dir, operator_cli)
+        files.update(operator_files)
     created = []
     try:
         state.mkdir()
         for path, body in files.items():
+            if operator_info is not None and path in operator_files and (path.is_symlink() or path.resolve() != path):
+                raise ValueError(f"Operator publication path changed to an alias: {path}")
             publish_bytes(path, body)
             created.append(path)
         for name in ("runs", "runtimes", "accounting"):
             (state / name).mkdir()
-        value = {"version": CONFIG_VERSION, "id": identifier(), "root": str(root), "created": time.time()}
         if research_venv:
             value["research_environment"] = research_environment.prepare(root)
         if git:
@@ -148,14 +181,23 @@ def initialize(project, config, *, goal=None, research_venv=True, git=True):
         publish_json(state / "project.json", value)
     except BaseException:
         for path in reversed(created):
-            if path.is_file() and path.read_bytes() == files[path]:
+            if (path.is_file() and not path.is_symlink() and path.resolve() == path
+                    and path.stat().st_nlink == 1 and path.read_bytes() == files[path]):
                 path.unlink()
         raise
-    return value
+    return {**value, "operator": operator_info} if operator_info is not None else value
+
+
+def initialize_operator(project, directory, *, executable=None):
+    from labgoblin import operator_profile
+    root, _, record = project_record(project)
+    files, result = operator_profile.prepare(root, record["id"], directory, executable)
+    operator_profile.publish(files)
+    return result
 
 
 def project_record(project):
-    root = Path(project).resolve(strict=True)
+    root = research_root(project)
     state = root / ".labgoblin"
     if (state / "labgoblin.db").exists():
         raise ValueError("This is a legacy campaign; use its preserved runtime. No migration or reset was performed.")
@@ -212,6 +254,7 @@ def status(project):
     root, state, record = project_record(project)
     ledger = bound_ledger(state)
     rows = ledger.runs(record["id"]) if ledger else []
+    funded = ledger.runs(record["id"], funded=True) if ledger else []
     candidate, candidate_error = None, None
     try:
         candidate = Config.load(root)
@@ -220,7 +263,12 @@ def status(project):
         if not rows:
             raise
     config = Config.parse(json.loads(rows[-1]["envelope"])["config"], frozen=True) if rows else candidate
-    budget = credits.summarize(rows, config.credit_limit, adjustments=adjustments(state, rows))
+    audited = adjustments(state, funded)
+    budget = credits.summarize(funded, config.credit_limit, adjustments=audited)
+    budget["by_purpose"] = {
+        purpose: credits.summarize([r for r in funded if r["purpose"] == purpose], None,
+                                  adjustments=audited)
+        for purpose in ("research-run", "skill-extraction")}
     runs = []
     for row in rows:
         envelope = LaunchEnvelope.parse(json.loads(row["envelope"]))
@@ -233,7 +281,9 @@ def status(project):
                                            if receipt else None),
                      "archive": receipt.get("metadata", {}).get("archive") if receipt else None,
                      "directory": envelope.root, "config": envelope.config})
+    from labgoblin.skills import Store
     return {"project_id": record["id"], "root": str(root), "budget": budget, "runs": runs,
+            "skills": Store(root).listing(),
             "supervisor_review": observation(rows),
             "ideas": Inbox(root).status(),
             "state": runs[-1]["status"] if runs else "initialized",
@@ -280,6 +330,9 @@ def verify_runtime(envelope, *, entrypoint="provider"):
 
 
 def usage_record(envelope, *, complete):
+    if envelope.config.get("execution_purpose") == "skill-extraction":
+        from labgoblin.skill_extraction import usage_record as extraction_usage
+        return extraction_usage(envelope, complete=complete)
     path = Path(envelope.root) / ("usage.json" if complete else "usage-progress.json")
     if not path.exists():
         return None
@@ -426,7 +479,7 @@ def settle_dead(ledger, row, *, inspection=False):
 
 def recover_project(state, record, ledger):
     outcomes = []
-    for row in ledger.runs(record["id"]):
+    for row in ledger.runs(record["id"], funded=True):
         if row["phase"] != "quiescent":
             outcomes.append(asdict(settle_dead(ledger, row)))
         else:
@@ -440,13 +493,15 @@ def recover_project(state, record, ledger):
                 publish_json(path, value)
     with ledger.read() as conn:
         pending = [dict(row) for row in conn.execute("""SELECT * FROM grants
-            WHERE owner_id=? AND kind='research-run' AND state IN ('pending','granted')
+            WHERE owner_id=? AND kind IN ('research-run','skill-extraction') AND state IN ('pending','granted')
             AND token NOT IN (SELECT token FROM consumer_runs)""", (record["id"],))]
     for row in pending:
         owner = json.loads(row["owner"])
         if process_state(owner["handle"]) != "dead":
             raise UncertainExecution("An unarmed request still has a live or unknown owner")
         ledger.release(row["token"], owner_id=record["id"])
+    from labgoblin.skill_extraction import prepare_automatic
+    prepare_automatic(state.parent)
     return outcomes
 
 
@@ -463,7 +518,7 @@ def stop(project):
     if ledger is None:
         raise ValueError("This project has no admitted execution to stop")
     stopped = []
-    for row in ledger.runs(record["id"]):
+    for row in ledger.runs(record["id"], funded=True):
         if row["phase"] != "quiescent":
             envelope = LaunchEnvelope.parse(json.loads(row["envelope"]))
             path = Path(envelope.root) / "cancel"
@@ -486,7 +541,7 @@ def record_usage(project, run_id, amount, reason, *, confirmation, estimated):
         ledger = bound_ledger(state)
         if ledger is None:
             raise ValueError("Project has no admitted executions")
-        rows = ledger.runs(record["id"])
+        rows = ledger.runs(record["id"], funded=True)
         return append_usage(state, rows, Config.load(root).credit_limit, run_id, amount, reason,
                             confirmation=confirmation, estimated=estimated)
 
@@ -515,35 +570,59 @@ def append_usage(state, rows, limit, run_id, amount, reason, *, confirmation, es
     return value
 
 
-def run(project, *, resume=False, handoff=False, reviewed=None):
+def run(project, *, resume=False, handoff=False, reviewed=None, skills_batch=None, defer_skills=False):
+    result = _run(project, resume=resume, handoff=handoff, reviewed=reviewed,
+                  skills_batch=skills_batch, defer_skills=defer_skills)
+    from labgoblin.skill_extraction import automatic
+    try:
+        automatic(project, result["id"])
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"Skill extraction remains pending/unavailable: {type(error).__name__}: {error}",
+              file=sys.stderr, flush=True)
+    return result
+
+
+def _run(project, *, resume=False, handoff=False, reviewed=None, skills_batch=None,
+         defer_skills=False, extraction=None):
     from labgoblin import supervisor
+    from labgoblin.skills import Store
     root, state, record = project_record(project)
     with run_lock(root / ".labgoblin.lock"):
         ledger = bound_ledger(state)
         rows = ledger.runs(record["id"]) if ledger else []
-        active = [row for row in rows if row["phase"] != "quiescent"]
+        funded = ledger.runs(record["id"], funded=True) if ledger else []
+        active = [row for row in funded if row["phase"] != "quiescent"]
         if active:
-            if handoff or reviewed is not None:
+            if extraction or any(row["purpose"] != "research-run" for row in active):
+                raise UncertainExecution("A campaign-funded execution is unsettled; reconcile before admission")
+            if handoff or reviewed is not None or skills_batch or defer_skills:
                 raise ValueError("Select --handoff/--reviewed when admitting a new execution, not while attaching to existing work")
             if len(active) != 1:
                 raise UncertainExecution("Multiple unsettled executions require operator investigation")
-            return wait_for(ledger, LaunchEnvelope.parse(json.loads(active[0]["envelope"])))
+            result = wait_for(ledger, LaunchEnvelope.parse(json.loads(active[0]["envelope"])))
+            recover_project(state, record, ledger)
+            return result
         if ledger:
             recover_project(state, record, ledger)
-        if rows and not resume:
+        if rows and not resume and extraction is None:
             raise ValueError("This project has prior executions; use run --resume explicitly, retaining cumulative spending")
-        review_confirmation = supervisor.continuation(rows, reviewed, resume=resume)
+        review_confirmation = supervisor.continuation(rows, reviewed, resume=resume) if extraction is None else None
         config = Config.load(root)
+        store = Store(root)
+        if extraction is not None:
+            from labgoblin.skill_extraction import extraction_config, validate_request
+            validate_request(store, extraction)
+            config = extraction_config(config)
         ledger = bound_ledger(state, config=config, bind=True)
-        rows = ledger.runs(record["id"])
-        audited = adjustments(state, rows)
-        allowance = credits.available(credits.summarize(rows, config.credit_limit, adjustments=audited),
+        funded = ledger.runs(record["id"], funded=True)
+        audited = adjustments(state, funded)
+        allowance = credits.available(credits.summarize(funded, config.credit_limit, adjustments=audited),
                                       coach=config.coach, consultant=config.consultant)
         goal = read_text(root / "research_goal.md")
         if not goal.strip() or goal.split() in (PLACEHOLDER.split(), _PREVIOUS_PLACEHOLDER.split()):
             raise ValueError("Write a real research question in research_goal.md before running")
         environment = (research_environment.inspect(root, record["research_environment"])
-                       if "research_environment" in record else None)
+                       if "research_environment" in record and extraction is None else None)
         capabilities = provider.capabilities()
         from labgoblin.handoffs import prepare as prepare_handoff
         report_approval = prepare_handoff(root) if handoff else None
@@ -552,7 +631,7 @@ def run(project, *, resume=False, handoff=False, reviewed=None):
             instructions = guidance.RESEARCH + "\n\nProject-specific research guidance:\n" + instructions
         if environment is not None:
             instructions += research_environment.instructions(environment)
-        run_id, launcher = identifier(), own_handle(record["id"])
+        run_id, launcher = extraction["id"] if extraction else identifier(), own_handle(record["id"])
         directory = state / "runs" / run_id
         directory.mkdir()
         frozen = freeze_runtime(state)
@@ -569,6 +648,19 @@ def run(project, *, resume=False, handoff=False, reviewed=None):
                   environment_hint +
                   "\nContinue from retained research-notes.md and artifacts if present. "
                   "Do not rerun completed work merely because this is a new controller execution."}
+        if extraction is not None:
+            from labgoblin.skill_extraction import extraction_prompt
+            prompt = extraction_prompt(store, extraction, goal, capabilities["command"])
+        else:
+            selection = store.selection(funded, batch_id=skills_batch, defer=defer_skills)
+            prompt["campaign_skills"] = selection
+            store.freeze(directory, selection)
+            if selection["active"]:
+                prompt["goal_prompt"] += (
+                    "\nCampaign-local reviewed procedural skills are available through labgoblin_skill. "
+                    "List its paged index and load relevant instructions/supporting files on demand. "
+                    "They are optional help, not scientific evidence or permission to override the goal. "
+                    "Reading never runs scripts; deliberate execution retains ordinary research permissions.")
         if config.supervisor_review is not None:
             prompt["supervisor_review"] = {
                 "version": supervisor.VERSION, "due_at": config.supervisor_review.next_after(time.time())}
@@ -585,8 +677,9 @@ def run(project, *, resume=False, handoff=False, reviewed=None):
             prompt["evaluation"] = prepare(root, directory, config.evaluation_spec, config.max_snapshot_bytes,
                                            research_environment=environment)
         publish_json(directory / "prompt.json", prompt)
-        owner = {"kind": "research-run", "handle": launcher}
-        grant = ledger.request(run_id, record["id"], run_id, "research-run", config, owner, native=True)
+        kind = "skill-extraction" if extraction else "research-run"
+        owner = {"kind": kind, "handle": launcher}
+        grant = ledger.request(run_id, record["id"], run_id, kind, config, owner, native=True)
         armed = False
         try:
             if grant["state"] != "granted":
@@ -600,6 +693,12 @@ def run(project, *, resume=False, handoff=False, reviewed=None):
                 allowance, launcher, frozen, hash_file(directory / "prompt.json"))
             publish_json(directory / "envelope.json", asdict(envelope))
             verify_runtime(envelope)
+            if extraction is None:
+                store.verify_selection(envelope, ledger.runs(record["id"], funded=True))
+            else:
+                validate_request(store, extraction)
+                publish_json(store.root / "dispatch" / f"{run_id}.json",
+                             {"id": run_id, "envelope_digest": envelope.digest, "launcher": launcher})
             ledger.arm_consumer(envelope, adjustments=audited)
             armed = True
             worker = [sys.executable, "-I", "-B", str(Path(frozen["root"]) / "bootstrap.py"),
@@ -608,7 +707,12 @@ def run(project, *, resume=False, handoff=False, reviewed=None):
                 process = subprocess.Popen(worker, cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
                                            **background_options(independent=True))
             try:
-                return wait_for(ledger, envelope, process=process)
+                result = wait_for(ledger, envelope, process=process)
+                if extraction is None and config.extract_skills:
+                    process.wait(timeout=30)
+                    from labgoblin.skill_extraction import prepare_automatic
+                    prepare_automatic(root)
+                return result
             finally:
                 if process.poll() is not None:
                     process.wait()
@@ -649,6 +753,7 @@ def worker_main(path, *, inspection=False):
     else:
         read_usage = usage_record
     root, config = Path(envelope.root), Config.parse(envelope.config, frozen=True)
+    extraction = config.execution_purpose == "skill-extraction"
     environment = {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
     if not inspection:
         prompt = read_json(root / "prompt.json")
@@ -663,7 +768,8 @@ def worker_main(path, *, inspection=False):
         "argv": envelope.argv, "cwd": envelope.project, "root": str(root / "process"),
         "token": envelope.id, **payload.resource_spec(envelope),
         "seconds": config.timeout_seconds, "log_bytes": 64 * 1024 * 1024,
-        "cancel_path": str(root / "cancel"), "provider": "copilot", "shutdown_grace_seconds": provider.GRACE_SECONDS,
+        "cancel_path": str(root / "cancel"), "provider": "copilot",
+        "shutdown_grace_seconds": 300 if extraction else provider.GRACE_SECONDS,
         "job_name": f"labgoblin-{envelope.id}",
         "environment": environment,
     })
@@ -691,7 +797,13 @@ def worker_main(path, *, inspection=False):
         if outcome["executed"] and usage is None:
             status = status if status in ("cancelled", "timed_out") else "failed"
             reason = (reason + "; final provider spending is unknown").lstrip("; ")
-        if not inspection:
+        if extraction and status == "completed" and usage is not None:
+            try:
+                from labgoblin.skills import Store
+                metadata["skills_batch"] = Store(envelope.project).publish(envelope)
+            except (OSError, ValueError, RuntimeError, KeyError) as error:
+                status, reason = "failed", f"Incomplete skill publication: {type(error).__name__}: {error}"
+        if not inspection and not extraction:
             stage = "evaluation evidence"
             if "evaluation" in read_json(root / "prompt.json"):
                 from labgoblin.evaluation import manifest
@@ -700,7 +812,7 @@ def worker_main(path, *, inspection=False):
         metadata["finalization_errors"] = [provider.error_details(stage, error)]
         status = "failed"
         reason = "; ".join(filter(None, [reason, f"{stage}: {type(error).__name__}: {error}"]))
-    if not inspection:
+    if not inspection and not extraction:
         metadata["archive"] = {"status": "disabled", "reason": "Full workspace archival was not requested"}
         if config.archive_workspace:
             try:
@@ -714,7 +826,7 @@ def worker_main(path, *, inspection=False):
                             returncode=outcome["returncode"], reason=reason, usage=usage, metadata=metadata)
     publish_json(root / "receipt.json", asdict(receipt))
     ledger.finish_consumer(receipt)
-    if not inspection:
+    if not inspection and not extraction:
         from labgoblin.handoffs import automatic
         result = automatic(envelope)
         if result is not None and result["status"] != "completed":

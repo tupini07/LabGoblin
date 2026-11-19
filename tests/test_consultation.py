@@ -19,6 +19,19 @@ from tests.test_simple_provider import exercise
 QUESTION = {"question": "Which assumptions or materially different approaches are worth checking?"}
 
 
+async def dispatch_sdk_tool(tool, session_id, arguments, responses):
+    from copilot.session import CopilotSession
+
+    session = CopilotSession(session_id, None)
+
+    async def respond(request):
+        responses.append(request)
+
+    session._rpc = SimpleNamespace(tools=SimpleNamespace(handle_pending_tool_call=respond))
+    session._pending_external_tools["request"] = asyncio.current_task()
+    await session._execute_tool_and_respond("request", tool.name, "call-0", arguments, tool.handler)
+
+
 def test_consultant_defaults_on_with_explicit_opt_out_and_frozen_compatibility(tmp_path, capsys):
     assert Config.parse({"version": 5}).consultant is True
     assert Config.parse({"version": 5}, frozen=True).consultant is False
@@ -50,14 +63,14 @@ def test_researcher_consults_without_losing_normal_tools_and_retains_evidence(pr
     code, clients, outcome = exercise(envelope, [{"consult": [request], "duplicate": True}, {}])
     assert code == 0 and len(clients) == 2
     researcher, adviser = [client.session for client in clients]
-    assert "available_tools" not in researcher.options
+    assert "available_tools" not in researcher.options["tools"]
     assert researcher.options["system_message"]["mode"] == "append"
     assert guidance.CONSULT_CALLER in researcher.options["system_message"]["content"]
-    assert researcher.options["session_limits"] == {"max_ai_credits": 300.0}
-    assert adviser.options["session_limits"] == {"max_ai_credits": 260.0}
+    assert researcher.options["execution"]["limits"] == {"max_ai_credits": 300.0}
+    assert adviser.options["execution"]["limits"] == {"max_ai_credits": 260.0}
     assert researcher.updates == [40, 290]
     assert adviser.options["system_message"] == {"mode": "replace", "content": guidance.CONSULTANT}
-    assert {tool.name for tool in adviser.options["tools"]} == {"labgoblin_read_evidence", "labgoblin_list_evidence"}
+    assert {tool.name for tool in adviser.options["tools"]["definitions"]} == {"labgoblin_read_evidence", "labgoblin_list_evidence"}
     assert len(researcher.prompts) == 1 and len(adviser.prompts) == 1
     assert researcher.tool_results[0] is researcher.tool_results[1]
     response = json.loads(researcher.tool_results[0].text_result_for_llm)
@@ -87,9 +100,9 @@ def test_coach_can_consult_and_passes_artifact_to_same_researcher(project, ledge
     assert "consult-0.md" in clients[0].session.prompts[1]
     assert "Consultation artifacts available to you" in clients[0].session.prompts[1]
     assert [s["role"] for s in outcome["sessions"]] == ["researcher", "coach-0", "consult-0", "coach-1"]
-    assert clients[0].session.options["session_limits"]["max_ai_credits"] == 970
-    assert clients[1].session.options["session_limits"]["max_ai_credits"] == 930
-    assert clients[2].session.options["session_limits"]["max_ai_credits"] == 890
+    assert clients[0].session.options["execution"]["limits"]["max_ai_credits"] == 970
+    assert clients[1].session.options["execution"]["limits"]["max_ai_credits"] == 930
+    assert clients[2].session.options["execution"]["limits"]["max_ai_credits"] == 890
     assert clients[0].session.updates == [950]
     assert clients[1].session.updates == [40, 920]
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 50 * credits.NANO
@@ -101,7 +114,7 @@ def test_repeated_consultations_are_fresh_and_do_not_renew_the_pool(project, led
                    consultant=True, allowance=1000 * credits.NANO)
     code, clients, outcome = exercise(envelope, [{"consult": [QUESTION, {"question": "Check another assumption."}]}, {}, {}])
     assert code == 0 and len(clients) == 3
-    assert [c.session.options["session_limits"]["max_ai_credits"] for c in clients] == [1000, 960, 950]
+    assert [c.session.options["execution"]["limits"]["max_ai_credits"] for c in clients] == [1000, 960, 950]
     assert clients[0].session.updates == [40, 990, 40, 980]
     assert clients[1].session.options["session_id"] != clients[2].session.options["session_id"]
     assert len(clients[0].session.prompts) == 1
@@ -125,8 +138,8 @@ def test_targeted_claim_review_is_retained_and_available_without_repeating_it(pr
     adviser = clients[2].session
     assert adviser.options["system_message"]["content"] == guidance.CONSULTANT + guidance.CLAIM_REVIEW
     assert guidance.COACH_CLAIM_REVIEW in clients[1].session.options["system_message"]["content"]
-    assert {tool.name for tool in adviser.options["tools"]} == {"labgoblin_read_evidence", "labgoblin_list_evidence"}
-    guard = adviser.options["hooks"]["on_pre_tool_use"]
+    assert {tool.name for tool in adviser.options["tools"]["definitions"]} == {"labgoblin_read_evidence", "labgoblin_list_evidence"}
+    guard = adviser.options["hooks"]["handlers"]["on_pre_tool_use"]
     for name in ("powershell", "labgoblin_consult", "labgoblin_review_decision", "write_file"):
         assert guard({"toolName": name}, {})["permissionDecision"] == "deny"
     directory = Path(envelope.root) / "sessions" / "consult-0"
@@ -148,7 +161,7 @@ def test_targeted_claim_review_is_retained_and_available_without_repeating_it(pr
     assert "consult-0.md" in clients[0].session.prompts[1]
     assert "Test, repair or narrow a challenged claim" in clients[0].session.prompts[1]
     assert clients[1].session.tool_results[0] is clients[1].session.tool_results[1]
-    assert [client.session.options["session_limits"]["max_ai_credits"] for client in clients] == [970, 930, 890, 900]
+    assert [client.session.options["execution"]["limits"]["max_ai_credits"] for client in clients] == [970, 930, 890, 900]
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 50 * credits.NANO
 
 
@@ -200,10 +213,22 @@ def test_parallel_decision_cannot_return_after_fatal_consultation_accounting(pro
     decision = {}
     tool = next(tool for tool in provider.coach_tools(project[0], decision, consultations=pool)
                 if tool.name == "labgoblin_review_decision")
-    invocation = SimpleNamespace(arguments={"decision": "accept", "reason": "Scoped conclusion.",
-                                           "coverage": "Inspected report."})
-    with pytest.raises(asyncio.CancelledError, match="cannot fund"):
-        asyncio.run(tool.handler(invocation))
+    arguments = {"decision": "accept", "reason": "Scoped conclusion.", "coverage": "Inspected report."}
+
+    async def check():
+        responses = []
+        task = asyncio.create_task(dispatch_sdk_tool(tool, "fixture", arguments, responses))
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), .02)
+            assert not responses
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not responses
+
+    asyncio.run(check())
     assert not decision
 
 
@@ -277,7 +302,7 @@ def test_adviser_tool_policy_denies_shell_decisions_recursion_and_invalid_fetch(
     envelope = arm(project, ledger, consultant=True)
     _, clients, _ = exercise(envelope, [{"consult": [QUESTION]}, {}])
     options = clients[1].session.options
-    guard = options["hooks"]["on_pre_tool_use"]
+    guard = options["hooks"]["handlers"]["on_pre_tool_use"]
     for name in ("powershell", "task", "labgoblin_consult", "labgoblin_review_decision", "write_file"):
         assert guard({"toolName": name}, {})["permissionDecision"] == "deny"
     for args in ({"url": "file:///local"}, {"url": "https://name:password@example.org"},
@@ -360,7 +385,7 @@ def test_ordinary_advisers_use_configured_timeout_within_campaign_time(
     if caller == "coach":
         assert deadlines["coach-0"] == deadlines["coach-1"] == deadlines["researcher"]
     adviser = clients[2 if caller == "coach" else 1].session
-    assert adviser.options["session_limits"] == {"max_ai_credits": 190.0 if caller == "coach" else 260.0}
+    assert adviser.options["execution"]["limits"] == {"max_ai_credits": 190.0 if caller == "coach" else 260.0}
     assert "30 minutes including shutdown" not in adviser.options["system_message"]["content"]
     assert read_json(Path(envelope.root) / "sessions" / "consult-0" / "response.json")["purpose"] == purpose
 
@@ -404,7 +429,7 @@ def test_original_300_credit_pool_failure_now_uses_shared_campaign_balance(proje
         {"consult": [request, request]}, {"cost_nano": 224926250000}, {"cost_nano": 83767750000}])
     assert code == 0 and outcome["status"] == "completed"
     assert len(clients) == 3 and all(result.result_type == "success" for result in clients[0].session.tool_results)
-    assert clients[2].session.options["session_limits"]["max_ai_credits"] == 735.07375
+    assert clients[2].session.options["execution"]["limits"]["max_ai_credits"] == 735.07375
     assert clients[0].session.updates == [40, 775.07375, 40, 691.306]
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 318694000000
 
@@ -424,7 +449,7 @@ def test_unlimited_campaign_has_no_hidden_adviser_quota(project, ledger):
                    consultant=True, allowance=None)
     code, clients, _ = exercise(envelope, [{"consult": [QUESTION, QUESTION]}, {"cost": 500}, {"cost": 500}])
     assert code == 0 and len(clients) == 3
-    assert all(client.session.options["session_limits"] is None for client in clients)
+    assert all(client.session.options["execution"]["limits"] is None for client in clients)
     assert clients[0].session.updates == []
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 1010 * credits.NANO
 
@@ -441,6 +466,61 @@ def test_failed_transfer_never_resumes_caller_or_buys_overlapping_inference(proj
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == update * 10 * credits.NANO
 
 
+@pytest.mark.parametrize("update", [1, 2])
+@pytest.mark.parametrize("failure", ["rejected", "timeout"])
+def test_fatal_transfer_keeps_actual_sdk_dispatch_blocked_until_owned_abort(
+        project, ledger, monkeypatch, update, failure):
+    from tests.test_simple_provider import FakeSession, Value
+
+    envelope = arm(project, ledger, consultant=True)
+    bounded = provider.Session.bounded
+
+    async def updated(session, request):
+        session.updates.append(request.execution.limits.max_ai_credits)
+        if len(session.updates) == update:
+            if failure == "timeout":
+                await asyncio.Event().wait()
+            return Value({"success": False})
+        return Value({"success": True})
+
+    async def short_update_wait(session, awaitable, seconds=10):
+        if getattr(awaitable, "cr_code", None) is updated.__code__:
+            seconds = .02
+        return await bounded(session, awaitable, seconds)
+
+    async def consult_through_sdk(session):
+        tool = next(tool for tool in session.options["tools"]["definitions"] if tool.name == "labgoblin_consult")
+        await dispatch_sdk_tool(tool, session.options["session_id"], QUESTION, session.tool_results)
+        await session.finish()
+
+    monkeypatch.setattr(FakeSession, "update", updated)
+    monkeypatch.setattr(FakeSession, "consult_and_finish", consult_through_sdk)
+    monkeypatch.setattr(provider.Session, "bounded", short_update_wait)
+    code, clients, outcome = exercise(envelope, [{"consult": [QUESTION]}, {}])
+    caller = clients[0].session
+    assert code == 1 and outcome["status"] == "failed"
+    assert "Consultation allowance transfer failed" in outcome["primary_outcome"]["reason"]
+    assert outcome["finalization_errors"] == []
+    assert len(clients) == update and len(caller.updates) == update
+    assert caller.tool_results == [] and caller.aborted and caller.tool_worker.cancelled()
+    assert all(client.stopped for client in clients)
+    assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == update * 10 * credits.NANO
+    directory = Path(envelope.root) / "sessions" / "researcher"
+    name = f"1-{update - 1}"
+    intent = read_json(directory / f"options-update-{name}-intent.json")
+    failed = read_json(directory / f"options-update-{name}-failure.json")
+    assert intent["operation"] == failed["operation"] == "session.options.update"
+    assert intent["tool_call_id"] == "call-0"
+    assert intent["new_nano"] == (40 if update == 1 else 290) * credits.NANO
+    assert failed["acknowledged"] is False
+    assert failed["elapsed_seconds"] >= 0
+    assert failed["error"]["type"] == ("TimeoutError" if failure == "timeout" else "RuntimeError")
+    assert not (directory / f"allowance-{name}.json").exists()
+    assert outcome["sessions"][0]["allowance_nano"] == (300 if update == 1 else 40) * credits.NANO
+    if failure == "timeout":
+        assert "session.options.update allowance transfer" in outcome["reason"]
+
+
 def test_transfer_acknowledgment_precedes_adviser_and_restore_precedes_tool_result(project, ledger, monkeypatch):
     from tests.test_simple_provider import FakeSession
     envelope = arm(project, ledger, consultant=True)
@@ -449,15 +529,15 @@ def test_transfer_acknowledgment_precedes_adviser_and_restore_precedes_tool_resu
 
     async def updated(session, request):
         value = await update(session, request)
-        sequence.append(("limit", request.session_limits.max_ai_credits))
+        sequence.append(("limit", request.execution.limits.max_ai_credits))
         return value
 
     async def sent(session, prompt):
-        sequence.append(("send", "adviser" if "available_tools" in session.options else "researcher"))
+        sequence.append(("send", "adviser" if "available_tools" in session.options["tools"] else "researcher"))
         return await send(session, prompt)
 
     async def finished(session):
-        if "available_tools" not in session.options:
+        if "available_tools" not in session.options["tools"]:
             sequence.append(("caller_result", len(session.tool_results)))
         return await finish(session)
 
@@ -472,6 +552,7 @@ def test_transfer_acknowledgment_precedes_adviser_and_restore_precedes_tool_resu
     assert [(value["previous_nano"], value["new_nano"]) for value in records] == [
         (300 * credits.NANO, 40 * credits.NANO), (40 * credits.NANO, 290 * credits.NANO)]
     assert all(value["tool_call_id"] == "call-0" for value in records)
+    assert all(value["operation"] == "session.options.update" and value["acknowledged"] for value in records)
 
 
 @pytest.mark.parametrize("state", ["unowned", "wrong_call", "idle", "aborting", "exhausted"])

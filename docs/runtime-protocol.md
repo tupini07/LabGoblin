@@ -10,11 +10,13 @@ generic exchange shape remain 3. These are separately checked, not migrated.
 |---|---|
 | `config.py`, `protocol.py` | Strict configuration and small execution records, not scientific schemas. |
 | `runtime.py` | Explicit initialization, one controller, frozen launch, recovery and retained evidence. |
+| `operator_profile.py` | Creation-only external Copilot operator guidance and exact project/CLI bindings; no agent execution. |
 | `research_environment.py` | Explicit project-local scientific environment and recorded research authorization, not a package manager or agent. |
 | `provider.py`, `guidance.py` | One ordinary SDK researcher, bounded read-only stopping review and short instructions. |
 | `consultation.py` | Shared bounded evidence readers and retained public-literature retrieval for optional advisers. |
 | `checkins.py` | Coalesced advisory goal reviews and a once-only deadline notice at an awaited researcher tool boundary. |
 | `evaluation.py` | Optional frozen paired evaluator, one-use confirmation exposure and read-only check evidence. |
+| `skills.py`, `skill_extraction.py` | Optional campaign-local procedural proposals, exact human review, owned extraction and frozen researcher delivery. |
 | `inspector.py`, `inspection_evidence.py`, `inspection_server.py`, `inspection_ideas.py` | Independently owned campaign chat, qualified evidence, external idea drafts and authenticated human publication. |
 | `ideas.py` | Immutable operator file revisions, exact delivery/reply records and the final-closure cutoff; not scientific state. |
 | `scheduler.py`, `db.py` | Shared execution/accounting ledger, one-time claims and qualified terminal receipts. |
@@ -27,7 +29,45 @@ behind these modules. Normal research files remain the researcher's working
 medium. The module must not start another scientific turn because a JSON form is
 missing or a report was not published through an API.
 
+CLI `init PROJECT` uses `runtime.initialize_campaign` to create `research` and
+`operator` subdirectories. The low-level `runtime.initialize` still prepares an
+exact research root. Only research owns a project identity, configuration, lock
+and scientific environment. The default operator profile and handoff are
+outside that instruction tree; `--no-operator` suppresses them without changing
+the research location. An explicit external operator destination is supported.
+Generation is model-free and supplies no lifecycle or spending authorization.
+
+`paths.research_root` resolves command inputs read-only: a marked direct root or
+its marked `research` child. Markers at both levels are ambiguous and fail;
+incomplete state is not bypassed, automatic child aliases are refused, and
+`project_record` still validates the exact persisted identity/root/lock.
+Existing direct-root projects and companions are never moved or rewritten.
+Operator publication preserves matching files, refuses conflicting or aliased
+outputs, and rolls back only unchanged files owned by its attempt. Project
+identity is published last; partial initialization never becomes ready.
+
 ## Admission and ownership
+
+Opt-in skill extraction runs only after a qualified scheduled review hold or an
+explicit request naming settled research. Its durable intent precedes dispatch.
+The `skill-extraction` purpose shares campaign funding and recovery, but is
+excluded from research-only latest-run, review-hold and scientific evidence
+selection. Unknown ownership or spending never authorizes a duplicate attempt.
+Work has a 3600-second ceiling and a separate, bounded 300-second cleanup allowance.
+
+Complete proposal folders, provenance and human decisions are retained under
+`.labgoblin/skills`. Publication alone never activates a proposal. Explicit
+continuation binds the exact batch, decision revision, source receipt and selected
+active-set digest; arming rechecks that selection. Rejected, challenged and
+deferred replacements retain the old active revision. Recovery uses the admitted
+selection rather than newer review decisions.
+
+Each research execution freezes complete active folders. The bounded
+`labgoblin_skill` tool supplies a paged index and on-demand file reads without
+executing scripts. Global and arbitrary workspace skill discovery stay disabled.
+Extraction uses ordinary coding tools with proposal/scratch-only write guidance;
+native same-user execution is not an adversarial filesystem sandbox. Failed or
+empty extraction leaves the original research outcome and review hold intact.
 
 1. An existing project identity and OS file lock establish one controller.
    Recovery precedes candidate configuration activation or another admission.
@@ -164,6 +204,13 @@ validity, reference quality, end-use relevance and any required stronger isolati
 
 ## SDK lifecycle and spending
 
+LabGoblin pins `microsoft-copilot-sdk==2.0.0` for CLI server protocol 4.
+When upgrading an existing campaign runtime, wait for its executions to settle
+and preserve the old installation. Remove `github-copilot-sdk` **before**
+installing the new LabGoblin wheel in that same runtime: both distributions
+install the `copilot` Python package. Do not remove the old distribution after
+installing the new one. The research project's scientific `.venv` is separate.
+
 The ordinary researcher retains its SDK session through any coach follow-up.
 Each coach uses a fresh empty-mode runtime and only curated read-only evidence
 tools plus a small stopping decision. Custom instructions are supplied explicitly;
@@ -171,8 +218,10 @@ extensions, discovered skills, MCP servers, schedules and unrestricted nested
 model agents are not part of this execution.
 
 Owned CLI processes disable history sync/export with `--sync-session=off` and
-`--no-remote-export`. Every SDK session explicitly uses remote mode `off`;
-client-level remote-session support also remains disabled. Do not use the removed
+`--no-remote-export`. With the protocol-4 SDK, sessions are created locally.
+Before inference the harness explicitly requests session remote mode `off`,
+requires confirmation that export and steering are disabled, and checks that
+the server's remote control is off. Do not use the removed
 `--no-remote` CLI flag or change shared user settings to enforce these boundaries.
 
 New candidate configurations default to Sol (`gpt-6.1-sol`) with high effort,
@@ -341,9 +390,18 @@ Arbitrary waiting sessions cannot receive limit updates, and an exhausted
 session is never renewed. Failed transfers and soft overshoot into protected
 campaign headroom stop the caller; unknown adviser spending blocks inference
 and cannot yield a complete aggregate bill.
-These fatal conditions cancel the SDK tool callback without returning a result
-that could permit another model response, then abort the caller through owned
-shutdown. Settled, nonfatal consultation failures remain ordinary tool errors.
+These fatal conditions keep the SDK tool callback unanswered until owned
+abort/stop cancels its dispatch task. Raising `CancelledError` inside a handler
+is not sufficient: the SDK can translate it into an ordinary tool failure and
+resume inference. The same hold applies to concurrent stopping-decision calls
+after a fatal consultation. Settled, nonfatal consultation failures remain
+ordinary tool errors. Allowance updates retain an operation-labelled
+`options-update-*-intent.json` before the RPC and an acknowledged `allowance-*.json`
+only after success; failures retain bounded error/timing evidence in
+`options-update-*-failure.json` when storage permits. An unacknowledged update
+may already have changed the provider ceiling, so it never permits a blind retry
+or adviser admission. The control RPC keeps its finite ten-second bound,
+clamped to the remaining session deadline.
 Exact contiguous adviser roles and deterministic session IDs qualify aggregate
 usage. The flag defaults off when missing from historical frozen format-5 records; no frozen
 configuration, helper or receipt is rewritten.
@@ -431,6 +489,17 @@ successful metrics collection establishes a settled prompt. Sending another
 prompt invalidates that session's settled status until its new response settles.
 Transient progress-metric RPC errors are visible but do not force an unnecessary
 research restart; a missing final total still blocks new admission.
+
+If final metrics are interrupted, successful SDK runtime stop and event-log
+closure may recover billing from a retained routine `session.shutdown`. Recovery
+requires exactly one owned session start and shutdown, matching session ID,
+start time and applied model, a shutdown at the end of the sealed log, verified
+indexed bytes, and nondecreasing `totalNanoAiu`. Selected events are bounded to
+64 KiB each; missing, omitted, conflicting or invalid evidence stays unknown.
+Final usage retains the exact event sequences and hashes. This settles spending,
+not the interrupted prompt: original failure and cleanup diagnostics remain,
+no answer/checkpoint is manufactured, and no retry or continuation is purchased.
+Native tree retirement remains required before the execution receipt settles.
 
 Spending is integer `totalNanoAiu`; one credit is 1e9 units. In-place SDK limit
 updates only reallocate the unspent project pool after observed role costs.

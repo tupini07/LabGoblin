@@ -19,6 +19,14 @@ from labgoblin.storage import LockBusy, publish_bytes, run_lock
 
 
 APPLICATION_ID = 0x58474C33
+CAMPAIGN_KINDS = ("research-run", "skill-extraction")
+
+
+def execution_kind(envelope):
+    purpose = Config.parse(envelope.config, frozen=True).execution_purpose
+    return "skill-extraction" if purpose == "skill-extraction" else "research-run"
+
+
 SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE capacity(
@@ -94,6 +102,7 @@ def _consumer(row):
             raise ValueError("Ledger receipt identity mismatch")
         row["receipt"] = canonical(asdict(receipt)).decode()
     row["inspection"] = inspection
+    row["purpose"] = "inspection" if inspection else execution_kind(envelope)
     return row
 
 
@@ -131,7 +140,7 @@ def request_eligible(row: dict) -> tuple[bool, str]:
     from labgoblin.processes import process_state
     try:
         owner = json.loads(row["owner"])
-        if owner["kind"] not in ("research-run", "inspection-run"):
+        if owner["kind"] not in (*CAMPAIGN_KINDS, "inspection-run"):
             # Other installed runtimes retain responsibility for their own admission intent.
             return bool(row["eligible"]), row["reason"]
         state = process_state(owner["handle"])
@@ -219,7 +228,7 @@ class ResourceLedger:
                 owner: dict, *, native: bool) -> dict:
         for label, value in (("token", token), ("owner_id", owner_id), ("work_id", work_id), ("kind", kind)):
             text(value, label)
-        if kind not in ("research-run", "inspection-run") or owner.get("kind") != kind or native is not True:
+        if kind not in (*CAMPAIGN_KINDS, "inspection-run") or owner.get("kind") != kind or native is not True:
             raise ValueError("This runtime admits only native research or read-only inspection runs")
         handle = owner.get("handle")
         if (not isinstance(handle, dict) or type(handle.get("pid")) is not int
@@ -287,7 +296,7 @@ class ResourceLedger:
 
     def arm_consumer(self, envelope, *, adjustments=None, inspection=False):
         config = Config.parse(envelope.config, frozen=True)
-        kind = "inspection-run" if inspection else "research-run"
+        kind = "inspection-run" if inspection else execution_kind(envelope)
         if inspection and (config.coach or config.consultant or config.gpus or config.credit_limit is None):
             raise ValueError("Inspection requires a finite separate allowance and no research roles or GPUs")
         if envelope.ledger_id != self.id or Path(envelope.ledger_path) != self.path:
@@ -311,7 +320,7 @@ class ResourceLedger:
             old = conn.execute("SELECT digest FROM consumer_runs WHERE token=?", (envelope.id,)).fetchone()
             if old:
                 raise ValueError("A research grant is one-use and was already armed")
-            rows = self._runs(conn, envelope.project_id, inspection=inspection)
+            rows = self._runs(conn, envelope.project_id, inspection=inspection, funded=not inspection)
             budget = credits.summarize(rows, config.credit_limit, adjustments=adjustments)
             if envelope.allowance_nano != credits.available(budget, coach=config.coach, consultant=config.consultant):
                 raise ValueError("Research allowance changed before arming")
@@ -363,14 +372,15 @@ class ResourceLedger:
             return _consumer(row)
 
     @staticmethod
-    def _runs(conn, project_id, *, inspection=False):
+    def _runs(conn, project_id, *, inspection=False, funded=False):
+        kinds = ("inspection-run",) if inspection else CAMPAIGN_KINDS if funded else ("research-run",)
         return [_consumer(row) for row in conn.execute("""SELECT r.* FROM consumer_runs r
-            JOIN grants g ON g.token=r.token WHERE g.owner_id=? AND g.kind=?
-            ORDER BY r.created,r.token""", (project_id, "inspection-run" if inspection else "research-run"))]
+            JOIN grants g ON g.token=r.token WHERE g.owner_id=? AND g.kind IN (""" +
+            ",".join("?" for _ in kinds) + ") ORDER BY r.created,r.token", (project_id, *kinds))]
 
-    def runs(self, project_id, *, inspection=False):
+    def runs(self, project_id, *, inspection=False, funded=False):
         with self.read() as conn:
-            return self._runs(conn, project_id, inspection=inspection)
+            return self._runs(conn, project_id, inspection=inspection, funded=funded)
 
     def rows(self, *, limit: int = 100, offset: int = 0, history: bool = False) -> list[dict]:
         integer(limit, "limit")

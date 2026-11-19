@@ -1,6 +1,7 @@
 """One ordinary Copilot conversation, optionally followed by bounded stop reviews."""
 
 import asyncio
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ import uuid
 from labgoblin import checkins, consultation, credits, guidance
 from labgoblin.config import Config
 from labgoblin.protocol import LaunchEnvelope, table, text
-from labgoblin.session_log import EventLog
+from labgoblin.session_log import EventLog, page
 from labgoblin.storage import atomic_json, canonical, digest, excluded_name, publish_bytes, publish_json, read_json
 
 
@@ -40,11 +41,12 @@ def executable():
 def capabilities():
     import inspect
     from copilot import CopilotClient
-    from copilot.generated.rpc import SessionUpdateOptionsParams
-    required = {"session_limits", "available_tools", "excluded_tools", "on_event", "tools",
-                "enable_config_discovery", "skip_custom_instructions", "request_extensions", "remote_session"}
+    from copilot.rpc import SessionUpdateExecutionOptions, SessionUpdateOptionsParams
+    required = {"execution", "tools", "events", "hooks", "permissions", "instructions", "extensions",
+                "enable_config_discovery", "inference", "cloud"}
     missing = required - set(inspect.signature(CopilotClient.create_session).parameters)
-    if missing or "session_limits" not in inspect.signature(SessionUpdateOptionsParams).parameters:
+    if (missing or "execution" not in inspect.signature(SessionUpdateOptionsParams).parameters
+            or "limits" not in inspect.signature(SessionUpdateExecutionOptions).parameters):
         raise ValueError(f"Installed Copilot SDK lacks required controls: {sorted(missing)}")
     return {"command": [executable()], "sdk_controls": "available"}
 
@@ -58,11 +60,11 @@ def client_for(envelope, *, coach=False):
     if not coach and prompt.get("supervisor_review") is not None:
         environment = {**os.environ, "COPILOT_TASK_WAIT_TIMEOUT_SECONDS": str(TASK_WAIT_SECONDS)}
     return CopilotClient(
-        connection=RuntimeConnection.for_stdio(path=command[0], args=[*command[1:], *FLAGS]),
-        working_directory=envelope.project, mode="empty" if coach else "copilot-cli",
-        log_level="error", session_idle_timeout_seconds=0, enable_remote_sessions=False,
-        env=environment,
-        base_directory=os.environ.get("COPILOT_HOME", str(Path.home() / ".copilot")),
+        runtime=RuntimeConnection.for_spawned_stdio(
+            path=command[0], args=[*command[1:], *FLAGS], working_directory=envelope.project,
+            session_idle_timeout_seconds=0, env=environment,
+            base_directory=os.environ.get("COPILOT_HOME", str(Path.home() / ".copilot"))),
+        mode="empty" if coach else "coding-agent", observability={"log_level": "error"},
     )
 
 
@@ -70,6 +72,12 @@ class StopRequested(RuntimeError):
     def __init__(self, status, reason):
         self.status = status
         super().__init__(reason)
+
+
+async def wait_for_owned_shutdown():
+    # SDK handler-raised CancelledError is a tool failure response, not dispatch
+    # cancellation. Keep the callback unanswered until owned abort/stop cancels it.
+    await asyncio.Future()
 
 
 def research_guard(request, context):
@@ -88,7 +96,7 @@ def validate_model(models, model_id, effort, purpose, *, images=False):
     if len(matches) != 1:
         raise ValueError(f"{purpose} model {model_id!r} is not uniquely available in Copilot's model catalog")
     model = matches[0]
-    if model.policy is not None and model.policy.state != "enabled":
+    if model.policy is not None and model.policy.state.value != "enabled":
         raise ValueError(f"{purpose} model {model_id!r} is not enabled: {model.policy.state}")
     if (not model.capabilities.supports.reasoning_effort
             or effort not in (model.supported_reasoning_efforts or [])):
@@ -121,6 +129,8 @@ class Session:
         self.usage = None
         self.metrics_lock = asyncio.Lock()
         self.complete = False
+        self.terminal_events = {}
+        self.terminal_usage_evidence = None
         self.turns = 0
         self.allowance_revisions = 0
         self.consultation_call_id = None
@@ -140,7 +150,7 @@ class Session:
         })
 
     async def bounded(self, awaitable, seconds=10):
-        from copilot._jsonrpc import JsonRpcError
+        from copilot import JsonRpcError
         remaining = self.deadline - time.monotonic()
         wait = max(0.01, min(seconds, remaining))
         try:
@@ -191,16 +201,22 @@ class Session:
             raise
         self.events_bytes = self.events.total_bytes
         self.events_truncated = bool(self.events.omitted)
+        if kind in ("session.start", "session.shutdown"):
+            previous = self.terminal_events.get(kind)
+            self.terminal_events[kind] = {
+                "count": 2 if previous else 1,
+                "sequence": previous["sequence"] if previous else self.events.seen - 1,
+            }
         if kind == "assistant.message" and data.content:
             encoding = sys.stdout.encoding or "utf-8"
             print(data.content.encode(encoding, errors="backslashreplace").decode(encoding), flush=True)
 
     async def start(self, *, tools=None, system="", audit=None, verify_tools=False):
-        from copilot import PermissionHandler, ToolSet
-        from copilot.client import RemoteSessionMode
-        from copilot.generated.rpc import PermissionDecisionDeniedByRules, PermissionMode, PermissionsSetModeRequest
+        from copilot import PermissionMode, ToolSet
+        from copilot.rpc import (PermissionDecisionDeniedByRules, PermissionDecisionUserNotAvailable,
+                                 PermissionsSetModeRequest, RemoteEnableRequest, RemoteSessionMode)
         config = self.config
-        restricted = self.role != "researcher"
+        restricted = self.role not in ("researcher", "skill-extraction")
         await self.bounded(self.client.start(), 30)
         purposes = [self.purpose]
         if self.role == "researcher":
@@ -216,20 +232,22 @@ class Session:
             validate_model(models, config.model_for(purpose), config.reasoning_effort, purpose,
                            images=purpose == "closure_critique" or purpose == "coach" and config.closure_critic)
         options = {
-            "enable_managed_settings": True, "enable_config_discovery": False,
-            "skip_custom_instructions": True, "enable_on_demand_instruction_discovery": False,
-            "enable_file_hooks": False, "enable_skills": False, "enable_session_store": False,
-            "custom_agents": [], "manage_schedule_enabled": False, "request_extensions": False,
-            "mcp_servers": {}, "plugin_directories": [], "memory": {"enabled": False},
-            "excluded_tools": ToolSet().add_builtin(["task", "run_subagent", "run_dynamic_workflow", "fleet"]),
+            "github": {"fetch_managed_settings": True}, "enable_config_discovery": False,
+            "instructions": {"skip_custom_instructions": True, "on_demand_discovery": False},
+            "skills": {"enabled": False}, "agents": {"definitions": []}, "extensions": {"enabled": False},
+            "mcp": {"servers": {}}, "plugins": {"directories": []},
+            "state": {"enable_cross_session_store": False, "memory": {"enabled": False}},
+            "tools": {"manage_schedule_enabled": False, "excluded_tools":
+                      ToolSet().add_builtin(["task", "run_subagent", "run_dynamic_workflow", "fleet"])},
             "system_message": {"mode": "replace" if restricted else "append", "content": system},
-            "hooks": {"on_pre_tool_use": self.checkins.before_tool if self.checkins else research_guard},
+            "hooks": {"enable_repository_hooks": False, "handlers": {
+                "on_pre_tool_use": self.checkins.before_tool if self.checkins else research_guard}},
         }
         permission_mode = "manual" if restricted else "allow-all"
         if tools is not None:
-            options["tools"] = tools
+            options["tools"]["definitions"] = tools
+        names = {tool.name for tool in tools or []}
         if restricted:
-            names = {tool.name for tool in tools or []}
             allowed = ToolSet()
             for name in names:
                 allowed.add_custom(name)
@@ -245,23 +263,30 @@ class Session:
                     return audit.before_web(request, context)
                 return {"permissionDecision": "allow"}
 
-            options.update(
-                tools=tools or [], available_tools=allowed, enable_host_git_operations=False,
-                infinite_sessions={"enabled": False},
-                hooks={"on_pre_tool_use": guard},
-            )
+            options["tools"].update(definitions=tools or [], available_tools=allowed)
+            options["git"] = {"enable_host_git_operations": False}
+            options["state"]["infinite_sessions"] = {"enabled": False}
+            options["hooks"]["handlers"] = {"on_pre_tool_use": guard}
             if audit is not None:
-                options["hooks"].update(on_post_tool_use=audit.after_web, on_post_tool_use_failure=audit.after_web)
+                options["hooks"]["handlers"].update(on_post_tool_use=audit.after_web, on_post_tool_use_failure=audit.after_web)
         self.session = await self.bounded(self.client.create_session(
             session_id=self.id, working_directory=self.envelope.project,
-            model=self.model, reasoning_effort=config.reasoning_effort,
-            remote_session=RemoteSessionMode.OFF,
-            session_limits=None if self.allowance is None else {"max_ai_credits": float(credits.argument(self.allowance))},
-            streaming=True, include_sub_agent_streaming_events=False, on_event=self.event,
-            on_permission_request=(PermissionHandler.approve_all if not restricted else
-                                   lambda request, context: PermissionDecisionDeniedByRules(rules=[])),
+            model=self.model, inference={"reasoning_effort": config.reasoning_effort}, cloud=None,
+            execution={"limits": None if self.allowance is None else {"max_ai_credits": float(credits.argument(self.allowance))}},
+            events={"streaming": True, "include_sub_agent_streaming_events": False, "on_event": self.event},
+            # The verified runtime mode handles ordinary tools. A request still requiring
+            # approval (including managed policy) has no human approver in an owned session.
+            permissions={"on_request": lambda request, context: (
+                PermissionDecisionDeniedByRules(rules=[]) if restricted else PermissionDecisionUserNotAvailable())},
             **options,
         ), 30)
+        privacy = (await self.bounded(self.session.rpc.remote.enable(
+            RemoteEnableRequest(mode=RemoteSessionMode.OFF)))).to_dict()
+        if privacy.get("started") is not False or privacy.get("remoteSteerable") is not False:
+            raise RuntimeError("Copilot did not confirm session export and steering are off")
+        remote = (await self.bounded(self.client.rpc.sessions.get_remote_control_status())).to_dict()
+        if remote.get("status", {}).get("state") != "off":
+            raise RuntimeError("Copilot did not confirm remote control is off")
         applied = (await self.bounded(self.session.rpc.permissions.set_mode(
             PermissionsSetModeRequest(mode=PermissionMode(permission_mode))))).to_dict()
         if applied.get("success") is not True or applied.get("mode") != permission_mode:
@@ -276,8 +301,10 @@ class Session:
             if not isinstance(metadata.get("tools"), list):
                 raise RuntimeError("Restricted session tool metadata is unavailable")
             actual = {text(table(item, "tool metadata").get("name"), "tool name") for item in metadata["tools"]}
-            if actual != names:
+            if restricted and actual != names:
                 raise RuntimeError(f"Restricted session tool availability differs from its read-only allowlist: {sorted(actual)}")
+            if not restricted and (not names <= actual or not actual - names):
+                raise RuntimeError("Researcher is missing custom or ordinary coding tools")
 
     async def verify_model(self):
         applied = (await self.bounded(self.session.rpc.model.get_current())).to_dict()
@@ -312,7 +339,55 @@ class Session:
                 "reasoning_effort": self.model_snapshot.get("reasoningEffort"),
                 "complete": self.complete, "usage": self.usage, "prompts": self.turns,
                 "events_truncated": self.events_truncated, "last_event": self.last_event,
-                "last_progress_at": self.last_progress, "event_log": self.events.checkpoint()}
+                "last_progress_at": self.last_progress, "event_log": self.events.checkpoint(),
+                **({"terminal_usage_evidence": self.terminal_usage_evidence}
+                   if self.terminal_usage_evidence is not None else {})}
+
+    def recover_terminal_usage(self):
+        if any(self.terminal_events.get(kind, {}).get("count") != 1
+               for kind in ("session.start", "session.shutdown")):
+            raise ValueError("Terminal usage requires one exact session start and shutdown")
+        start_sequence = self.terminal_events["session.start"]["sequence"]
+        end_sequence = self.terminal_events["session.shutdown"]["sequence"]
+        if not self.events.closed or not start_sequence < end_sequence == self.events.seen - 1:
+            raise ValueError("Terminal usage requires the final event in a sealed owned log")
+        binding = self.events.checkpoint()
+
+        def retained(sequence):
+            parts, offset = [], 0
+            for _ in range(4):
+                result = page(self.directory, {"event": sequence, "offset": offset}, terminal_log=binding)
+                if "text" not in result:
+                    raise ValueError("Terminal usage event was omitted from the owned log")
+                parts.append(result["text"])
+                offset = result["next_offset"]
+                if offset is None:
+                    return json.loads("".join(parts)), {"sequence": sequence, "sha256": result["sha256"]}
+            raise ValueError("Terminal usage event exceeds the 64-KiB recovery bound")
+
+        start, start_reference = retained(start_sequence)
+        end, end_reference = retained(end_sequence)
+        if start.get("type") != "session.start" or end.get("type") != "session.shutdown":
+            raise ValueError("Terminal usage event types do not match their owned sequence")
+        initial, final = table(start.get("data"), "session start"), table(end.get("data"), "session shutdown")
+        started = datetime.fromisoformat(text(initial.get("startTime"), "session start time"))
+        if (initial.get("sessionId") != self.id or started.utcoffset() is None
+                or round(started.timestamp() * 1000) != final.get("sessionStartTime")
+                or final.get("shutdownType") != "routine"
+                or not self.model_snapshot.get("modelId")
+                or final.get("currentModel") != self.model_snapshot.get("modelId")):
+            raise ValueError("Terminal usage does not match the owned session start, model and routine shutdown")
+        amount = credits.usage_nano(final)
+        if self.usage is not None and amount < credits.usage_nano(self.usage):
+            raise ValueError("Terminal credit usage is below the retained partial lower bound")
+        self.usage = final
+        self.terminal_usage_evidence = {"start": start_reference, "shutdown": end_reference}
+        self.complete = True
+        try:
+            publish_json(self.directory / "usage.json", self.record())
+        except (OSError, ValueError, RuntimeError):
+            self.complete = False
+            raise
 
     async def ask(self, prompt, checkpoint, *, idea_delivery=None, closure_delivery=None):
         if (Path(self.envelope.root) / "cancel").exists():
@@ -395,27 +470,54 @@ class Session:
                                     tool_call_id=None if hook else call_id, hook_id=call_id if hook else None)
 
     async def _apply_allowance(self, allowance, *, reason, tool_call_id=None, hook_id=None):
-        from copilot.generated.rpc import SessionLimitsConfig, SessionUpdateOptionsParams
+        from copilot.rpc import SessionUpdateExecutionOptions, SessionUpdateOptionsParams
+        from copilot.session_events import SessionLimitsConfig
         used = credits.usage_nano(self.usage)
         if (self.allowance is None or type(allowance) is not int
                 or allowance < credits.MIN_SESSION or allowance <= used):
             raise ValueError("A finite cumulative allowance must leave known unspent credits")
-        applied = (await self.bounded(self.session.rpc.options.update(SessionUpdateOptionsParams(
-            session_limits=SessionLimitsConfig(max_ai_credits=float(credits.argument(allowance))))))).to_dict()
-        if applied.get("success") is not True:
-            raise RuntimeError("Copilot did not apply the remaining cumulative session allowance")
-        previous, self.allowance = self.allowance, allowance
-        publish_json(self.directory / f"allowance-{self.turns}-{self.allowance_revisions}.json", {
-            "run_id": self.envelope.id, "session_id": self.id, "previous_nano": previous,
+        update = SessionUpdateOptionsParams(execution=SessionUpdateExecutionOptions(
+            limits=SessionLimitsConfig(max_ai_credits=float(credits.argument(allowance)))))
+        started = time.monotonic()
+        operation = {
+            "operation": "session.options.update", "run_id": self.envelope.id, "session_id": self.id,
+            "previous_nano": self.allowance,
             "new_nano": allowance, "reported_session_nano": used,
             "reason": reason, "tool_call_id": tool_call_id,
             **({"hook_id": hook_id} if hook_id is not None else {}),
-        })
+            "started_at": time.time(), "remaining_seconds": max(0, self.deadline - started),
+            "timeout_seconds": max(0.01, min(10, self.deadline - started)),
+        }
+        name = f"{self.turns}-{self.allowance_revisions}"
+        publish_json(self.directory / f"options-update-{name}-intent.json", operation)
+        acknowledged = False
+        try:
+            applied = (await self.bounded(self.session.rpc.options.update(update))).to_dict()
+            if applied.get("success") is not True:
+                raise RuntimeError("Copilot did not apply the remaining cumulative session allowance")
+            acknowledged = True
+            publish_json(self.directory / f"allowance-{name}.json", {
+                **operation, "acknowledged": True, "elapsed_seconds": time.monotonic() - started,
+            })
+        except (OSError, ValueError, RuntimeError, TimeoutError, asyncio.CancelledError) as error:
+            try:
+                publish_json(self.directory / f"options-update-{name}-failure.json", {
+                    **operation, "acknowledged": acknowledged,
+                    "elapsed_seconds": time.monotonic() - started,
+                    "error": error_details("session.options.update", error),
+                })
+            except (OSError, ValueError, RuntimeError):
+                pass  # Diagnostic failure must not replace the original transfer failure.
+            if isinstance(error, TimeoutError):
+                raise TimeoutError(f"session.options.update allowance transfer: {error}") from error
+            raise
+        self.allowance = allowance
         self.allowance_revisions += 1
 
     async def close(self):
         failures = []
         primary = None
+        runtime_stopped = log_closed = False
         stage = "settlement"
         try:
             if self.supervisor:
@@ -452,6 +554,7 @@ class Session:
                 stage = "stop runtime"
                 # The SDK allows ten seconds for shutdown before transport/process cleanup.
                 await self.bounded(self.client.stop(), 15)
+                runtime_stopped = True
             except (OSError, ValueError, RuntimeError, ExceptionGroup) as error:
                 primary = primary if primary is not None else error
                 failures.append(error_details(stage, error))
@@ -462,9 +565,17 @@ class Session:
             finally:
                 try:
                     self.events.close()
+                    log_closed = True
                 except (OSError, ValueError, RuntimeError) as error:
                     primary = primary if primary is not None else error
                     failures.append(error_details("close event log", error))
+        if (not self.complete and runtime_stopped and log_closed
+                and "session.shutdown" in self.terminal_events):
+            try:
+                self.recover_terminal_usage()
+            except (OSError, ValueError, RuntimeError) as error:
+                primary = primary if primary is not None else error
+                failures.append(error_details("recover terminal usage", error))
         try:
             publish_json(self.directory / "shutdown.json", {
                 "run_id": self.envelope.id, "envelope_digest": self.envelope.digest,
@@ -487,7 +598,7 @@ def coach_tools(project, decision, *, follow_up=False, stalled_reviews=0, deadli
     async def handle(invocation):
         try:
             if consultations is not None and consultations.fatal is not None:
-                raise asyncio.CancelledError(str(consultations.fatal))
+                await wait_for_owned_shutdown()
             if audit is not None and audit.error:
                 raise ValueError(audit.error)
             args = invocation.arguments
@@ -633,10 +744,15 @@ class Consultations:
                     return result
                 finally:
                     self.active = None
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+                # Cancelling the adviser task alone does not cancel SDK dispatch.
+                caller.failure = caller.failure or "Consultation cancelled before settlement"
+                await wait_for_owned_shutdown()
             except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
                 if self.fatal is not None:
-                    # Even an error response would let the SDK resume inference before owned shutdown.
-                    raise asyncio.CancelledError(str(self.fatal)) from error
+                    await wait_for_owned_shutdown()
                 return consultation.failure(error)
 
         return Tool("labgoblin_consult",
@@ -976,6 +1092,9 @@ async def drive(envelope, deadline, *, client_factory=client_for):
             raise ValueError("Closure criticism requires the frozen researcher-response capability")
         research_tools = ([consultations.tool(researcher, protected=credits.COACH_RESERVE if config.coach else 0)]
                           if config.consultant else [])
+        if "campaign_skills" in prompt:
+            from labgoblin.skills import tools as skill_tools
+            research_tools.extend(skill_tools(envelope))
         if "evaluation" in prompt:
             from labgoblin.evaluation import Evaluator
             evaluation = Evaluator(envelope, lambda: researcher.deadline)
@@ -1278,4 +1397,7 @@ def owned_envelope(path, *, inspection=False):
 
 def main(path):
     envelope, deadline = owned_envelope(path)
+    if envelope.config.get("execution_purpose") == "skill-extraction":
+        from labgoblin.skill_extraction import drive as extract
+        return asyncio.run(extract(envelope, deadline))
     return asyncio.run(drive(envelope, deadline))

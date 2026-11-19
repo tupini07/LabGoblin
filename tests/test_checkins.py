@@ -63,21 +63,21 @@ def test_mid_turn_review_coalesces_parallel_hooks_and_preserves_stopping(
     feedback = [value["additionalContext"] for value in researcher.hook_results if value]
     assert len(feedback) == 1 and "staying the course" in feedback[0].lower()
     assert "goal gap" in feedback[0]
-    assert "available_tools" not in researcher.options
-    assert not researcher.options.get("tools")
+    assert "available_tools" not in researcher.options["tools"]
+    assert not researcher.options["tools"].get("definitions")
     assert guidance.CONSULT_CALLER not in researcher.options["system_message"]["content"]
     assert reviewer.options["system_message"]["content"] == guidance.GOAL_REVIEW
     assert reviewer.options["model"] == "model-free"
-    assert {tool.name for tool in reviewer.options["tools"]} == {
+    assert {tool.name for tool in reviewer.options["tools"]["definitions"]} == {
         "labgoblin_read_evidence", "labgoblin_list_evidence", "labgoblin_read_trajectory"}
     assert reviewer.tool_results[0].result_type == "success"
     assert "assistant.turn_start" in reviewer.tool_results[0].text_result_for_llm
     assert reviewer.tool_results[1].result_type == "failure"
     if unlimited:
-        assert researcher.updates == [] and reviewer.options["session_limits"] is None
+        assert researcher.updates == [] and reviewer.options["execution"]["limits"] is None
     else:
         assert researcher.updates[:2] == [40, 260]
-        assert reviewer.options["session_limits"] == {"max_ai_credits": 230.0}
+        assert reviewer.options["execution"]["limits"] == {"max_ai_credits": 230.0}
     directory = Path(envelope.root)
     request = read_json(directory / "sessions" / "goal-review-0" / "request.json")
     assert request["tool_call_id"] is None and len(request["hook_id"]) == 32
@@ -241,7 +241,7 @@ def test_cancellation_during_adviser_settlement_preserves_final_usage(
 
     async def cancel_during_abort(session):
         await abort(session)
-        if session.options["on_event"].__self__.role != "researcher":
+        if session.options["events"]["on_event"].__self__.role != "researcher":
             Path(envelope.root, "cancel").write_text("operator stop\n", encoding="utf-8")
             await asyncio.sleep(0.5)
 

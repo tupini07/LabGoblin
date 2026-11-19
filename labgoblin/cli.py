@@ -17,16 +17,18 @@ from labgoblin.storage import read_text
 
 def parser():
     defaults = Config()
-    root = argparse.ArgumentParser(description="LabGoblin: an ordinary Copilot researcher with opt-out coaching and consultation")
+    root = argparse.ArgumentParser(
+        description="LabGoblin: an ordinary Copilot researcher with opt-out coaching and consultation",
+        epilog="Project commands accept a campaign folder or its research subdirectory. Existing direct research roots still work.")
     commands = root.add_subparsers(dest="command", required=True)
     init = commands.add_parser(
-        "init", help="Create a fresh research workspace; never starts a model",
-        description="Create a fresh project without model calls. Preserve a supplied or existing research "
-                    "brief; otherwise write an editable research_goal.md scaffold.",
+        "init", help="Create a fresh research workspace and external operator companion; never starts a model",
+        description="Create research and operator subdirectories under PROJECT without model calls. Preserve a supplied brief or "
+                    "existing files in research; otherwise write an editable research_goal.md scaffold there.",
         epilog="Describe the high-level goal, intended use, relevant context and genuine boundaries. "
                "The researcher owns the evolving plan, methods and experiments; no fixed phases or "
                "method checklist is required.")
-    init.add_argument("project", nargs="?", default=".")
+    init.add_argument("project", nargs="?", default=".", help="Outer campaign directory (default: current directory)")
     init.add_argument("--goal-file", type=Path,
                       help="Copy a UTF-8 research brief unchanged; refuse conflicts with an existing research_goal.md")
     init.add_argument("--research-venv", action=argparse.BooleanOptionalAction, default=True,
@@ -35,6 +37,8 @@ def parser():
                       help="Initialize Git or reuse the containing repository; add local ignore rules, but never stage or commit")
     init.add_argument("--archive-workspace", action=argparse.BooleanOptionalAction, default=False,
                       help="Opt in to full workspace copies after executions; Git history and ordinary resume do not require them")
+    init.add_argument("--extract-skills", action="store_true",
+                      help="Propose campaign-local skills after qualified scheduled reviews, using the campaign pool")
     init.add_argument("--max-event-log-bytes", type=int, default=defaults.max_event_log_bytes,
                       help="Event and index retention per session, default 8 GiB; positive bytes up to 64 GiB")
     init.add_argument("--model", default=defaults.model, help=f"Research model (default: {defaults.model})")
@@ -45,7 +49,8 @@ def parser():
         init.add_argument(f"--{role}-model", default=model,
                           help=f"Model for {role} (default: {model}); use inherit for --model; does not enable a disabled role")
     init.add_argument("--credits", default="1000")
-    init.add_argument("--timeout", type=float, default=5400)
+    init.add_argument("--timeout", type=float, default=defaults.timeout_seconds,
+                      help=f"Entire execution deadline in seconds, including reviews and shutdown (default: {defaults.timeout_seconds}, 24 hours)")
     init.add_argument("--consultation-timeout", type=float, default=defaults.consultation_timeout_seconds,
                       help="Advice/claim-review ceiling in seconds, including shutdown (default: 3600); never extends the execution deadline")
     init.add_argument("--goal-review-timeout", type=float, default=defaults.goal_review_timeout_seconds,
@@ -67,6 +72,16 @@ def parser():
     init.add_argument("--ledger", type=Path)
     init.add_argument("--evaluation-spec", type=Path,
                       help="Opt-in reviewed external Python evaluation kit; captured only when admitting an execution")
+    init.add_argument("--operator", action=argparse.BooleanOptionalAction, default=True,
+                      help="Create a selectable external Copilot operator profile (enabled by default); never starts a session")
+    operator = commands.add_parser(
+        "operator-init", help="Prepare an external Copilot operator profile for an existing project; no model or research call")
+    operator.add_argument("project", nargs="?", default=".")
+    for command in (init, operator):
+        command.add_argument("--operator-dir", type=Path, required=command is operator,
+                             help="External profile/handoff directory; init defaults to the operator subdirectory, operator-init requires an explicit path")
+        command.add_argument("--operator-cli", type=Path,
+                             help="Exact installed LabGoblin executable for the handoff; defaults to this Python environment's console script")
     run = commands.add_parser("run", help="Run one persistent researcher with configured reviews and consultations")
     run.add_argument("project", nargs="?", default=".")
     run.add_argument("--resume", action="store_true", help="Explicitly continue from files, preserving all prior spending")
@@ -74,6 +89,26 @@ def parser():
                      help="Confirm the exact pending supervisor review with --resume; starts a fresh conversation with the full configured timeout")
     run.add_argument("--handoff", action="store_true",
                      help="Authorize one automatic terminal report from the separately approved inspection pool")
+    skill_selection = run.add_mutually_exclusive_group()
+    skill_selection.add_argument("--skills-batch", metavar="BATCH_ID",
+                                 help="Bind this continuation to the exact reviewed skill batch")
+    skill_selection.add_argument("--defer-skills", action="store_true",
+                                 help="Explicitly defer all pending skill attempts; continue with existing skills")
+    skills = commands.add_parser("skills", help="Extract, inspect and review inactive campaign-local skill proposals")
+    actions = skills.add_subparsers(dest="skills_command", required=True)
+    for action in ("extract", "list", "show", "review"):
+        command = actions.add_parser(action)
+        command.add_argument("project", nargs="?", default=".")
+        if action == "extract":
+            command.add_argument("--run", required=True, help="Exact settled research execution")
+            command.add_argument("--request-id", required=True, help="One-use 32-character hex request ID")
+        if action in ("show", "review"):
+            command.add_argument("--batch", required=True)
+        if action == "review":
+            command.add_argument("--name", required=True)
+            command.add_argument("--decision", required=True, choices=("eligible", "reject", "challenge", "defer"))
+            command.add_argument("--expected", required=True, help="Exact previous review digest, or none")
+            command.add_argument("--feedback", default="")
     handoff = commands.add_parser("handoff", help="Create one independent report for an exact terminal run, using inspection credits")
     handoff.add_argument("project", nargs="?", default=".")
     handoff.add_argument("--run", required=True)
@@ -168,12 +203,31 @@ def main(arguments=None):
                             advice_model=args.advice_model, claim_review_model=args.claim_review_model,
                             evaluation_spec=str(args.evaluation_spec.absolute()) if args.evaluation_spec else None,
                             archive_workspace=args.archive_workspace, max_event_log_bytes=args.max_event_log_bytes,
+                            extract_skills=args.extract_skills,
                             ledger=str(args.ledger.resolve()) if args.ledger else "")
-            result = runtime.initialize(args.project, config,
+            result = runtime.initialize_campaign(args.project, config,
                                         goal=read_text(args.goal_file) if args.goal_file else None,
-                                        research_venv=args.research_venv, git=args.git)
+                                        research_venv=args.research_venv, git=args.git,
+                                        operator=args.operator, operator_dir=args.operator_dir, operator_cli=args.operator_cli)
+        elif args.command == "operator-init":
+            result = runtime.initialize_operator(args.project, args.operator_dir, executable=args.operator_cli)
         elif args.command == "run":
-            result = runtime.run(args.project, resume=args.resume, handoff=args.handoff, reviewed=args.reviewed)
+            result = runtime.run(args.project, resume=args.resume, handoff=args.handoff, reviewed=args.reviewed,
+                                 skills_batch=args.skills_batch, defer_skills=args.defer_skills)
+        elif args.command == "skills":
+            from labgoblin.skills import Store
+            store = Store(args.project)
+            if args.skills_command == "extract":
+                from labgoblin.skill_extraction import extract
+                result = extract(args.project, args.run, request_id=args.request_id)
+            elif args.skills_command == "list":
+                result = store.listing()
+            elif args.skills_command == "show":
+                result = store.show(args.batch)
+            else:
+                result = store.review(args.batch, args.name, args.decision,
+                                      expected=None if args.expected == "none" else args.expected,
+                                      feedback=args.feedback)
         elif args.command in ("handoff", "handoffs"):
             from labgoblin.inspector import Inspector
             from labgoblin import handoffs

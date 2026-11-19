@@ -40,11 +40,13 @@ def test_critic_deadline_is_enforced_without_routine_model_countdowns(project, l
     envelope = enabled(project, ledger)
     ask = provider.Session.ask
     deadlines = {}
+    absolute_deadlines = {}
 
     async def observe(session, prompt, checkpoint, **kwargs):
         deadlines[session.role] = session.deadline - time.monotonic()
+        absolute_deadlines[session.role] = session.deadline
         if session.role.startswith("consult-"):
-            audit = session.client.session.options["hooks"]["on_post_tool_use"].__self__
+            audit = session.client.session.options["hooks"]["handlers"]["on_post_tool_use"].__self__
             assert not audit.count_limited
         return await ask(session, prompt, checkpoint, **kwargs)
 
@@ -67,7 +69,7 @@ def test_critic_deadline_is_enforced_without_routine_model_countdowns(project, l
             assert "shutdown_reserve_seconds" not in prompt
             assert "review_deadline_unix_seconds" not in prompt
     assert seconds - 605 < deadlines["researcher"] <= seconds - 600
-    assert seconds - 5 < deadlines["adjudicator-1"] <= seconds
+    assert absolute_deadlines["adjudicator-1"] == absolute_deadlines["coach-1"]
 
 
 def test_critic_uses_shared_credits_and_returns_unused_allowance(project, ledger):
@@ -75,7 +77,7 @@ def test_critic_uses_shared_credits_and_returns_unused_allowance(project, ledger
     result, clients, outcome = exercise(envelope, [
         {}, {"decision": "continue"}, *closing({"cost": 500})], seconds=86400)
     assert result == 0, outcome
-    assert clients[3].session.options["session_limits"]["max_ai_credits"] == 9900
+    assert clients[3].session.options["execution"]["limits"]["max_ai_credits"] == 9900
     assert clients[2].session.updates == [40]
     root = Path(envelope.root) / "sessions" / "coach-1"
     assert read_json(root / "closure-allocation.json")["critic_allowance_nano"] == 9900 * credits.NANO
@@ -190,9 +192,9 @@ def test_critique_reaches_researcher_before_fresh_adjudication(project, ledger, 
     assert request["purpose"] == "closure_critique" and request["researcher_stopping_response"]
     assert "SECRET PRELIMINARY COACH APPROVAL" not in json.dumps(request)
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 70 * credits.NANO
-    tools = {tool.name for tool in clients[3].session.options["tools"]}
+    tools = {tool.name for tool in clients[3].session.options["tools"]["definitions"]}
     assert tools == {"labgoblin_read_evidence", "labgoblin_list_evidence", "labgoblin_read_image"}
-    assert {tool.name for tool in clients[4].session.options["tools"]} == tools | {"labgoblin_review_decision"}
+    assert {tool.name for tool in clients[4].session.options["tools"]["definitions"]} == tools | {"labgoblin_review_decision"}
 
 
 def test_objection_returns_to_same_researcher_without_recursive_critic(project, ledger):
@@ -255,7 +257,7 @@ def test_ordinary_adviser_spending_is_counted_before_idle_closure_allocation(pro
     assert allocation["protected_nano"] == 30 * credits.NANO
     assert allocation["reported_total_nano"] == 70 * credits.NANO
     assert clients[3].session.updates == [40]
-    assert clients[4].session.options["session_limits"]["max_ai_credits"] == 170
+    assert clients[4].session.options["execution"]["limits"]["max_ai_credits"] == 170
     assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 100 * credits.NANO
 
 
@@ -348,7 +350,7 @@ def test_unlimited_project_has_no_critic_credit_cap_or_unlimited_coach_updates(p
         {}, {"decision": "continue"}, *closing()], seconds=1800)
     assert result == 0, outcome
     assert clients[2].session.updates == []
-    assert clients[3].session.options["session_limits"] is None
+    assert clients[3].session.options["execution"]["limits"] is None
 
 
 @pytest.mark.parametrize("cause", ["insufficient_credits", "limit_update"])
@@ -448,7 +450,7 @@ def test_required_correction_is_applied_before_later_acceptance(project, ledger,
         if system["mode"] == "append" and '"required_corrections": [' in prompt:
             report.write_text("Bounded result only; broader coverage remains unverified.", encoding="utf-8")
         if "FRESH closure adjudicator" in system["content"]:
-            tool = next(tool for tool in session.options["tools"] if tool.name == "labgoblin_read_evidence")
+            tool = next(tool for tool in session.options["tools"]["definitions"] if tool.name == "labgoblin_read_evidence")
             result = await tool.handler(SimpleNamespace(arguments={"path": "report.md"}, tool_name=tool.name))
             assert result.result_type == "success"
             inspected.append(result.text_result_for_llm)
@@ -524,7 +526,7 @@ def test_critic_cannot_borrow_minimum_response_or_judge_funding(project, ledger,
     assert (code == 0) is starts, outcome
     assert len(clients) == (5 if starts else 3)
     if starts:
-        assert clients[3].session.options["session_limits"]["max_ai_credits"] == 30
+        assert clients[3].session.options["execution"]["limits"]["max_ai_credits"] == 30
         assert runtime.usage_record(envelope, complete=True)["totalNanoAiu"] == 90 * credits.NANO
     else:
         assert outcome["status"] == "review_unavailable"

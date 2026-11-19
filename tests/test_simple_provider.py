@@ -14,8 +14,8 @@ from tests.conftest import arm
 
 
 def model_info(model_id="model-free", **changes):
-    from copilot.client import ModelInfo
-    return ModelInfo.from_dict({
+    from copilot import Model
+    return Model.from_dict({
         "id": model_id, "name": model_id,
         "capabilities": {"supports": {"vision": True, "reasoningEffort": True}},
         "policy": {"state": "enabled", "terms": ""},
@@ -70,12 +70,17 @@ class FakeSession:
         self.hook_results = []
         self.tool_worker = None
         self.rpc = SimpleNamespace(
+            remote=SimpleNamespace(enable=self.set_remote),
             model=SimpleNamespace(get_current=self.current_model),
             permissions=SimpleNamespace(set_mode=self.permissions),
             usage=SimpleNamespace(get_metrics=self.metrics),
             options=SimpleNamespace(update=self.update),
             tasks=SimpleNamespace(list=self.tasks, wait_for_pending=self.wait_for_tasks),
             tools=SimpleNamespace(initialize_and_validate=self.initialize_tools, get_current_metadata=self.metadata))
+
+    async def set_remote(self, request):
+        assert request.mode.value == "off"
+        return Value(self.script.get("session_privacy", {"started": False, "remoteSteerable": False}))
 
     async def initialize_tools(self):
         return Value({"success": True})
@@ -88,13 +93,13 @@ class FakeSession:
 
     async def current_model(self):
         return Value(self.script.get("applied_model", {
-            "modelId": self.options["model"], "reasoningEffort": self.options["reasoning_effort"]}))
+            "modelId": self.options["model"], "reasoningEffort": self.options["inference"]["reasoning_effort"]}))
 
     async def metadata(self):
         if self.script.get("metadata_unavailable"):
             return Value({"tools": None})
-        names = [tool.name for tool in self.options.get("tools", [])]
-        if "on_post_tool_use" in self.options["hooks"] and not self.script.get("missing_web"):
+        names = [tool.name for tool in self.options["tools"].get("definitions", [])]
+        if "on_post_tool_use" in self.options["hooks"]["handlers"] and not self.script.get("missing_web"):
             names.append("web_fetch")
         return Value({"tools": [{"name": name} for name in names]})
 
@@ -107,12 +112,12 @@ class FakeSession:
         return Value({"totalNanoAiu": self.used, "model_free_fixture": True})
 
     async def update(self, request):
-        self.updates.append(request.session_limits.max_ai_credits)
+        self.updates.append(request.execution.limits.max_ai_credits)
         return Value({"success": not (self.script.get("update_error", False)
                                       or self.script.get("update_error_at") == len(self.updates))})
 
     def event(self, kind, **data):
-        self.options["on_event"](Event(kind, **data))
+        self.options["events"]["on_event"](Event(kind, **data))
 
     async def send(self, prompt):
         self.prompts.append(prompt)
@@ -129,13 +134,13 @@ class FakeSession:
             self.tool_worker = asyncio.create_task(self.hooks_and_finish())
             return
         for args in self.script.get("trajectory_reads", []):
-            tool = next(tool for tool in self.options["tools"] if tool.name == "labgoblin_read_trajectory")
+            tool = next(tool for tool in self.options["tools"]["definitions"] if tool.name == "labgoblin_read_trajectory")
             self.tool_results.append(tool.handler(SimpleNamespace(arguments=args)))
         await self.finish()
 
     async def hooks_and_finish(self):
         async def hook(name):
-            value = self.options["hooks"]["on_pre_tool_use"](
+            value = self.options["hooks"]["handlers"]["on_pre_tool_use"](
                 {"sessionId": self.options["session_id"], "toolName": name, "toolArgs": {}},
                 {"session_id": self.options["session_id"]})
             if asyncio.iscoroutine(value):
@@ -150,14 +155,14 @@ class FakeSession:
 
     async def consult_and_finish(self):
         if self.script.get("concurrent"):
-            tool = next(tool for tool in self.options["tools"] if tool.name == "labgoblin_consult")
+            tool = next(tool for tool in self.options["tools"]["definitions"] if tool.name == "labgoblin_consult")
             self.tool_results = await asyncio.gather(*(tool.handler(SimpleNamespace(
                 session_id=self.options["session_id"], tool_call_id=f"call-{index}",
                 tool_name=tool.name, arguments=args)) for index, args in enumerate(self.script["consult"])))
             await self.finish()
             return
         for index, args in enumerate(self.script["consult"]):
-            tool = next(tool for tool in self.options["tools"] if tool.name == "labgoblin_consult")
+            tool = next(tool for tool in self.options["tools"]["definitions"] if tool.name == "labgoblin_consult")
             call = SimpleNamespace(session_id=self.options["session_id"], tool_call_id=f"call-{index}",
                                    tool_name=tool.name, arguments=args)
             result = await tool.handler(call)
@@ -178,7 +183,7 @@ class FakeSession:
             self.event("session.error", message="ordinary failure", error_type="ordinary")
             self.event("session.error", message="quota failure", error_type="session_limits_exhausted")
         if "decision" in script and not script.get("no_decision"):
-            tools = self.options["tools"]
+            tools = self.options["tools"]["definitions"]
             tool = next(tool for tool in tools if tool.name == "labgoblin_review_decision")
             args = {
                 "decision": script["decision"], "reason": script.get("reason", "A meaningful stopping assessment"),
@@ -224,6 +229,10 @@ class FakeClient:
         self.script = script
         self.stopped = False
         self.session = None
+        self.rpc = SimpleNamespace(sessions=SimpleNamespace(get_remote_control_status=self.remote_status))
+
+    async def remote_status(self):
+        return Value({"status": {"state": self.script.get("remote_control", "off")}})
 
     async def start(self):
         if self.script.get("startup_error"):
@@ -292,6 +301,108 @@ def test_shutdown_identifies_idle_wait_timeout_without_promoting_partial_usage(p
     assert code == 1 and "wait for idle after abort: TimeoutError" in result["reason"]
     assert "timed out after" in result["reason"]
     assert not (Path(envelope.root) / "usage.json").exists() and clients[0].stopped
+
+
+@pytest.mark.parametrize("defect", [
+    None, "missing_start", "wrong_session", "wrong_start_time", "nonroutine", "decreasing",
+    "invalid_amount", "wrong_model", "duplicate_start", "duplicate_shutdown", "later_event",
+    "omitted", "tampered", "stop_failure", "log_close_failure", "paged", "too_large", "missing_model",
+])
+def test_terminal_shutdown_recovers_billing_without_recovering_research(project, ledger, monkeypatch, defect):
+    root, config, record = project
+    if defect == "omitted":
+        config = replace(config, max_event_log_bytes=1)
+    envelope = arm((root, config, record), ledger)
+    start = FakeClient.create_session
+    bounded = provider.Session.bounded
+    metrics = provider.Session.metrics
+
+    async def create(self, **options):
+        session = await start(self, **options)
+        if defect != "missing_start":
+            session.event("session.start", sessionId="another-session" if defect == "wrong_session" else options["session_id"],
+                          startTime="2026-11-11T19:15:13.777Z")
+            if defect == "duplicate_start":
+                session.event("session.start", sessionId=options["session_id"], startTime="2026-11-11T19:15:13.777Z")
+        return session
+
+    async def send(self, prompt):
+        self.prompts.append(prompt)
+        self.used = 10 * credits.NANO
+        self.event("assistant.turn_start")
+
+    async def captured_metrics(self):
+        await metrics(self)
+        if self.sent:
+            self.session.event("session.error", message="Connection timed out after five retries", error_type="network")
+
+    async def no_idle(self):
+        self.aborted = True
+
+    async def disconnect(self):
+        if defect == "missing_model":
+            self.options["events"]["on_event"].__self__.model_snapshot.clear()
+        self.event("session.shutdown", shutdownType="crash" if defect == "nonroutine" else "routine",
+                   sessionStartTime=1794424513778 if defect == "wrong_start_time" else 1794424513777,
+                   currentModel=(None if defect == "missing_model" else
+                                 "other-model" if defect == "wrong_model" else "auto"),
+                   totalNanoAiu=(-1 if defect == "invalid_amount" else
+                                 9 * credits.NANO if defect == "decreasing" else 12 * credits.NANO),
+                   extra="x" * (20000 if defect == "paged" else 65536 if defect == "too_large" else 0))
+        if defect == "duplicate_shutdown":
+            self.event("session.shutdown", shutdownType="routine", sessionStartTime=1794424513777,
+                       currentModel="auto", totalNanoAiu=12 * credits.NANO)
+        if defect == "later_event":
+            self.event("assistant.turn_start")
+        if defect == "tampered":
+            path = Path(envelope.root) / "sessions" / "researcher" / "events.jsonl"
+            body = path.read_bytes()
+            path.write_bytes(body.replace(b"12000000000", b"13000000000"))
+
+    async def stop(self):
+        if defect == "stop_failure":
+            raise RuntimeError("Owned runtime stop failed")
+        self.stopped = True
+
+    async def short_wait(self, awaitable, seconds=10):
+        return await bounded(self, awaitable, .001 if self.aborting and seconds == 10 else seconds)
+
+    monkeypatch.setattr(FakeClient, "create_session", create)
+    monkeypatch.setattr(FakeClient, "stop", stop)
+    monkeypatch.setattr(FakeSession, "send", send)
+    monkeypatch.setattr(FakeSession, "abort", no_idle)
+    monkeypatch.setattr(FakeSession, "disconnect", disconnect)
+    monkeypatch.setattr(provider.Session, "bounded", short_wait)
+    monkeypatch.setattr(provider.Session, "metrics", captured_metrics)
+    if defect == "log_close_failure":
+        close = provider.EventLog.close
+
+        def fail_close(self):
+            close(self)
+            raise OSError("Sealed manifest publication failed")
+
+        monkeypatch.setattr(provider.EventLog, "close", fail_close)
+    code, clients, result = exercise(envelope, [{}])
+    assert code == 1 and result["status"] == result["primary_outcome"]["status"] == "failed"
+    assert result["primary_outcome"]["reason"] == "Connection timed out after five retries"
+    assert "wait for idle after abort: TimeoutError" in result["reason"]
+    assert clients[0].stopped and len(clients[0].session.prompts) == 1
+    assert clients[0].session.options["events"]["on_event"].__self__.waiting
+    directory = Path(envelope.root)
+    shutdown = read_json(directory / "sessions" / "researcher" / "shutdown.json")
+    assert read_json(directory / "sessions" / "researcher" / "usage-progress.json")["usage"]["totalNanoAiu"] == 10 * credits.NANO
+    assert shutdown["errors"][0]["stage"] == "wait for idle after abort"
+    if defect in (None, "paged"):
+        usage = read_json(directory / "usage.json")
+        assert usage["complete"] and usage["totalNanoAiu"] == 12 * credits.NANO
+        assert shutdown["usage_complete"]
+        session = usage["sessions"][0]
+        assert session["event_log"]["closed"] and session["complete"]
+        assert session["terminal_usage_evidence"]["shutdown"]["sequence"] > 0
+        assert not (directory / "sessions" / "researcher" / "settled-prompt-1.json").exists()
+    else:
+        assert not shutdown["usage_complete"]
+        assert not (directory / "usage.json").exists()
 
 
 @pytest.mark.parametrize("operation,stage", [("disconnect", "disconnect"), ("stop", "stop runtime")])
@@ -376,12 +487,11 @@ def test_client_disables_sync_without_removed_remote_flag(project, ledger, monke
     envelope = arm(project, ledger)
     options = provider.client_for(envelope, coach=coach)
     command = read_json(Path(envelope.root) / "prompt.json")["provider_command"]
-    assert options["connection"].path == command[0]
-    assert options["connection"].args == (
+    assert options["runtime"].path == command[0]
+    assert options["runtime"].args == (
         *command[1:], "--no-auto-update", "--sync-session=off", "--no-remote-export",
         "--no-ask-user", "--disable-builtin-mcps")
-    assert options["enable_remote_sessions"] is False
-    assert options["mode"] == ("empty" if coach else "copilot-cli")
+    assert options["mode"] == ("empty" if coach else "coding-agent")
 
 
 @pytest.mark.parametrize("role,purpose", [
@@ -389,8 +499,7 @@ def test_client_disables_sync_without_removed_remote_flag(project, ledger, monke
     ("consult-1", "claim_review"), ("consult-2", "closure_critique"),
     ("adjudicator-1", "coach"),
 ])
-def test_every_role_explicitly_disables_remote_session(project, ledger, role, purpose):
-    from copilot.client import RemoteSessionMode
+def test_every_role_explicitly_disables_remote_session_and_operator_discovery(project, ledger, role, purpose):
     envelope = arm(project, ledger)
     client = FakeClient({})
     session = provider.Session(envelope, role, envelope.id, 30 * credits.NANO,
@@ -399,13 +508,32 @@ def test_every_role_explicitly_disables_remote_session(project, ledger, role, pu
     async def check():
         try:
             await session.start()
-            assert client.session.options["remote_session"] is RemoteSessionMode.OFF
+            options = client.session.options
+            assert options["cloud"] is None
+            assert options["github"]["fetch_managed_settings"] is True
+            decision = options["permissions"]["on_request"](
+                SimpleNamespace(managed_approval_required=True), {"managed_settings_enabled": True})
+            assert decision.to_dict()["kind"] == ("user-not-available" if role == "researcher" else "denied-by-rules")
+            assert options["enable_config_discovery"] is False
+            assert options["instructions"]["skip_custom_instructions"] is True
+            assert options["instructions"]["on_demand_discovery"] is False
+            assert options["agents"]["definitions"] == []
+            assert options["skills"]["enabled"] is False
+            assert options["plugins"]["directories"] == []
             assert not client.session.prompts
         finally:
             await session.close()
 
     asyncio.run(check())
     assert client.stopped
+
+
+@pytest.mark.parametrize("privacy", [{"started": True, "remoteSteerable": False},
+                                     {"started": False, "remoteSteerable": True}, {"remoteSteerable": False}])
+def test_unconfirmed_remote_privacy_fails_before_prompt(project, ledger, privacy):
+    code, clients, result = exercise(arm(project, ledger), [{"session_privacy": privacy}])
+    assert code == 1 and "session export and steering" in result["reason"]
+    assert clients[0].stopped and not clients[0].session.prompts
 
 
 def test_plain_research_is_one_normal_session_without_handoffs(project, ledger):
@@ -415,9 +543,9 @@ def test_plain_research_is_one_normal_session_without_handoffs(project, ledger):
     assert outcome["status"] == "completed"
     assert len(clients) == 1
     options = clients[0].session.options
-    assert "tools" not in options and "available_tools" not in options
+    assert "definitions" not in options["tools"] and "available_tools" not in options["tools"]
     assert options["system_message"]["mode"] == "append"
-    assert options["session_limits"] == {"max_ai_credits": 300.0}
+    assert options["execution"]["limits"] == {"max_ai_credits": 300.0}
     assert clients[0].stopped
     usage = read_json(Path(envelope.root) / "usage.json")
     assert usage["complete"] and usage["totalNanoAiu"] == 10 * credits.NANO
@@ -430,9 +558,9 @@ def test_coach_pushback_continues_same_researcher_and_uses_one_pool(project, led
     assert result == 0 and len(clients) == 3
     assert len(clients[0].session.prompts) == 2
     assert clients[0].session.updates == [260.0]
-    assert clients[0].session.options["session_limits"] == {"max_ai_credits": 270.0}
-    assert clients[1].session.options["session_limits"] == {"max_ai_credits": 230.0}
-    assert clients[2].session.options["session_limits"] == {"max_ai_credits": 210.0}
+    assert clients[0].session.options["execution"]["limits"] == {"max_ai_credits": 270.0}
+    assert clients[1].session.options["execution"]["limits"] == {"max_ai_credits": 230.0}
+    assert clients[2].session.options["execution"]["limits"] == {"max_ai_credits": 210.0}
     assert all(client.stopped for client in clients)
     assert [item["decision"] for item in outcome["reviews"]] == ["continue", "accept"]
     usage = read_json(Path(envelope.root) / "usage.json")
@@ -447,7 +575,7 @@ def test_coach_pushback_continues_same_researcher_and_uses_one_pool(project, led
     assert "Keep going while consequential feasible work remains toward the original goal." in follow_up
     assert "Keep the original goal and operational boundaries unchanged." in follow_up
     assert guidance.CLOSING_CHALLENGE not in follow_up
-    assert {tool.name for tool in clients[1].session.options["tools"]} == {
+    assert {tool.name for tool in clients[1].session.options["tools"]["definitions"]} == {
         "labgoblin_read_evidence", "labgoblin_list_evidence", "labgoblin_review_decision"}
 
 

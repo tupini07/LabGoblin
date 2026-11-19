@@ -106,7 +106,7 @@ def test_large_publication_is_a_pointer_not_prompt_injection(project, ledger, tm
     assert len(clients) == 1 and len(clients[0].session.prompts) == 1
     prompt = clients[0].session.prompts[0]
     assert secret not in prompt and len(prompt) < 2000
-    assert "ideas_inbox" in prompt and clients[0].session.options.get("tools") is None
+    assert "ideas_inbox" in prompt and clients[0].session.options["tools"].get("definitions") is None
     inbox = ideas.Inbox(project[0])
     entry = inbox.entries()[0]
     assert entry["revision"] == first["revision"] and entry["status"] == "responded"

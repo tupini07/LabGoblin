@@ -11,9 +11,6 @@ import threading
 import time
 import uuid
 
-from copilot._sdk_protocol_version import get_sdk_protocol_version
-
-
 ROOT = Path.cwd().resolve()
 CONFIG = json.loads((ROOT / "fixture-provider.json").read_text(encoding="utf-8"))
 if CONFIG.get("model_free") is not True or CONFIG.get("root") != str(ROOT):
@@ -88,8 +85,51 @@ def invoke_pre_tool():
 
 
 def exercise():
+    if CONFIG.get("mode") == "terminal_usage_recovery":
+        event("session.start", {"sessionId": SESSION, "startTime": "2026-11-11T19:15:13.777Z",
+                                "version": 1, "producer": "model-free-fixture", "copilotVersion": "fixture"})
+        event("assistant.turn_start", {"turnId": "fixture"})
+        event("session.error", {"errorType": "network", "message": "Connection timed out after five retries"})
+        return
     global MEETING_CHILD
     event("assistant.turn_start", {"turnId": str(uuid.uuid4())})
+    if ROLE == "skill-extraction":
+        from hashlib import sha256
+        run = next(path for path in (ROOT / ".labgoblin" / "runs").iterdir()
+                   if uuid.uuid5(uuid.UUID(path.name), "skill-extraction") == uuid.UUID(SESSION))
+        request = json.loads((run / "prompt.json").read_text())["skill_extraction"]
+        response = invoke_tool("labgoblin_inspect_read", {"scope": "workspace", "path": "research_goal.md"})
+        citation = json.loads(response["textResultForLlm"])["citation"]
+        output = ROOT / ".labgoblin" / "skills" / "proposals" / request["id"]
+        scratch = ROOT / ".labgoblin" / "skills" / "scratch" / request["id"]
+        entries = []
+        if not CONFIG.get("empty_skills"):
+            folder = output / "verify-total"
+            folder.mkdir()
+            body = CONFIG.get("skill_body", "Check an exact integer total.")
+            (folder / "SKILL.md").write_text(
+                "---\nname: verify-total\ndescription: Check integer totals\n---\n" + body, encoding="utf-8")
+            script = folder / "check.py"
+            script.write_text("assert sum([1, 2, 3]) == 6\n", encoding="utf-8")
+            completed = subprocess.run([sys.executable, "-B", str(script)], cwd=scratch,
+                                       stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+            assert completed.returncode == 0
+            (scratch / "validation.json").write_text(json.dumps({
+                "script_sha256": sha256(script.read_bytes()).hexdigest(), "returncode": completed.returncode}))
+            entries.append({"name": "verify-total", "action": "upsert",
+                            "base": request["active"].get("verify-total", {}).get("revision"),
+                            "description": "Check integer totals", "rationale": "Retain the verified procedure",
+                            "sources": [citation], "validation": "check.py executed successfully in scratch"})
+        (output / "proposal.json").write_text(json.dumps({
+            "entries": entries, "coverage": "Read the current goal only; synthetic fixture.",
+            "reason": "A verified procedure" if entries else "No useful new procedure"}), encoding="utf-8")
+        event("assistant.message", {"messageId": str(uuid.uuid4()), "content": "Skill proposals prepared."})
+        event("session.idle", {})
+        return
+    if ROLE == "researcher" and CONFIG.get("read_skill"):
+        invoke_tool("labgoblin_skill", {})
+        invoke_tool("labgoblin_skill", {"name": "verify-total"})
+        invoke_tool("labgoblin_skill", {"name": "verify-total", "path": "check.py"})
     if ROLE == "researcher" and CONFIG.get("mode") == "supervisor_review":
         mode = CONFIG["supervisor_mode"]
         run = next((ROOT / ".labgoblin" / "runs").iterdir())
@@ -443,9 +483,9 @@ while True:
     method, params = request["method"], request.get("params", {})
     with (ROOT / "fixture-rpc.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"method": method, "session_id": params.get("sessionId"),
-                                 "session_limits": params.get("sessionLimits")}) + "\n")
+                                 "session_limits": params.get("execution", {}).get("limits")}) + "\n")
     if method == "connect":
-        result = {"ok": True, "protocolVersion": get_sdk_protocol_version(), "version": "model-free-fixture"}
+        result = {"ok": True, "protocolVersion": 4, "version": "model-free-fixture"}
     elif method == "models.list":
         result = {"models": [
             {"id": name, "name": name, "policy": {"state": "enabled", "terms": ""},
@@ -454,10 +494,11 @@ while True:
             for name in CONFIG.get("models", ["model-free"])]}
     elif method == "session.create":
         SESSION = params["sessionId"]
-        MODEL, EFFORT = params["model"], params["reasoningEffort"]
-        TOOLS = params.get("tools", [])
+        MODEL, EFFORT = params["model"], params["inference"]["reasoningEffort"]
+        TOOLS = params["tools"].get("definitions", [])
         names = {tool["name"] for tool in TOOLS}
-        ROLE = ("inspector" if "labgoblin_inspect_read" in names else "coach" if "labgoblin_review_decision" in names
+        ROLE = ("skill-extraction" if "labgoblin_skill_history" in names
+                else "inspector" if "labgoblin_inspect_read" in names else "coach" if "labgoblin_review_decision" in names
                 else "goal-review" if "labgoblin_read_trajectory" in names
                 else "adviser" if "labgoblin_read_evidence" in names else "researcher")
         if "FRESH closure adjudicator" in params.get("systemMessage", {}).get("content", ""):
@@ -470,6 +511,10 @@ while True:
                 counter.write_text(str(COACH_INDEX), encoding="utf-8")
         (ROOT / f"fixture-session-{SESSION}.json").write_text(json.dumps(params), encoding="utf-8")
         result = {"sessionId": SESSION, "workspacePath": str(ROOT)}
+    elif method == "session.remote.enable" and params["mode"] == "off":
+        result = {"started": False, "remoteSteerable": False}
+    elif method == "sessions.getRemoteControlStatus":
+        result = {"status": {"state": "off"}}
     elif method == "session.model.getCurrent":
         result = {"modelId": MODEL, "reasoningEffort": EFFORT}
     elif method == "session.tools.initializeAndValidate":
@@ -481,7 +526,7 @@ while True:
     elif method == "session.tools.handlePendingToolCall":
         TOOL_RESULT = params.get("result", {"resultType": "failure", "error": params.get("error")})
         TOOL_DONE.set()
-        result = {"handled": True}
+        result = {"success": True}
     elif method == "session.permissions.setMode":
         result = {"success": True, "mode": params["mode"]}
     elif method == "session.tasks.list":
@@ -504,6 +549,13 @@ while True:
     elif method in ("session.options.update", "session.detach", "session.abort", "runtime.shutdown"):
         if method in ("session.detach", "runtime.shutdown"):
             time.sleep(CONFIG.get("shutdown_delays", {}).get(ROLE, {}).get(method, 0))
+        if method == "session.detach" and CONFIG.get("mode") == "terminal_usage_recovery":
+            event("session.shutdown", {
+                "shutdownType": "routine", "sessionStartTime": 1794424513777,
+                "currentModel": MODEL, "totalNanoAiu": 12_000_000_000,
+                "totalApiDurationMs": 0, "modelMetrics": {},
+                "codeChanges": {"filesModified": [], "linesAdded": 0, "linesRemoved": 0},
+            })
         result = {"success": True}
     elif method == "session.usage.getMetrics":
         if REQUESTS and (CONFIG.get("mode") == "missing_usage" or
@@ -533,6 +585,7 @@ while True:
         threading.Thread(target=exercise_checked, daemon=True).start()
     elif method == "session.abort":
         ABORT.set()
-        event("session.idle", {"aborted": True})
+        if CONFIG.get("mode") != "terminal_usage_recovery":
+            event("session.idle", {"aborted": True})
     elif method == "runtime.shutdown":
         break

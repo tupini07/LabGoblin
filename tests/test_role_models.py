@@ -58,7 +58,8 @@ def test_optional_models_roundtrip_without_enabling_roles(tmp_path):
 
 def test_init_exposes_all_role_models_without_provider_calls(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Init must not contact Copilot"))
-    arguments = ["init", str(tmp_path), "--model", "research-model", "--no-coach", "--no-consultant"]
+    arguments = ["init", str(tmp_path), "--model", "research-model", "--no-coach", "--no-consultant",
+                 "--no-operator"]
     for field, model in OVERRIDES.items():
         arguments.extend(["--" + field.replace("_", "-"), model])
     assert main(arguments) == 0
@@ -71,13 +72,13 @@ def test_init_exposes_all_role_models_without_provider_calls(tmp_path, monkeypat
 @pytest.mark.parametrize("inherit", [False, True])
 def test_init_model_defaults_and_explicit_inheritance_roundtrip(tmp_path, monkeypatch, capsys, inherit):
     monkeypatch.setattr(runtime.provider, "capabilities", lambda: pytest.fail("Init must not contact Copilot"))
-    arguments = ["init", str(tmp_path), "--no-git", "--no-research-venv"]
+    arguments = ["init", str(tmp_path), "--no-git", "--no-research-venv", "--no-operator"]
     if inherit:
         arguments += ["--model", "chosen-researcher"]
         for field in ROLE_MODELS:
             arguments += ["--" + field.replace("_", "-"), "inherit"]
     assert main(arguments) == 0
-    capsys.readouterr()
+    record = json.loads(capsys.readouterr().out)
     config = Config.load(tmp_path)
     assert config == (Config(model="chosen-researcher", **dict.fromkeys(ROLE_MODELS))
                       if inherit else Config())
@@ -87,7 +88,7 @@ def test_init_model_defaults_and_explicit_inheritance_roundtrip(tmp_path, monkey
     assert Config.parse(config.to_dict(), frozen=True) == config
     if inherit:
         changed = replace(config, model="next-researcher")
-        (tmp_path / "labgoblin.toml").write_text(changed.toml(), encoding="utf-8")
+        (Path(record["root"]) / "labgoblin.toml").write_text(changed.toml(), encoding="utf-8")
         assert Config.load(tmp_path).model_for("coach") == "next-researcher"
 
 
@@ -112,9 +113,9 @@ def test_frozen_purpose_models_route_callers_and_fresh_adjudicator(project, ledg
                 "coach", "closure_critique", "coach"]
     expected = [config.model_for(purpose) for purpose in purposes]
     assert [client.session.options["model"] for client in clients] == expected
-    assert [client.session.options["reasoning_effort"] for client in clients] == ["high"] * 9
+    assert [client.session.options["inference"]["reasoning_effort"] for client in clients] == ["high"] * 9
     assert [len(client.session.prompts) for client in clients] == [3, 1, 1, 1, 1, 1, 1, 1, 1]
-    assert "available_tools" not in clients[0].session.options
+    assert "available_tools" not in clients[0].session.options["tools"]
     usage = runtime.usage_record(envelope, complete=True)
     assert usage["totalNanoAiu"] == 110 * credits.NANO
     assert [session["model"] for session in usage["sessions"]] == expected
@@ -266,7 +267,7 @@ def test_native_sdk_role_models_are_frozen_and_attributed(project, ledger, monke
     for item in sessions:
         options = read_json(root / f"fixture-session-{item['session_id']}.json")
         assert options["model"] == item["model"]
-        assert options["reasoningEffort"] == item["reasoning_effort"] == "high"
+        assert options["inference"]["reasoningEffort"] == item["reasoning_effort"] == "high"
     (root / "labgoblin.toml").write_text(replace(config, coach_model="candidate-only").toml())
     status = runtime.status(root)
     assert status["runs"][-1]["config"]["coach_model"] == "coach-model"
