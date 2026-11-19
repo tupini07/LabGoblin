@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 import json
+import math
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -378,7 +379,8 @@ def test_ordinary_advisers_use_configured_timeout_within_campaign_time(
                if caller == "coach" else [{"consult": [request]}, {}])
     code, clients, outcome = exercise(envelope, scripts, seconds=seconds)
     assert code == 0, outcome
-    assert expected - 5 < remaining["consult-0"] <= expected
+    # Subtracting monotonic timestamps can round just above the duration.
+    assert expected - 5 < remaining["consult-0"] <= expected + math.ulp(deadlines["consult-0"])
     assert deadlines["consult-0"] <= deadlines["researcher"]
     if seconds < config.consultation_timeout_seconds:
         assert deadlines["consult-0"] == deadlines["researcher"]
