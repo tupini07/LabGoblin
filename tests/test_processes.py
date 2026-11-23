@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -134,3 +135,72 @@ def test_temporary_cleanup_retries_only_transient_windows_sharing(monkeypatch):
     with pytest.raises(PermissionError, match="Not a sharing violation"):
         with processes.temporary_directory(prefix="test-"):
             pass
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_atomic_publication_outlasts_brief_windows_reader(monkeypatch, tmp_path, winerror):
+    from labgoblin.storage import atomic_json, read_json
+    target = tmp_path / "events-manifest.json"
+    atomic_json(target, {"revision": 1})
+    replace = processes.os.replace
+    elapsed = 0.0
+
+    def sleep(delay):
+        nonlocal elapsed
+        elapsed += delay
+
+    def locked(source, destination):
+        if elapsed < 0.4:
+            error = PermissionError("Temporary Windows reader")
+            error.winerror = winerror
+            raise error
+        replace(source, destination)
+
+    monkeypatch.setattr(processes.os, "replace", locked)
+    monkeypatch.setattr(processes.time, "sleep", sleep)
+    atomic_json(target, {"revision": 2})
+    assert read_json(target) == {"revision": 2}
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("winerror", [5, None])
+def test_failed_atomic_publication_is_bounded_and_preserves_record(monkeypatch, tmp_path, winerror):
+    from labgoblin.storage import atomic_json, read_json
+    target = tmp_path / "events-manifest.json"
+    atomic_json(target, {"revision": 1})
+    delays = []
+    calls = []
+
+    def denied(source, destination):
+        calls.append(destination)
+        error = PermissionError("Publication remains denied")
+        if winerror is not None:
+            error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr(processes.os, "replace", denied)
+    monkeypatch.setattr(processes.time, "sleep", delays.append)
+    with pytest.raises(PermissionError, match="Publication remains denied"):
+        atomic_json(target, {"revision": 2})
+    assert 0 <= sum(delays) < 2
+    if winerror is None:
+        assert len(calls) == 1 and not delays
+    assert read_json(target) == {"revision": 1}
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows reader blocks atomic replacement")
+def test_atomic_publication_survives_native_windows_reader(tmp_path):
+    from labgoblin.storage import atomic_json, read_json
+    target = tmp_path / "events-manifest.json"
+    atomic_json(target, {"revision": 1})
+    reader = target.open("rb")
+    release = threading.Timer(0.4, reader.close)
+    release.start()
+    try:
+        atomic_json(target, {"revision": 2})
+    finally:
+        release.join()
+        reader.close()
+    assert read_json(target) == {"revision": 2}
+    assert list(tmp_path.iterdir()) == [target]

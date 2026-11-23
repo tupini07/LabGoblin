@@ -113,7 +113,7 @@ def replace_file(source: Path, target: Path):
         except PermissionError as error:
             if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 9:
                 raise
-            time.sleep(0.02)
+            time.sleep(min(0.02 * 2 ** attempt, 0.25))
 
 
 def unlink_file(path: Path, *, missing_ok: bool = False):

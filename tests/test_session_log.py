@@ -78,6 +78,30 @@ def test_terminal_log_rejects_changed_captured_evidence(tmp_path, target):
         session_log.page(tmp_path, {}, terminal_log=reference)
 
 
+@pytest.mark.parametrize("retry", ["close", "checkpoint"])
+def test_failed_close_publication_cannot_claim_unpublished_manifest(tmp_path, monkeypatch, retry):
+    log = session_log.EventLog(tmp_path, event_bytes=1000, total_bytes=10000)
+    log.append(event(0), prompt=1)
+    publish = session_log.atomic_json
+
+    def denied(path, value):
+        raise PermissionError("Manifest is still locked")
+
+    monkeypatch.setattr(session_log, "atomic_json", denied)
+    with pytest.raises(PermissionError, match="still locked"):
+        log.close()
+    with pytest.raises(ValueError, match="closed"):
+        log.append(event(1), prompt=1)
+    with pytest.raises(PermissionError, match="still locked"):
+        log.checkpoint()
+    assert not read_json(tmp_path / "events-manifest.json")["closed"]
+    monkeypatch.setattr(session_log, "atomic_json", publish)
+    getattr(log, retry)()
+    result = session_log.page(tmp_path, {}, terminal_log=log.checkpoint())
+    assert result["manifest_closed"] and result["receipt_verified"]
+    assert [row["sequence"] for row in result["events"]] == [0]
+
+
 def test_live_reader_can_follow_index_after_last_manifest_checkpoint(tmp_path):
     log = session_log.EventLog(tmp_path, event_bytes=1000, total_bytes=10000)
     try:

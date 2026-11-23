@@ -36,6 +36,7 @@ class EventLog:
         self.omitted = {}
         self.unindexed_from = None
         self.exhausted = self.closed = False
+        self._closed_published = False
         self.exhaustion_reason = None
         self.disk_allowance = 0
         self.disk_checked = 0.0
@@ -136,8 +137,9 @@ class EventLog:
 
     def checkpoint(self):
         value = self._manifest()
-        if not self.closed:
+        if not self.closed or not self._closed_published:
             atomic_json(self.directory / "events-manifest.json", value)
+            self._closed_published = self.closed
         return {"version": VERSION, "manifest_sha256": digest(value), "closed": self.closed,
                 "seen": self.seen, "retained": self.retained, "omitted": dict(self.omitted)}
 
@@ -152,7 +154,7 @@ class EventLog:
         if not self.closed:
             self._close_segment()
             self.closed = True
-            atomic_json(self.directory / "events-manifest.json", self._manifest())
+        self.checkpoint()
 
 
 def page(directory, args, *, terminal_log=None):
