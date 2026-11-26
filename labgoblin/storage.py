@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import tempfile
+import time
 
-from labgoblin.processes import replace_file
+from labgoblin.processes import open_shared_read, replace_file, unlink_file
 
 
 CONTROL_BYTES = 1024 * 1024
@@ -34,7 +36,7 @@ def digest(value):
 
 
 def read_json(path, limit=CONTROL_BYTES):
-    with Path(path).open("rb") as stream:
+    with open_shared_read(path) as stream:
         body = stream.read(limit + 1)
     if len(body) > limit:
         raise ValueError(f"Control record exceeds {limit} bytes: {path}")
@@ -46,7 +48,7 @@ def invalid_constant(value):
 
 
 def read_text(path, limit=65536):
-    with Path(path).open("rb") as stream:
+    with open_shared_read(path) as stream:
         body = stream.read(limit + 1)
     if len(body) > limit:
         raise ValueError(f"Text exceeds {limit} bytes: {path}")
@@ -55,7 +57,7 @@ def read_text(path, limit=65536):
 
 def hash_file(path):
     result = hashlib.sha256()
-    with Path(path).open("rb") as stream:
+    with open_shared_read(path) as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(block)
     return result.hexdigest()
@@ -74,19 +76,64 @@ def publish_json(path, value):
     publish_bytes(path, canonical(value))
 
 
-def atomic_json(path, value):
+def _sweep_stale_temps(path: Path, *, max_age: float = 60.0) -> None:
+    prefix = path.name + "."
+    cutoff = time.time() - max_age
+    checked = 0
+    try:
+        entries = os.scandir(path.parent)
+    except OSError:
+        return
+    with entries:
+        for entry in entries:
+            if not entry.name.startswith(prefix):
+                continue
+            checked += 1
+            if checked > 16:
+                break
+            try:
+                if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                    Path(entry.path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def atomic_json(path, value, *, durable=True, timeout=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    body = canonical(value)
     descriptor, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            stream.write(canonical(value))
+            stream.write(body)
             stream.flush()
-            os.fsync(stream.fileno())
-        replace_file(temporary, path)
+            if durable:
+                os.fsync(stream.fileno())
+        replace_file(temporary, path, timeout=timeout)
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            unlink_file(temporary, missing_ok=True)
+        except PermissionError as cleanup_error:
+            print(f"Temporary control file cleanup deferred ({temporary}): {cleanup_error}",
+                  file=sys.stderr, flush=True)
+
+
+def progress_json(path, value, *, warned=None, label="Progress snapshot"):
+    """Best-effort atomic update for non-authoritative progress files; never kills active work on Windows lock."""
+    path = Path(path)
+    _sweep_stale_temps(path)
+    try:
+        atomic_json(path, value, durable=False, timeout=0.35)
+        return True
+    except PermissionError as error:
+        if getattr(error, "winerror", None) not in (5, 32, 33):
+            raise
+        if isinstance(warned, set) and str(path) not in warned:
+            warned.add(str(path))
+            print(f"{label} publication deferred; execution continues: {type(error).__name__}: {error}",
+                  file=sys.stderr, flush=True)
+        return False
 
 
 class LockBusy(ValueError):

@@ -188,3 +188,45 @@ def test_disk_headroom_is_rechecked_after_idle_even_with_cached_allowance(tmp_pa
     log.append(event(1), prompt=1)
     log.close()
     assert log.retained == 1 and log.omitted == {"disk_headroom": 1}
+
+
+def test_checkpoint_deduplicates_unchanged_manifests_and_defers_best_effort_locks(tmp_path, monkeypatch, capsys):
+    from labgoblin import processes
+    writes = []
+    real_atomic = session_log.atomic_json
+
+    def count_atomic(path, value, **kwargs):
+        writes.append(value["seen"])
+        return real_atomic(path, value, **kwargs)
+
+    monkeypatch.setattr(session_log, "atomic_json", count_atomic)
+    monkeypatch.setattr(session_log, "_DEFAULT_ATOMIC_JSON", count_atomic)
+    log = session_log.EventLog(tmp_path, event_bytes=1000, total_bytes=10000)
+    assert writes == [0]
+    # Repeated checkpoints with no new events do zero disk writes
+    log.checkpoint()
+    log.checkpoint(best_effort=True)
+    assert writes == [0]
+
+    # Best-effort live checkpoint defers transient Windows WinError 5 without raising or claiming unpublished digest
+    initial_digest = log.checkpoint()["manifest_sha256"]
+    log.append(event(0), prompt=1)
+    def locked_replace(source, target):
+        err = PermissionError("External scanner holds handle")
+        err.winerror = 5
+        raise err
+
+    with monkeypatch.context() as patch:
+        patch.setattr(processes, "os", type("OS", (), {"name": "posix", "replace": staticmethod(locked_replace)})())
+        patch.setattr(processes.time, "sleep", lambda _: None)
+        ref = log.checkpoint(best_effort=True)
+        log.checkpoint(best_effort=True)
+    err_out = capsys.readouterr().err
+    assert err_out.count("Session event manifest publication deferred") == 1
+    assert ref["manifest_sha256"] == initial_digest
+    assert read_json(tmp_path / "events-manifest.json")["seen"] == 0
+
+    # Subsequent close durably seals the full manifest
+    log.close()
+    sealed = read_json(tmp_path / "events-manifest.json")
+    assert sealed["closed"] and sealed["seen"] == 1

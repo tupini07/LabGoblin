@@ -8,8 +8,11 @@ import sys
 import time
 from pathlib import Path
 
+from labgoblin.processes import open_shared_read
 from labgoblin.protocol import integer, text
-from labgoblin.storage import atomic_json, canonical, digest
+from labgoblin.storage import atomic_json, canonical, digest, progress_json
+
+_DEFAULT_ATOMIC_JSON = atomic_json
 
 
 VERSION = 1
@@ -37,6 +40,10 @@ class EventLog:
         self.unindexed_from = None
         self.exhausted = self.closed = False
         self._closed_published = False
+        self._published_digest = None
+        self._published_summary = None
+        self._manifest_warned = set()
+        self._in_append = False
         self.exhaustion_reason = None
         self.disk_allowance = 0
         self.disk_checked = 0.0
@@ -108,7 +115,11 @@ class EventLog:
             segment["first_sequence"] = sequence
             entry["offset"] = 0
             encoded = canonical(entry) + b"\n"
-            self.checkpoint()
+            self._in_append = True
+            try:
+                self.checkpoint()
+            finally:
+                self._in_append = False
         if not reason:
             self.events.write(body)
             self.events.flush()
@@ -135,13 +146,38 @@ class EventLog:
               "later events will be counted but not retained. Finalization records are separate.",
               file=sys.stderr, flush=True)
 
-    def checkpoint(self):
+    def checkpoint(self, *, best_effort=False, write=True):
+        best_effort = best_effort or self._in_append
+        if not write and self._published_summary is not None:
+            return dict(self._published_summary, omitted=dict(self._published_summary["omitted"]))
         value = self._manifest()
-        if not self.closed or not self._closed_published:
-            atomic_json(self.directory / "events-manifest.json", value)
-            self._closed_published = self.closed
-        return {"version": VERSION, "manifest_sha256": digest(value), "closed": self.closed,
-                "seen": self.seen, "retained": self.retained, "omitted": dict(self.omitted)}
+        current = digest(value)
+        summary = {"version": VERSION, "manifest_sha256": current, "closed": self.closed,
+                   "seen": self.seen, "retained": self.retained, "omitted": dict(self.omitted)}
+        if not write:
+            return summary
+        path = self.directory / "events-manifest.json"
+        if self.closed:
+            if not self._closed_published:
+                if atomic_json is _DEFAULT_ATOMIC_JSON:
+                    atomic_json(path, value, timeout=15.0)
+                else:
+                    atomic_json(path, value)
+                self._closed_published = True
+                self._published_digest = current
+                self._published_summary = summary
+        elif self._published_digest != current:
+            if best_effort and atomic_json is _DEFAULT_ATOMIC_JSON:
+                if progress_json(path, value, warned=self._manifest_warned, label="Session event manifest"):
+                    self._published_digest = current
+                    self._published_summary = summary
+                elif self._published_summary is not None:
+                    return dict(self._published_summary, omitted=dict(self._published_summary["omitted"]))
+            else:
+                atomic_json(path, value)
+                self._published_digest = current
+                self._published_summary = summary
+        return summary
 
     def _manifest(self):
         return {"version": VERSION, "closed": self.closed, "seen": self.seen, "retained": self.retained,
@@ -211,7 +247,7 @@ def page(directory, args, *, terminal_log=None):
             indexed = bounded_bytes(index_path, SEGMENT_BYTES + INDEX_LINE_BYTES)
             if hashlib.sha256(indexed).hexdigest() != segment["index_sha256"]:
                 raise ValueError("Session index differs from its sealed segment")
-        with index_path.open("rb") as index:
+        with open_shared_read(index_path) as index:
             while True:
                 body = index.readline(INDEX_LINE_BYTES + 1)
                 if not body:
@@ -251,7 +287,7 @@ def page(directory, args, *, terminal_log=None):
                 if payload_bytes + size > PAGE_SCAN_BYTES:
                     result["next_offset"] = sequence
                     return result
-                with event_path.open("rb") as stream:
+                with open_shared_read(event_path) as stream:
                     stream.seek(position)
                     raw = stream.read(size)
                 if len(raw) != size or hashlib.sha256(raw).hexdigest() != entry["sha256"]:

@@ -12,6 +12,7 @@ import time
 import uuid
 
 from labgoblin import runtime
+from labgoblin.processes import open_shared_read
 from labgoblin.protocol import LaunchEnvelope, integer, table, text
 from labgoblin.storage import canonical, digest, excluded_name, publish_json, read_json
 
@@ -45,7 +46,7 @@ def bounded_bytes(path, limit):
     before = path.stat()
     if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
         raise ValueError(f"Evidence must be a regular file of at most {limit} bytes")
-    with path.open("rb") as stream:
+    with open_shared_read(path) as stream:
         body = stream.read(limit + 1)
     after = path.stat()
     if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
@@ -60,7 +61,7 @@ def text_page(path, offset, limit, maximum):
     if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
         raise ValueError(f"Evidence must be a regular file of at most {maximum} bytes")
     hashed, size, page = hashlib.sha256(), 0, bytearray()
-    with path.open("rb") as stream:
+    with open_shared_read(path) as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             if size + len(block) > maximum:
                 raise ValueError("Evidence exceeded its read bound")
@@ -394,7 +395,7 @@ class Evidence:
         if path.resolve(strict=True) != path:
             raise ValueError("Session events cannot be a file alias")
         entries, read_bytes, incomplete_tail = [], 0, False
-        with path.open("rb") as stream:
+        with open_shared_read(path) as stream:
             size = os.fstat(stream.fileno()).st_size
             if offset > size or offset and (stream.seek(offset - 1) is not None and stream.read(1) != b"\n"):
                 raise ValueError("Use an event-page next_offset, not a position inside an event")

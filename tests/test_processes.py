@@ -204,3 +204,29 @@ def test_atomic_publication_survives_native_windows_reader(tmp_path):
         reader.close()
     assert read_json(target) == {"revision": 2}
     assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows POSIX FileRenameInfoEx against persistent FILE_SHARE_DELETE handles")
+def test_atomic_publication_replaces_immediately_while_shared_delete_reader_stays_open(monkeypatch, tmp_path):
+    from labgoblin.storage import atomic_json, read_json
+    target = tmp_path / "events-manifest.json"
+    atomic_json(target, {"revision": 1})
+    sleeps = []
+    monkeypatch.setattr(processes.time, "sleep", sleeps.append)
+    # Simulates Windows Defender / Search Indexer / file watcher or LabGoblin open_shared_read holding target open indefinitely
+    with processes.open_shared_read(target) as open_reader:
+        atomic_json(target, {"revision": 2})
+        assert json.loads(open_reader.read()) == {"revision": 1}
+        assert read_json(target) == {"revision": 2}
+    assert sleeps == []
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows NUL device and filename error preservation")
+def test_open_shared_read_preserves_windows_nul_device_and_error_filename(tmp_path):
+    with processes.open_shared_read("NUL") as nul_stream:
+        assert nul_stream.read() == b""
+    missing = tmp_path / "does-not-exist.json"
+    with pytest.raises(FileNotFoundError) as exc_info:
+        processes.open_shared_read(missing)
+    assert exc_info.value.filename == os.fspath(missing)

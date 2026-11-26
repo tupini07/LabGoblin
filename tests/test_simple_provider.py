@@ -552,6 +552,58 @@ def test_plain_research_is_one_normal_session_without_handoffs(project, ledger):
     assert not list(Path(envelope.project).rglob("handoff.json"))
 
 
+def test_locked_usage_progress_never_kills_research_or_blocks_final_usage_json(project, ledger, monkeypatch, capsys):
+    from labgoblin import storage
+    envelope = arm(project, ledger)
+    real_atomic = storage.atomic_json
+
+    def deny_progress(path, value, **kwargs):
+        if Path(path).name == "usage-progress.json":
+            err = PermissionError("Antivirus locked usage-progress.json")
+            err.winerror = 5
+            raise err
+        return real_atomic(path, value, **kwargs)
+
+    monkeypatch.setattr(storage, "atomic_json", deny_progress)
+    code, clients, outcome = exercise(envelope, [{}])
+    assert code == 0 and outcome["status"] == "completed"
+    assert outcome["finalization_errors"] == []
+    root = Path(envelope.root)
+    usage = read_json(root / "usage.json")
+    assert usage["complete"] is True and usage["totalNanoAiu"] == 10 * credits.NANO
+    assert read_json(root / "sessions" / "researcher" / "usage.json")["complete"] is True
+    assert "usage progress publication deferred" in capsys.readouterr().err
+
+
+def test_locked_final_event_manifest_preserves_settled_aggregate_billing_and_records_error(project, ledger, monkeypatch):
+    from labgoblin import session_log, storage
+    envelope = arm(project, ledger)
+    real_atomic = storage.atomic_json
+
+    def deny_manifests_after_init(path, value, **kwargs):
+        if Path(path).name == "events-manifest.json" and value.get("seen", 0) > 0:
+            err = PermissionError("Persistent exclusive lock on events-manifest.json")
+            err.winerror = 32
+            raise err
+        return real_atomic(path, value, **kwargs)
+
+    monkeypatch.setattr(storage, "atomic_json", deny_manifests_after_init)
+    monkeypatch.setattr(session_log, "atomic_json", deny_manifests_after_init)
+    monkeypatch.setattr(session_log, "_DEFAULT_ATOMIC_JSON", deny_manifests_after_init)
+    code, clients, outcome = exercise(envelope, [{}])
+    # Primary research prompt succeeded without crashing mid-turn on live manifest lock;
+    # finalization honestly reports the failed close while still saving complete aggregate usage.json!
+    assert code == 1 and outcome["status"] == "failed"
+    assert outcome["primary_outcome"]["status"] == "completed"
+    assert any("close event log" in e for e in outcome["finalization_errors"])
+    root = Path(envelope.root)
+    usage = read_json(root / "usage.json")
+    assert usage["complete"] is True and usage["totalNanoAiu"] == 10 * credits.NANO
+    assert usage["sessions"][0]["event_log"]["closed"] is False
+
+
+
+
 def test_coach_pushback_continues_same_researcher_and_uses_one_pool(project, ledger):
     envelope = arm(project, ledger, coach=True)
     result, clients, outcome = exercise(envelope, [{}, {"decision": "continue"}, {"decision": "accept"}])

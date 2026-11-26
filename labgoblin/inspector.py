@@ -18,7 +18,7 @@ from labgoblin.inspection_evidence import Evidence, EvidenceTools
 from labgoblin.processes import background_options, own_handle, process_state
 from labgoblin.protocol import LaunchEnvelope, Resources, UncertainExecution, identifier, text
 from labgoblin.scheduler import ResourceLedger
-from labgoblin.storage import atomic_json, canonical, hash_file, publish_bytes, publish_json, read_json, run_lock
+from labgoblin.storage import atomic_json, canonical, hash_file, progress_json, publish_bytes, publish_json, read_json, run_lock
 
 
 INSTRUCTIONS = """You are LabGoblin's campaign chat assistant, not its researcher,
@@ -384,11 +384,15 @@ async def drive(envelope, deadline, *, client_factory=provider.client_for):
                                client_factory(envelope, coach=True), deadline)
     status, reason, answer = "completed", "", None
 
+    progress_warned = set()
+
     def checkpoint():
         if session.usage is not None:
-            atomic_json(root / "usage-progress.json", {
+            progress_json(root / "usage-progress.json", {
                 "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": False,
-                "totalNanoAiu": credits.usage_nano(session.usage), "sessions": [session.record()]})
+                "totalNanoAiu": credits.usage_nano(session.usage),
+                "sessions": [session.record(best_effort_log=True)]},
+                warned=progress_warned, label="Inspector usage progress")
 
     try:
         from labgoblin.handoffs import INSTRUCTIONS as HANDOFF_INSTRUCTIONS
@@ -419,7 +423,7 @@ async def drive(envelope, deadline, *, client_factory=provider.client_for):
         if session.complete and session.usage is not None:
             publish_json(root / "usage.json", {
                 "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": True,
-                "totalNanoAiu": credits.usage_nano(session.usage), "sessions": [session.record()]})
+                "totalNanoAiu": credits.usage_nano(session.usage), "sessions": [session.record(write_log=False)]})
         publish_json(root / "result.json", {
             "run_id": envelope.id, "envelope_digest": envelope.digest, "status": status, "reason": reason,
             "answer": answer if status == "completed" else None, "evidence_reads": tools.count,

@@ -13,7 +13,7 @@ from labgoblin.inspection_evidence import Evidence, EvidenceTools
 from labgoblin.processes import process_state
 from labgoblin.protocol import BudgetExhausted, LaunchEnvelope, UncertainExecution, integer
 from labgoblin.skills import Store, VERSION, exact_id, safe
-from labgoblin.storage import atomic_json, digest, publish_json, read_json, read_text, run_lock
+from labgoblin.storage import atomic_json, digest, progress_json, publish_json, read_json, read_text, run_lock
 
 
 WORK_SECONDS = 3600
@@ -275,11 +275,14 @@ async def drive(envelope, deadline, *, client_factory=provider.client_for):
                                purpose="skill-extraction")
     evidence = EvidenceTools(Evidence(envelope.project, envelope.project_id), root / "evidence")
 
+    progress_warned = set()
+
     def checkpoint():
-        atomic_json(root / "usage-progress.json", {
+        progress_json(root / "usage-progress.json", {
             "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": False,
             "totalNanoAiu": credits.usage_nano(session.usage) if session.usage is not None else 0,
-            "sessions": [session.record()]})
+            "sessions": [session.record(best_effort_log=True)]},
+            warned=progress_warned, label="Extraction usage progress")
 
     status, reason, errors = "failed", "Extraction did not complete", []
     try:
@@ -305,13 +308,16 @@ async def drive(envelope, deadline, *, client_factory=provider.client_for):
         except (OSError, ValueError, RuntimeError) as error:
             errors.append(provider.error_details("extraction shutdown", error))
             status, reason = "failed", reason + f"; shutdown: {error}"
-        checkpoint()
     if session.complete and session.usage is not None:
         publish_json(root / "usage.json", {
             "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": True,
-            "totalNanoAiu": credits.usage_nano(session.usage), "sessions": [session.record()]})
+            "totalNanoAiu": credits.usage_nano(session.usage), "sessions": [session.record(write_log=False)]})
     else:
         status, reason = "failed", reason + "; final spending unknown"
+    try:
+        checkpoint()
+    except (OSError, ValueError, RuntimeError):
+        pass
     publish_json(root / "result.json", {"run_id": envelope.id, "envelope_digest": envelope.digest,
                  "status": status, "reason": reason, "finalization_errors": errors})
     return 0 if status == "completed" else 1

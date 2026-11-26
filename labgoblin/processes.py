@@ -10,6 +10,96 @@ import tempfile
 import threading
 import time
 
+_OS_REPLACE = os.replace
+_WIN_LOCK_ERRORS = (5, 32, 33)
+_WIN_UNSUPPORTED_RENAME = (1, 50, 87)
+_WIN_DEVICES = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _nt_path(path: Path, *, always_extended: bool = False) -> str:
+    raw = os.fspath(path)
+    if raw.startswith("\\\\?\\") or raw.startswith("\\\\.\\"):
+        return raw
+    resolved = os.path.abspath(raw)
+    if not always_extended and len(resolved) < 248:
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
+def _posix_replace_nt(source: Path, target: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+    import _winapi
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+
+    dst_bytes = _nt_path(target, always_extended=True).encode("utf-16-le")
+
+    class _FileRenameInfoEx(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", ctypes.c_byte * (len(dst_bytes) + 2)),
+        ]
+
+    info = _FileRenameInfoEx()
+    # FILE_RENAME_FLAG_REPLACE_IF_EXISTS (0x1) | FILE_RENAME_FLAG_POSIX_SEMANTICS (0x2)
+    info.Flags = 0x00000001 | 0x00000002
+    info.RootDirectory = None
+    info.FileNameLength = len(dst_bytes)
+    ctypes.memmove(info.FileName, dst_bytes, len(dst_bytes))
+
+    # DELETE (0x00010000) | SYNCHRONIZE (0x00100000); full Read/Write/Delete sharing (0x07)
+    handle = _winapi.CreateFile(
+        _nt_path(source, always_extended=True), 0x00110000, 0x07, 0, _winapi.OPEN_EXISTING, 0x80, 0,
+    )
+    try:
+        if not kernel32.SetFileInformationByHandle(
+            wintypes.HANDLE(handle), 22, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        _winapi.CloseHandle(handle)
+
+
+def open_shared_read(path: Path):
+    """Open a regular file for reading with FILE_SHARE_DELETE on Windows so atomic renames never get WinError 5."""
+    raw = os.fspath(path)
+    target = Path(raw)
+    if os.name != "nt" or target.name.split(".")[0].upper() in _WIN_DEVICES:
+        return target.open("rb")
+    import msvcrt
+    import _winapi
+
+    try:
+        handle = _winapi.CreateFile(
+            _nt_path(target), _winapi.GENERIC_READ, 0x07, 0, _winapi.OPEN_EXISTING, 0x80, 0,
+        )
+    except OSError as error:
+        winerror = getattr(error, "winerror", None)
+        raise OSError(error.errno or 0, error.strerror, raw, winerror) from None
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        _winapi.CloseHandle(handle)
+        raise
+    try:
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
 
 @contextmanager
 def temporary_directory(*, prefix):
@@ -105,26 +195,48 @@ def alive(handle: dict | None) -> bool:
     return state == "alive"
 
 
-def replace_file(source: Path, target: Path):
-    for attempt in range(10):
+def replace_file(source: Path, target: Path, *, timeout: float | None = None):
+    source, target = Path(source), Path(target)
+    deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    attempt = 0
+    while True:
         try:
             os.replace(source, target)
             return
         except PermissionError as error:
-            if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 9:
+            winerror = getattr(error, "winerror", None)
+            if os.name == "nt" and os.replace is _OS_REPLACE and winerror in (5, 32):
+                try:
+                    _posix_replace_nt(source, target)
+                    return
+                except OSError as nt_error:
+                    nt_code = getattr(nt_error, "winerror", None)
+                    if nt_code not in _WIN_UNSUPPORTED_RENAME:
+                        if isinstance(nt_error, PermissionError):
+                            error = nt_error
+                            winerror = nt_code
+                        else:
+                            raise
+            exhausted = attempt >= 9 if deadline is None else time.monotonic() >= deadline
+            if winerror not in _WIN_LOCK_ERRORS or exhausted:
                 raise
-            time.sleep(min(0.02 * 2 ** attempt, 0.25))
+            delay = min(0.02 * 2 ** min(attempt, 8), 0.25)
+            if deadline is not None:
+                delay = min(delay, max(0.0, deadline - time.monotonic()))
+            time.sleep(delay)
+            attempt += 1
 
 
 def unlink_file(path: Path, *, missing_ok: bool = False):
+    path = Path(path)
     for attempt in range(10):
         try:
             path.unlink(missing_ok=missing_ok)
             return
         except PermissionError as error:
-            if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 9:
+            if getattr(error, "winerror", None) not in _WIN_LOCK_ERRORS or attempt == 9:
                 raise
-            time.sleep(0.02)
+            time.sleep(min(0.02 * 2 ** attempt, 0.25))
 
 
 class BoundedSpool:

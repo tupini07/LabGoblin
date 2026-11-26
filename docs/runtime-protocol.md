@@ -145,11 +145,16 @@ All operations have a hard deadline. SDK shutdown grace fits inside it. Rotating
 stdout/stderr spools continue draining after retention fills; log pressure cannot
 disable cancellation or the deadline. Truncation and stream errors are explicit.
 
-The process heartbeat is diagnostic, not an ownership lease. Publication is
-attempted at most once per second, independently of the faster safety checks.
-Windows access/sharing errors (5, 32, 33) defer that update without terminating
-research; supervision, cancellation, deadlines and resource enforcement continue.
-The first failure emits a warning, and bounded failure counts, the last error and
+The process heartbeat and live usage/event-manifest progress snapshots are
+diagnostic, not ownership leases or final accounting. On Windows, bounded
+readers open control and evidence files with `FILE_SHARE_DELETE`, and atomic
+replacement falls back to POSIX-semantics `FileRenameInfoEx` before bounded
+exponential retries so external `FILE_SHARE_DELETE` handles (antivirus,
+indexers, file watchers) never raise `WinError 5`. Unchanged open event
+manifests are deduplicated; remaining Windows access/sharing errors (5, 32, 33)
+on live progress snapshots emit a one-time warning and defer the snapshot
+without terminating active work or blocking authoritative `usage.json`
+publication. For the 1 Hz heartbeat, bounded failure counts, the last error and
 last successful/failed publication times remain in the process outcome. Other
 publication errors and failures to publish ownership records still fail closed.
 

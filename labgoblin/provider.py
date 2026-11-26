@@ -16,7 +16,7 @@ from labgoblin import checkins, consultation, credits, guidance
 from labgoblin.config import Config
 from labgoblin.protocol import LaunchEnvelope, table, text
 from labgoblin.session_log import EventLog, page
-from labgoblin.storage import atomic_json, canonical, digest, excluded_name, publish_bytes, publish_json, read_json
+from labgoblin.storage import atomic_json, canonical, digest, excluded_name, progress_json, publish_bytes, publish_json, read_json
 
 
 FLAGS = ("--no-auto-update", "--sync-session=off", "--no-remote-export", "--no-ask-user", "--disable-builtin-mcps")
@@ -138,6 +138,7 @@ class Session:
         self.events_truncated = False
         self.last_event = ""
         self.last_progress = time.time()
+        self._progress_warned = set()
         self.directory = Path(envelope.root) / "sessions" / role
         self.directory.mkdir(parents=True)
         self.events = EventLog(self.directory, event_bytes=MAX_EVENT_BYTES,
@@ -330,16 +331,19 @@ class Session:
             if self.usage is not None and amount < credits.usage_nano(self.usage):
                 raise ValueError("Copilot credit usage decreased within an owned session")
             self.usage = value
-            atomic_json(self.directory / "usage-progress.json", self.record())
+            progress_json(self.directory / "usage-progress.json", self.record(best_effort_log=True),
+                          warned=self._progress_warned, label=f"{self.role} usage progress")
 
-    def record(self):
+    def record(self, *, best_effort_log=False, write_log=True):
         return {"session_id": self.id, "role": self.role, "allowance_nano": self.allowance,
                 "purpose": self.purpose, "requested_model": self.model,
                 "model": self.model_snapshot.get("modelId"),
                 "reasoning_effort": self.model_snapshot.get("reasoningEffort"),
                 "complete": self.complete, "usage": self.usage, "prompts": self.turns,
                 "events_truncated": self.events_truncated, "last_event": self.last_event,
-                "last_progress_at": self.last_progress, "event_log": self.events.checkpoint(),
+                "last_progress_at": self.last_progress,
+                "event_log": self.events.checkpoint(
+                    best_effort=best_effort_log and not self.events.closed, write=write_log),
                 **({"terminal_usage_evidence": self.terminal_usage_evidence}
                    if self.terminal_usage_evidence is not None else {})}
 
@@ -430,7 +434,7 @@ class Session:
             if time.monotonic() - last_metrics >= 10:
                 try:
                     await self.metrics()
-                except (RuntimeError, TimeoutError) as error:
+                except (OSError, RuntimeError, TimeoutError) as error:
                     print(f"Progress usage unavailable; final settlement is still required: {error}",
                           file=sys.stderr, flush=True)
                 checkpoint()
@@ -441,7 +445,7 @@ class Session:
         publish_bytes(self.directory / f"answer-{self.turns}.txt", answer.encode("utf-8"))
         await self.metrics()
         self.complete = True
-        publish_json(self.directory / f"settled-prompt-{self.turns}.json", self.record())
+        publish_json(self.directory / f"settled-prompt-{self.turns}.json", self.record(best_effort_log=True))
         checkpoint()
         if (Path(self.envelope.root) / "cancel").exists():
             raise StopRequested("cancelled", "Operator cancellation requested while the prompt was settling")
@@ -537,7 +541,7 @@ class Session:
                     await self.metrics()
                 self.complete = True
                 stage = "publish final usage"
-                publish_json(self.directory / "usage.json", self.record())
+                publish_json(self.directory / "usage.json", self.record(best_effort_log=True))
             elif not self.sent:
                 self.usage = {"totalNanoAiu": 0, "basis": "Owned driver failed before sending any prompt"}
                 self.complete = True
@@ -1031,11 +1035,13 @@ async def drive(envelope, deadline, *, client_factory=client_for):
     status, reason = "failed", "Research execution did not complete"
     checkpoint_reason = None
 
+    progress_warned = set()
+
     def checkpoint():
         value = {"run_id": envelope.id, "envelope_digest": envelope.digest, "complete": False,
                  "totalNanoAiu": sum(credits.usage_nano(session.usage) for session in sessions if session.usage is not None),
-                 "sessions": [session.record() for session in sessions]}
-        atomic_json(root / "usage-progress.json", value)
+                 "sessions": [session.record(best_effort_log=True) for session in sessions]}
+        progress_json(root / "usage-progress.json", value, warned=progress_warned, label="Aggregate usage progress")
 
     allowance = envelope.allowance_nano
     consultations = (Consultations(envelope, prompt, sessions, deadline, client_factory, checkpoint)
@@ -1342,15 +1348,18 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                 except (OSError, ValueError, RuntimeError, TimeoutError, ExceptionGroup) as error:
                     errors.append(f"{session.role} settlement: {type(error).__name__}: {error}")
         try:
-            checkpoint()
             if all(session.complete for session in sessions):
                 publish_json(root / "usage.json", {
                     "run_id": envelope.id, "envelope_digest": envelope.digest, "complete": True,
                     "totalNanoAiu": sum(credits.usage_nano(session.usage) for session in sessions),
-                    "sessions": [session.record() for session in sessions],
+                    "sessions": [session.record(write_log=False) for session in sessions],
                 })
         except (OSError, ValueError, RuntimeError) as error:
             errors.append(f"Publish aggregate usage: {type(error).__name__}: {error}")
+        try:
+            checkpoint()
+        except (OSError, ValueError, RuntimeError):
+            pass
         if errors:
             status = "review_unavailable" if status == "review_unavailable" else "failed"
             reason = "; ".join(dict.fromkeys(filter(None, [reason, *errors])))
@@ -1360,7 +1369,7 @@ async def drive(envelope, deadline, *, client_factory=client_for):
                                               researcher.supervisor.checkpoint_sha256 if researcher.supervisor else None),
                                           "primary_outcome": primary_outcome, "finalization_errors": errors,
                                           "reviews": reviews,
-                                          "sessions": [session.record() for session in sessions]})
+                                          "sessions": [session.record(write_log=False) for session in sessions]})
     return (0 if status == "completed" or status == "checkpointed" and checkpoint_reason == "supervisor_review"
             else 130 if status == "cancelled" else 124 if status == "timed_out" else 1)
 
