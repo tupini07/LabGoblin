@@ -178,11 +178,14 @@ def process_state(handle: dict | None) -> str:
         raise ValueError("A host process handle requires PID and creation time")
     try:
         process = psutil.Process(handle["pid"])
-        return "alive" if (process.create_time() == handle["created"] and process.is_running()
-                           and process.status() not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD)) else "dead"
+        if process.create_time() != handle["created"] or not process.is_running():
+            return "dead"
+        if os.name == "nt":
+            return "alive"
+        return "dead" if process.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD) else "alive"
     except psutil.NoSuchProcess:
         return "dead"
-    except psutil.AccessDenied:
+    except (psutil.AccessDenied, MemoryError):
         return "unknown"
 
 

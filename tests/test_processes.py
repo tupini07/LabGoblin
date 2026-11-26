@@ -58,8 +58,44 @@ def test_unreadable_process_status_is_unknown(monkeypatch):
     def denied(process):
         raise psutil.AccessDenied(process.pid)
 
-    monkeypatch.setattr(psutil.Process, "status", denied)
+    monkeypatch.setattr(psutil.Process, "create_time", denied)
     assert processes.process_state(handle) == "unknown"
+
+
+def test_transient_psutil_memory_error_is_unknown(monkeypatch):
+    import psutil
+    handle = processes.own_handle("fixture")
+
+    def out_of_memory(process):
+        raise MemoryError
+
+    monkeypatch.setattr(psutil.Process, "create_time", out_of_memory)
+    assert processes.process_state(handle) == "unknown"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process status avoids proc_is_suspended")
+def test_windows_process_state_skips_proc_is_suspended_and_detects_exit_with_open_handle(monkeypatch):
+    import psutil
+
+    def forbidden_status(process):
+        raise AssertionError("Windows process_state must not call psutil.Process.status()")
+
+    monkeypatch.setattr(psutil.Process, "status", forbidden_status)
+    assert processes.process_state(processes.own_handle("fixture")) == "alive"
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.15)"],
+                             **processes.background_options())
+    try:
+        handle = {"pid": child.pid, "created": psutil.Process(child.pid).create_time()}
+        assert processes.process_state(handle) == "alive"
+        deadline = time.monotonic() + 10
+        while processes.process_state(handle) != "dead":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        # Child exited and is detected as dead even before parent calls child.wait().
+        assert processes.process_state(handle) == "dead"
+    finally:
+        child.wait(timeout=10)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows console creation flags")

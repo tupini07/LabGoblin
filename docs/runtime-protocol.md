@@ -75,7 +75,10 @@ empty extraction leaves the original research outcome and review hold intact.
    Prior exact receipts and accounting corrections determine the remaining pool.
 3. Native observation validates optional local CPU/RAM limits and selected GPU
    visibility. It does not require idle GPUs, spare RAM, disjoint CPUs or configured
-   machine capacity. Probes and owner-liveness checks stay outside ledger writers.
+   machine capacity. Probes and owner-liveness checks stay outside ledger writers;
+   Windows liveness uses PID, creation time and `is_running()` without system-wide
+   suspension scans, and transient `psutil` `MemoryError` probes degrade to
+   `unknown` rather than death or controller failure.
 4. The controller freezes package helpers and prompt/configuration bytes, then
    arms one exact execution against the grant. Project identity, grant ID,
    resources, CPU set, launcher and allowance must agree.
